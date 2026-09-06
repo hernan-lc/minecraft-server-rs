@@ -1,7 +1,9 @@
+import type { ComponentChildren } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { api } from "./api";
 import { Button, Select } from "./components/ui";
 import * as Icon from "./components/icons";
+import { Tooltip } from "./components/Tooltip";
 import { LANGUAGES, useI18n, type Language } from "./i18n";
 import { BackupsSettings } from "./pages/BackupsSettings";
 import { Dashboard } from "./pages/Dashboard";
@@ -60,20 +62,69 @@ function useRoute(): [Route, (route: Route) => void] {
 /** Switches the active language and remembers the choice. */
 function LanguagePicker() {
   const { language, setLanguage, t } = useI18n();
+  const options = () =>
+    Object.entries(LANGUAGES).map(([code, { label }]) => (
+      <option key={code} value={code}>
+        {label}
+      </option>
+    ));
 
   return (
-    <Select
-      value={language}
-      aria-label={t("nav.language")}
-      onChange={(e) => setLanguage((e.target as HTMLSelectElement).value as Language)}
-      class="!w-auto !py-1.5 !text-xs"
-    >
-      {Object.entries(LANGUAGES).map(([code, { label }]) => (
-        <option key={code} value={code}>
-          {label}
-        </option>
-      ))}
-    </Select>
+    <>
+      <Select
+        value={language}
+        aria-label={t("nav.language")}
+        onChange={(e) => setLanguage((e.target as HTMLSelectElement).value as Language)}
+        class="hidden !w-auto !py-1.5 !text-xs lg:block"
+      >
+        {options()}
+      </Select>
+
+      <Tooltip label={t("nav.language")}>
+        <span class="group relative hidden size-9 items-center justify-center rounded-lg text-fg-muted transition-colors hover:bg-ink-700 hover:text-fg focus-within:bg-ink-700 focus-within:text-fg lg:hidden">
+          <Icon.Globe size={16} />
+          <select
+            value={language}
+            aria-label={t("nav.language")}
+            title={t("nav.language")}
+            onChange={(e) => setLanguage((e.target as HTMLSelectElement).value as Language)}
+            class="absolute inset-0 h-full w-full cursor-pointer appearance-none opacity-0 focus:outline-none"
+          >
+            {options()}
+          </select>
+        </span>
+      </Tooltip>
+    </>
+  );
+}
+
+function HeaderNavButton({
+  icon,
+  label,
+  active,
+  onClick,
+}: {
+  icon: ComponentChildren;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Tooltip label={label} align="start">
+      <button
+        type="button"
+        title={label}
+        aria-label={label}
+        aria-current={active ? "page" : undefined}
+        onClick={onClick}
+        class={`inline-flex size-9 items-center justify-center rounded-lg text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 lg:h-9 lg:w-auto lg:justify-start lg:gap-2 lg:px-3 ${
+          active ? "bg-accent/15 text-accent" : "text-fg-muted hover:bg-ink-700 hover:text-fg"
+        }`}
+      >
+        <span class="shrink-0">{icon}</span>
+        <span class="hidden whitespace-nowrap lg:inline">{label}</span>
+      </button>
+    </Tooltip>
   );
 }
 
@@ -138,74 +189,83 @@ export function App() {
 
   return (
     <div class="flex h-full flex-col">
-      <nav class="flex flex-wrap items-center justify-between gap-x-5 gap-y-2 border-b border-ink-700 bg-ink-850 px-4 py-3 sm:px-6">
-        <div class="flex items-center gap-5">
-          <button
-            class="flex items-center gap-2.5"
-            onClick={() => navigate({ page: "dashboard" })}
-          >
-            <span class="grid size-7 place-items-center rounded-md bg-accent text-sm font-bold text-ink-950">
-              M
-            </span>
-            <span class="whitespace-nowrap text-sm font-semibold">{t("nav.title")}</span>
-          </button>
+      <nav class="border-b border-ink-700 bg-ink-850 px-3 py-2.5 sm:px-6">
+        <div class="mx-auto flex min-h-9 w-full max-w-7xl items-center justify-between gap-2">
+          <div class="flex min-w-0 items-center gap-1.5 sm:gap-3">
+            <Tooltip label={t("nav.title")} align="start">
+              <button
+                type="button"
+                title={t("nav.title")}
+                aria-label={t("nav.title")}
+                class="inline-flex h-9 shrink-0 items-center gap-2 rounded-lg text-sm font-semibold focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+                onClick={() => navigate({ page: "dashboard" })}
+              >
+                <span class="grid size-7 place-items-center rounded-md bg-accent text-sm font-bold text-ink-950">
+                  M
+                </span>
+                <span class="hidden whitespace-nowrap lg:inline">{t("nav.title")}</span>
+              </button>
+            </Tooltip>
 
-          {user.admin && (
-            <>
-              <button
-                class={`text-sm transition-colors ${
-                  route.page === "users" ? "text-fg" : "text-fg-muted hover:text-fg"
-                }`}
-                onClick={() => navigate({ page: "users" })}
-              >
-                <span class="inline-flex items-center gap-1.5">
-                  <Icon.Users size={15} />
-                  {t("nav.accounts")}
-                </span>
-              </button>
-              <button
-                class={`text-sm transition-colors ${
-                  route.page === "playit" ? "text-fg" : "text-fg-muted hover:text-fg"
-                }`}
-                onClick={() => navigate({ page: "playit" })}
-              >
-                <span class="inline-flex items-center gap-1.5">
-                  <Icon.Globe size={15} />
-                  {t("nav.playit")}
-                </span>
-              </button>
-              <button
-                class={`text-sm transition-colors ${
-                  route.page === "backups" ? "text-fg" : "text-fg-muted hover:text-fg"
-                }`}
-                onClick={() => navigate({ page: "backups" })}
-              >
-                <span class="inline-flex items-center gap-1.5">
-                  <Icon.Archive size={15} />
-                  {t("nav.backups")}
-                </span>
-              </button>
-            </>
-          )}
-        </div>
+            {user.admin && (
+              <div class="flex items-center gap-0.5 rounded-xl border border-ink-700 bg-ink-900/50 p-1">
+                <HeaderNavButton
+                  icon={<Icon.Users size={16} />}
+                  label={t("nav.accounts")}
+                  active={route.page === "users"}
+                  onClick={() => navigate({ page: "users" })}
+                />
+                <HeaderNavButton
+                  icon={<Icon.Globe size={16} />}
+                  label={t("nav.playit")}
+                  active={route.page === "playit"}
+                  onClick={() => navigate({ page: "playit" })}
+                />
+                <HeaderNavButton
+                  icon={<Icon.Archive size={16} />}
+                  label={t("nav.backups")}
+                  active={route.page === "backups"}
+                  onClick={() => navigate({ page: "backups" })}
+                />
+              </div>
+            )}
+          </div>
 
-        <div class="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
-          <span class="whitespace-nowrap text-fg-muted">
-            {user.username}
-            {user.admin && <span class="ml-1.5 text-xs text-accent">{t("nav.admin")}</span>}
-          </span>
-          <LanguagePicker />
-          <Button
-            variant="ghost"
-            icon={<Icon.LogOut size={15} />}
-            onClick={async () => {
-              await api.logout();
-              setUser(null);
-              navigate({ page: "dashboard" });
-            }}
-          >
-            {t("nav.signOut")}
-          </Button>
+          <div class="flex shrink-0 items-center gap-1.5 text-sm">
+            <Tooltip label={user.admin ? `${user.username} · ${t("nav.admin")}` : user.username}>
+              <span
+                tabIndex={0}
+                aria-label={user.admin ? `${user.username} · ${t("nav.admin")}` : user.username}
+                class="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg px-2 text-fg-muted outline-none transition-colors hover:bg-ink-700 hover:text-fg focus-visible:ring-2 focus-visible:ring-accent/60"
+              >
+                <Icon.User size={16} />
+                <span class="hidden whitespace-nowrap lg:inline">
+                  {user.username}
+                  {user.admin && <span class="ml-1.5 text-xs text-accent">{t("nav.admin")}</span>}
+                </span>
+              </span>
+            </Tooltip>
+
+            <LanguagePicker />
+
+            <Tooltip label={t("nav.signOut")}>
+              <Button
+                type="button"
+                variant="ghost"
+                aria-label={t("nav.signOut")}
+                title={t("nav.signOut")}
+                icon={<Icon.LogOut size={16} />}
+                class="h-9 w-9 px-0 lg:w-auto lg:px-4"
+                onClick={async () => {
+                  await api.logout();
+                  setUser(null);
+                  navigate({ page: "dashboard" });
+                }}
+              >
+                <span class="hidden lg:inline">{t("nav.signOut")}</span>
+              </Button>
+            </Tooltip>
+          </div>
         </div>
       </nav>
 

@@ -300,6 +300,15 @@ export const Users = (p: IconProps) => (
   </Icon>
 );
 
+export const User = (p: IconProps) => (
+  <Icon {...p}>
+    <>
+      <circle cx="12" cy="8" r="3.5" />
+      <path d="M4.5 21a7.5 7.5 0 0 1 15 0" />
+    </>
+  </Icon>
+);
+
 export const LogOut = (p: IconProps) => (
   <Icon {...p}>
     <>
