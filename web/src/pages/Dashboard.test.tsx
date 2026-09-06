@@ -1,0 +1,42 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
+import { describe, expect, it, vi } from "vitest";
+import { Dashboard } from "./Dashboard";
+import { I18nProvider } from "../i18n";
+import { ToastProvider } from "../components/Toast";
+
+const apiMock = vi.hoisted(() => ({
+  servers: vi.fn().mockResolvedValue([]),
+  system: vi.fn().mockResolvedValue({
+    cpu_percent: 1,
+    memory_used_mb: 1,
+    memory_total_mb: 2,
+    servers_online: 0,
+  }),
+  power: vi.fn(),
+  providers: vi.fn().mockResolvedValue([{ id: "paper", server: true }]),
+  versions: vi.fn().mockResolvedValue(["1.21.8"]),
+  createServer: vi.fn().mockResolvedValue({}),
+}));
+
+vi.mock("../api", () => ({ api: apiMock }));
+
+describe("Dashboard create server form", () => {
+  it("sends exactly one create request for one submit button click", async () => {
+    render(
+      <I18nProvider>
+        <ToastProvider>
+          <Dashboard user={{ username: "admin", admin: true }} onOpen={vi.fn()} />
+        </ToastProvider>
+      </I18nProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "New server" }));
+    await waitFor(() => expect(apiMock.versions).toHaveBeenCalled());
+    const submit = await screen.findByRole("button", { name: "Create server" });
+    await waitFor(() => expect(submit).not.toBeDisabled());
+
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(apiMock.createServer).toHaveBeenCalledTimes(1));
+  });
+});

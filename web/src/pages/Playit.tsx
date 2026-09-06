@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { api } from "../api";
 import {
   Actions,
@@ -38,49 +38,76 @@ export function Playit() {
   const [tunnelError, setTunnelError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const refreshGeneration = useRef(0);
+  const refreshInFlight = useRef<Promise<void> | null>(null);
 
   async function refresh() {
+    const generation = ++refreshGeneration.current;
+    const previous = refreshInFlight.current;
+    if (previous) {
+      await previous;
+      // A newer caller owns the next refresh. This call must not start an
+      // extra request or commit anything after it has become stale.
+      if (generation !== refreshGeneration.current) return;
+    }
+
     setLoading(true);
-    const results = await Promise.allSettled([
-      api.playitStatus(),
-      api.playitAccount(),
-      api.playitTunnels(),
-      api.servers(),
-    ]);
+    const operation = (async () => {
+      const results = await Promise.allSettled([
+        api.playitStatus(),
+        api.playitAccount(),
+        api.playitTunnels(),
+        api.servers(),
+      ]);
 
-    const [statusResult, accountResult, tunnelResult, serverResult] = results;
+      if (generation !== refreshGeneration.current) return;
 
-    if (statusResult.status === "fulfilled") {
-      setStatus(statusResult.value);
-      setFailed(null);
-    } else {
-      setFailed(errorText(statusResult.reason, t("errors.loadPlayit")));
+      const [statusResult, accountResult, tunnelResult, serverResult] = results;
+
+      if (statusResult.status === "fulfilled") {
+        setStatus(statusResult.value);
+        setFailed(null);
+        if (statusResult.value.status === "connected") setClaimUrl(null);
+      } else {
+        setFailed(errorText(statusResult.reason, t("errors.loadPlayit")));
+      }
+
+      if (accountResult.status === "fulfilled") {
+        setAccount(accountResult.value);
+        setAccountError(null);
+        if (accountResult.value.status === "verified") setClaimUrl(null);
+      } else {
+        setAccountError(errorText(accountResult.reason, t("errors.loadPlayitAccount")));
+      }
+
+      if (tunnelResult.status === "fulfilled") {
+        setTunnels(tunnelResult.value);
+        setTunnelError(null);
+      } else {
+        setTunnelError(errorText(tunnelResult.reason, t("errors.loadPlayitTunnels")));
+      }
+
+      if (serverResult.status === "fulfilled") setServers(serverResult.value);
+      else setFailed(errorText(serverResult.reason, t("errors.loadServers")));
+    })();
+    refreshInFlight.current = operation;
+    try {
+      await operation;
+    } finally {
+      if (refreshInFlight.current === operation) {
+        refreshInFlight.current = null;
+        if (generation === refreshGeneration.current) setLoading(false);
+      }
     }
-
-    if (accountResult.status === "fulfilled") {
-      setAccount(accountResult.value);
-      setAccountError(null);
-    } else {
-      setAccountError(errorText(accountResult.reason, t("errors.loadPlayitAccount")));
-    }
-
-    if (tunnelResult.status === "fulfilled") {
-      setTunnels(tunnelResult.value);
-      setTunnelError(null);
-    } else {
-      setTunnelError(errorText(tunnelResult.reason, t("errors.loadPlayitTunnels")));
-    }
-
-    if (serverResult.status === "fulfilled") setServers(serverResult.value);
-    else setFailed(errorText(serverResult.reason, t("errors.loadServers")));
-
-    setLoading(false);
   }
 
   useEffect(() => {
     void refresh();
     const timer = setInterval(refresh, 5000);
-    return () => clearInterval(timer);
+    return () => {
+      refreshGeneration.current += 1;
+      clearInterval(timer);
+    };
   }, []);
 
   async function claim() {
@@ -125,9 +152,12 @@ export function Playit() {
 
     setBusy(true);
     try {
-      if (server) await api.detachPlayit(server.id);
-      else await api.deletePlayitTunnel(tunnel.id);
-      toast.success(t("playit.tunnelDeleted"));
+      const result = server
+        ? await api.detachPlayit(server.id)
+        : await api.deletePlayitTunnel(tunnel.id);
+      const cleanupPending = "cleanup_pending" in result && result.cleanup_pending;
+      if (cleanupPending) toast.info(t("playit.tunnelCleanupPending"));
+      else toast.success(t("playit.tunnelDeleted"));
       await refresh();
     } catch (e) {
       toast.error(errorText(e, t("errors.playitAction")));
@@ -151,7 +181,8 @@ export function Playit() {
 
   const availableServers = servers.filter((server) => !server.playit);
   const loginUrl = safeExternalUrl(account?.login_link);
-  const activeClaimUrl = claimUrl ?? account?.claim_url;
+  const claimingComplete = status?.status === "connected" || account?.status === "verified";
+  const activeClaimUrl = claimingComplete ? null : claimUrl ?? account?.claim_url;
   const safeClaimUrl = safeExternalUrl(activeClaimUrl);
 
   return (

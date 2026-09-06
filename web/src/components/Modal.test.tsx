@@ -24,6 +24,30 @@ function Harness({ onAnswer }: { onAnswer: (value: unknown) => void }) {
       >
         rename
       </button>
+      <button
+        onClick={() => {
+          void dialogs.confirm({ title: "First question" }).then((answer) =>
+            onAnswer(["first", answer]),
+          );
+          void dialogs.confirm({ title: "Second question" }).then((answer) =>
+            onAnswer(["second", answer]),
+          );
+        }}
+      >
+        queue confirms
+      </button>
+      <button
+        onClick={() => {
+          void dialogs.confirm({ title: "Confirm first" }).then((answer) =>
+            onAnswer(["confirm", answer]),
+          );
+          void dialogs.prompt({ title: "Prompt second", label: "Value" }).then((answer) =>
+            onAnswer(["prompt", answer]),
+          );
+        }}
+      >
+        queue mixed
+      </button>
     </>
   );
 }
@@ -66,6 +90,54 @@ describe("confirm", () => {
     fireEvent.keyDown(document, { key: "Escape" });
 
     await waitFor(() => expect(onAnswer).toHaveBeenCalledWith(false));
+  });
+
+  it("queues concurrent confirms and settles both callers", async () => {
+    const onAnswer = setup();
+    fireEvent.click(screen.getByText("queue confirms"));
+
+    expect(screen.getByRole("dialog", { name: "First question" })).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Confirm"));
+
+    await waitFor(() =>
+      expect(screen.getByRole("dialog", { name: "Second question" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByText("Cancel"));
+
+    await waitFor(() => {
+      expect(onAnswer).toHaveBeenCalledWith(["first", true]);
+      expect(onAnswer).toHaveBeenCalledWith(["second", false]);
+    });
+  });
+
+  it("queues a prompt behind a confirm and settles both callers", async () => {
+    const onAnswer = setup();
+    fireEvent.click(screen.getByText("queue mixed"));
+    fireEvent.click(screen.getByText("Confirm"));
+
+    await waitFor(() =>
+      expect(screen.getByRole("dialog", { name: "Prompt second" })).toBeInTheDocument(),
+    );
+    fireEvent.input(screen.getByRole("textbox"), { target: { value: "answer" } });
+    fireEvent.click(screen.getByText("Confirm"));
+
+    await waitFor(() => {
+      expect(onAnswer).toHaveBeenCalledWith(["confirm", true]);
+      expect(onAnswer).toHaveBeenCalledWith(["prompt", "answer"]);
+    });
+  });
+
+  it("shows the next queued dialog after the first is dismissed", async () => {
+    const onAnswer = setup();
+    fireEvent.click(screen.getByText("queue confirms"));
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    await waitFor(() =>
+      expect(screen.getByRole("dialog", { name: "Second question" })).toBeInTheDocument(),
+    );
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(2));
   });
 });
 
@@ -165,5 +237,90 @@ describe("Modal component", () => {
     unmount();
     expect(document.body.style.overflow).toBe("");
   });
-});
 
+  it("does not refocus after a rerender or a new onClose identity", () => {
+    const firstClose = vi.fn();
+    const { rerender } = render(
+      <I18nProvider>
+        <Modal title="Stable focus" onClose={firstClose}>
+          <input aria-label="First field" />
+          <input aria-label="Second field" />
+        </Modal>
+      </I18nProvider>,
+    );
+
+    const second = screen.getByRole("textbox", { name: "Second field" });
+    second.focus();
+    const secondClose = vi.fn();
+    rerender(
+      <I18nProvider>
+        <Modal title="Stable focus" onClose={secondClose}>
+          <input aria-label="First field" />
+          <input aria-label="Second field" />
+        </Modal>
+      </I18nProvider>,
+    );
+
+    expect(document.activeElement).toBe(second);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(secondClose).toHaveBeenCalledTimes(1);
+    expect(firstClose).not.toHaveBeenCalled();
+  });
+
+  it("traps Tab and Shift+Tab inside the dialog", () => {
+    render(
+      <I18nProvider>
+        <Modal title="Focus trap" onClose={vi.fn()}>
+          <input aria-label="Dialog field" />
+          <button type="button">Last action</button>
+        </Modal>
+      </I18nProvider>,
+    );
+
+    const close = screen.getByRole("button", { name: "Close" });
+    const last = screen.getByRole("button", { name: "Last action" });
+
+    last.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(close);
+
+    close.focus();
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(last);
+  });
+
+  it("restores focus to the opener when it closes", () => {
+    const opener = document.createElement("button");
+    opener.textContent = "Open";
+    document.body.append(opener);
+    opener.focus();
+
+    const { unmount } = render(
+      <I18nProvider>
+        <Modal title="Restoring focus" onClose={vi.fn()}>
+          <input aria-label="Dialog field" />
+        </Modal>
+      </I18nProvider>,
+    );
+
+    expect(document.activeElement).not.toBe(opener);
+    unmount();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+
+  it("keeps focus inside a dialog with no content controls", () => {
+    render(
+      <I18nProvider>
+        <Modal title="Empty dialog" onClose={vi.fn()}>
+          <p>Nothing actionable</p>
+        </Modal>
+      </I18nProvider>,
+    );
+
+    const close = screen.getByRole("button", { name: "Close" });
+    expect(document.activeElement).toBe(close);
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(close);
+  });
+});

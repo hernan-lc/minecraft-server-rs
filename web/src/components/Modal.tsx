@@ -28,33 +28,107 @@ export function Modal({
 }) {
   const t = useT();
   const panel = useRef<HTMLDivElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  const openerRef = useRef<HTMLElement | null>(null);
+
+  // Keep Escape wired to the current callback without making the open/close
+  // lifecycle effect rerun when a parent creates a new function identity.
+  onCloseRef.current = onClose;
 
   useEffect(() => {
+    const focusInside = (preferred: "first" | "last" = "first") => {
+      const currentPanel = panel.current;
+      if (!currentPanel) return;
+      const focusable = getFocusableElements(currentPanel);
+      const target = preferred === "last"
+        ? focusable[focusable.length - 1]
+        : focusable[0];
+      (target ?? currentPanel).focus();
+    };
+
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      const currentPanel = panel.current;
+      if (!currentPanel) return;
+
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+
+      if (event.key !== "Tab") return;
+
+      const focusable = getFocusableElements(currentPanel);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        currentPanel.focus();
+        return;
+      }
+
+      const active = document.activeElement;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const activeIndex = active instanceof HTMLElement ? focusable.indexOf(active) : -1;
+
+      // A script, browser extension, or assistive technology can move focus
+      // outside the dialog without producing a Tab event inside it. Pull it
+      // back into the trap before allowing the traversal to continue.
+      if (!currentPanel.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && (activeIndex <= 0 || activeIndex === -1)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (activeIndex === focusable.length - 1 || activeIndex === -1)) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      const currentPanel = panel.current;
+      if (!currentPanel || !(event.target instanceof Node) || currentPanel.contains(event.target)) {
+        return;
+      }
+      // Keep programmatic focus changes and browser/assistive-technology focus
+      // moves inside the active dialog as well as keyboard traversal.
+      focusInside();
     };
     document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("focusin", onFocusIn);
+
+    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
     // Moving focus in makes the dialog reachable by keyboard immediately, prioritizing
     // editable inputs first, then actions.
-    const formControl = panel.current?.querySelector<HTMLElement>(
-      "input:not([type=hidden]):not([disabled]), textarea:not([disabled]), select:not([disabled])",
-    );
-    const focusable =
-      formControl ??
-      panel.current?.querySelector<HTMLElement>(
-        "footer button:not([disabled]), button:not([disabled])",
-      );
-    focusable?.focus();
+    const focusable = panel.current && getFocusableElements(panel.current);
+    const formControl =
+      panel.current &&
+      Array.from(
+        panel.current.querySelectorAll<HTMLElement>(
+          "input:not([type='hidden']), textarea, select",
+        ),
+      ).find(canFocus);
+    (formControl ?? focusable?.[0] ?? panel.current)?.focus();
 
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
 
     return () => {
       document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("focusin", onFocusIn);
       document.body.style.overflow = previousOverflow;
+
+      const opener = openerRef.current;
+      if (opener && document.contains(opener) && canReceiveFocus(opener)) {
+        try {
+          opener.focus();
+        } catch {
+          // A detached or browser-managed element can reject focus even after
+          // the connectivity checks above. Closing the dialog must still win.
+        }
+      }
     };
-  }, [onClose]);
+  }, []);
 
   if (typeof document === "undefined") return null;
 
@@ -76,6 +150,7 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-label={title}
+        tabIndex={-1}
         class={`my-auto flex w-full max-h-[calc(100vh-2rem)] sm:max-h-[calc(100vh-3.5rem)] flex-col ${widths[width]} overflow-hidden rounded-2xl border border-ink-700 bg-ink-850 shadow-2xl animate-[fade-in_150ms_ease-out]`}
         // Without this a click inside the panel bubbles to the backdrop and closes it.
         onClick={(event) => event.stopPropagation()}
@@ -106,6 +181,34 @@ export function Modal({
   return createPortal(modal, document.body);
 }
 
+const FOCUSABLE_SELECTOR = [
+  "button",
+  "input",
+  "select",
+  "textarea",
+  "a[href]",
+  "[tabindex]",
+].join(",");
+
+function getFocusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(canFocus);
+}
+
+function canFocus(element: HTMLElement): boolean {
+  if (element.matches("[disabled], [hidden], [aria-hidden='true']")) return false;
+  if (element.closest("[aria-hidden='true']")) return false;
+  if (element instanceof HTMLInputElement && element.type === "hidden") return false;
+  if (element.tabIndex < 0) return false;
+  return true;
+}
+
+function canReceiveFocus(element: HTMLElement): boolean {
+  if (element.matches("[disabled], [hidden], [aria-hidden='true']")) return false;
+  if (element.closest("[aria-hidden='true']")) return false;
+  if (element instanceof HTMLInputElement && element.type === "hidden") return false;
+  return true;
+}
+
 /** What a caller asks the dialog host to show. */
 type ConfirmRequest = {
   kind: "confirm";
@@ -130,6 +233,8 @@ type Request = (ConfirmRequest | PromptRequest) & {
   resolve: (value: string | boolean | null) => void;
 };
 
+type QueuedRequest = Request & { id: number };
+
 interface Dialogs {
   /** Resolves true when accepted, false when dismissed. */
   confirm: (request: Omit<ConfirmRequest, "kind">) => Promise<boolean>;
@@ -141,13 +246,26 @@ const DialogContext = createContext<Dialogs | null>(null);
 
 /** Hosts one dialog at a time and hands out promise-based openers. */
 export function DialogProvider({ children }: { children: ComponentChildren }) {
-  const [request, setRequest] = useState<Request | null>(null);
+  const [request, setRequest] = useState<QueuedRequest | null>(null);
+  const activeRequest = useRef<QueuedRequest | null>(null);
+  const pendingRequests = useRef<QueuedRequest[]>([]);
+  const nextRequestId = useRef(0);
+
+  const enqueue = useCallback((next: Request) => {
+    const queued = { ...next, id: ++nextRequestId.current };
+    if (activeRequest.current) {
+      pendingRequests.current.push(queued);
+      return;
+    }
+    activeRequest.current = queued;
+    setRequest(queued);
+  }, []);
 
   const value = useMemo<Dialogs>(
     () => ({
       confirm: (options) =>
         new Promise<boolean>((resolve) =>
-          setRequest({
+          enqueue({
             ...options,
             kind: "confirm",
             resolve: (value) => resolve(value === true),
@@ -155,29 +273,51 @@ export function DialogProvider({ children }: { children: ComponentChildren }) {
         ),
       prompt: (options) =>
         new Promise<string | null>((resolve) =>
-          setRequest({
+          enqueue({
             ...options,
             kind: "prompt",
             resolve: (value) => resolve(typeof value === "string" ? value : null),
           }),
         ),
     }),
-    [],
+    [enqueue],
   );
 
   const settle = useCallback(
-    (value: string | boolean | null) => {
-      request?.resolve(value);
-      setRequest(null);
+    (id: number, value: string | boolean | null) => {
+      const current = activeRequest.current;
+      // A stale callback from a dialog that has already been replaced must
+      // never settle the next request in the queue. This also makes an
+      // accidental double click on a dialog action harmless.
+      if (!current || current.id !== id) return;
+
+      current.resolve(value);
+      const next = pendingRequests.current.shift() ?? null;
+      activeRequest.current = next;
+      setRequest(next);
     },
-    [request],
+    [],
+  );
+
+  useEffect(
+    () => () => {
+      activeRequest.current?.resolve(null);
+      for (const pending of pendingRequests.current) pending.resolve(null);
+      activeRequest.current = null;
+      pendingRequests.current = [];
+    },
+    [],
   );
 
   return (
     <DialogContext.Provider value={value}>
       {children}
-      {request?.kind === "confirm" && <ConfirmDialog request={request} settle={settle} />}
-      {request?.kind === "prompt" && <PromptDialog request={request} settle={settle} />}
+      {request?.kind === "confirm" && (
+        <ConfirmDialog key={request.id} request={request} settle={(value) => settle(request.id, value)} />
+      )}
+      {request?.kind === "prompt" && (
+        <PromptDialog key={request.id} request={request} settle={(value) => settle(request.id, value)} />
+      )}
     </DialogContext.Provider>
   );
 }

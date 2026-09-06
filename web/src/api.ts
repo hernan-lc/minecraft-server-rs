@@ -123,7 +123,7 @@ export const api = {
   }),
 
   deletePlayitTunnel: (tunnelId: string) =>
-    request<{ ok: boolean }>(`/playit/tunnels/${encodeURIComponent(tunnelId)}`, {
+    request<{ ok: boolean; cleanup_pending: boolean }>(`/playit/tunnels/${encodeURIComponent(tunnelId)}`, {
       method: "DELETE",
     }),
 
@@ -141,6 +141,12 @@ export const api = {
 
   detachPlayit: (id: string) =>
     request<ServerPlayitView>(`/servers/${id}/playit`, { method: "DELETE" }),
+
+  reconcilePlayit: (id: string) =>
+    request<ServerPlayitView>(`/servers/${id}/playit/reconcile`, { method: "POST" }),
+
+  forgetPlayit: (id: string) =>
+    request<ServerPlayitView>(`/servers/${id}/playit/forget`, { method: "POST" }),
 
   createServer: (body: Record<string, unknown>) =>
     request<Server>("/servers", { method: "POST", body: json(body) }),

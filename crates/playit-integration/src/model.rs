@@ -110,7 +110,7 @@ pub struct PlayitTunnel {
 }
 
 /// The immediate result of creating a tunnel.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TunnelCreateInfo {
     /// Stable Playit tunnel identifier.
     pub tunnel_id: String,

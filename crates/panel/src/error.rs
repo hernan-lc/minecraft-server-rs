@@ -89,6 +89,11 @@ impl IntoResponse for ApiError {
             ApiError::Playit(_) if status.is_server_error() => {
                 "external service unavailable".into()
             }
+            // Conflict messages describe an account/tunnel ambiguity that
+            // the operator must resolve; hiding them behind a generic 409
+            // makes recovery impossible. They contain no credentials because
+            // the integration only constructs them from public tunnel data.
+            ApiError::Playit(PlayitError::Conflict(_)) => self.to_string(),
             ApiError::Playit(_) => "external service request failed".into(),
             _ => self.to_string(),
         };
@@ -100,6 +105,9 @@ impl IntoResponse for ApiError {
 pub type ApiResult<T> = Result<T, ApiError>;
 
 fn playit_status(error: &PlayitError) -> StatusCode {
+    if matches!(error, PlayitError::Conflict(_)) {
+        return StatusCode::CONFLICT;
+    }
     match error.service_code() {
         Some(ServiceErrorCode::InvalidTunnelRequest)
         | Some(ServiceErrorCode::InvalidRequest)

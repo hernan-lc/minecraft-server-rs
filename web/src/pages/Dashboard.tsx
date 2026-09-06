@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { api } from "../api";
 import { Modal } from "../components/Modal";
 import { Button, Card, Field, Input, Select, StatCard, StatusPill, formatUptime } from "../components/ui";
@@ -207,6 +207,7 @@ function CreateServer({
     eula_accepted: false,
   });
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
 
   useEffect(() => {
     api.providers().then(setProviders).catch(() => {});
@@ -225,7 +226,8 @@ function CreateServer({
 
   async function submit(event?: Event) {
     event?.preventDefault();
-    if (busy || !form.version) return;
+    if (busyRef.current || busy || !form.version) return;
+    busyRef.current = true;
     setBusy(true);
     try {
       await api.createServer({
@@ -241,6 +243,7 @@ function CreateServer({
     } catch (e) {
       toast.error(e instanceof Error ? e.message : t("errors.generic"));
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   }
@@ -262,7 +265,6 @@ function CreateServer({
             form="create-server-form"
             variant="primary"
             disabled={busy || !form.version}
-            onClick={submit}
           >
             {busy ? t("common.creating") : t("createServer.submit")}
           </Button>

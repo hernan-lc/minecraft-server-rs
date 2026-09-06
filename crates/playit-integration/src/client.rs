@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use playit_ipc::ipc::IpcClient;
 use playit_ipc::model::{
     AccountResponse, AccountTunnelListResponse, AgentLifecycle, ClaimResponse, CommandResponse,
-    ServiceStatus, TunnelCreateResponse, TunnelListResponse, TunnelProtocol,
+    ServiceStatus, SubscribeResponse, TunnelCreateResponse, TunnelListResponse, TunnelProtocol,
 };
 
 use crate::error::PlayitError;
@@ -20,6 +20,20 @@ pub trait PlayitService: Send + Sync {
     async fn status(&self) -> Result<ServiceStatus, PlayitError>;
     /// Read the Playit lifecycle state.
     async fn lifecycle(&self) -> Result<AgentLifecycle, PlayitError>;
+    /// Read status, lifecycle, and statistics from one logical subscription
+    /// snapshot. The default keeps alternate test backends source-compatible.
+    async fn snapshot(&self) -> Result<SubscribeResponse, PlayitError> {
+        let status = self.status().await?;
+        let lifecycle = self.lifecycle().await?;
+        Ok(SubscribeResponse {
+            protocol: status.protocol.clone(),
+            snapshot: playit_ipc::model::SubscriptionSnapshot {
+                status,
+                lifecycle,
+                ..Default::default()
+            },
+        })
+    }
     /// Read the configured account summary.
     async fn account(&self) -> Result<AccountResponse, PlayitError>;
     /// Start the browser-based claim flow.
@@ -69,6 +83,11 @@ impl PlayitService for IpcPlayitService {
     async fn lifecycle(&self) -> Result<AgentLifecycle, PlayitError> {
         let mut client = IpcClient::connect().await?;
         Ok(client.lifecycle().await?)
+    }
+
+    async fn snapshot(&self) -> Result<SubscribeResponse, PlayitError> {
+        let mut client = IpcClient::connect().await?;
+        Ok(client.subscribe().await?)
     }
 
     async fn account(&self) -> Result<AccountResponse, PlayitError> {

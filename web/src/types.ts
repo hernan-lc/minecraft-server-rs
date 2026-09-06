@@ -70,14 +70,21 @@ export interface PlayitBinding {
   protocol: PlayitProtocol;
   local_address: string;
   local_port: number;
+  agent_id: string | null;
+  created_at: number | null;
 }
 
 export type ServerPlayitState =
   | "disabled"
   | "provisioning"
   | "connected"
+  | "reconnecting"
   | "disabled_by_playit"
   | "drifted"
+  | "missing"
+  | "account_mismatch"
+  | "agent_mismatch"
+  | "ambiguous"
   | "unavailable";
 
 export interface ServerPlayitView {
@@ -85,6 +92,7 @@ export interface ServerPlayitView {
   binding: PlayitBinding | null;
   tunnel: PlayitTunnel | null;
   message: string | null;
+  cleanup_pending: boolean;
 }
 
 /** Mirrors the flattened `ServerView` returned by the API. */

@@ -659,7 +659,7 @@ function Settings({
   );
 }
 
-function PlayitSettings({
+export function PlayitSettings({
   server,
   playit,
   user,
@@ -699,8 +699,55 @@ function PlayitSettings({
 
     setBusy(true);
     try {
-      await api.detachPlayit(server.id);
-      toast.success(t("playit.tunnelDeleted"));
+      const result = await api.detachPlayit(server.id);
+      if (result.cleanup_pending) toast.info(t("playit.tunnelCleanupPending"));
+      else toast.success(t("playit.tunnelDeleted"));
+      onChanged();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : t("errors.playitAction"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reconcile() {
+    setBusy(true);
+    try {
+      await api.reconcilePlayit(server.id);
+      toast.success(t("playit.serverReconciled"));
+      onChanged();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : t("errors.playitAction"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function repair() {
+    setBusy(true);
+    try {
+      await api.attachPlayit(server.id);
+      toast.success(t("playit.tunnelCreated"));
+      onChanged();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : t("errors.playitAction"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function forget() {
+    const confirmed = await dialogs.confirm({
+      title: t("playit.forgetServer"),
+      body: t("playit.forgetServerBody"),
+      confirmLabel: t("playit.forgetServer"),
+    });
+    if (!confirmed) return;
+
+    setBusy(true);
+    try {
+      await api.forgetPlayit(server.id);
+      toast.success(t("playit.serverAssociationForgotten"));
       onChanged();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : t("errors.playitAction"));
@@ -723,7 +770,20 @@ function PlayitSettings({
     }
   }
 
-  const stateKind = ["unavailable", "drifted", "disabled_by_playit"].includes(playit.state)
+  const recoveryStates = [
+    "missing",
+    "drifted",
+    "unavailable",
+    "account_mismatch",
+    "agent_mismatch",
+    "ambiguous",
+    "disabled_by_playit",
+    "reconnecting",
+  ];
+  const repairStates = ["missing", "drifted", "agent_mismatch"];
+  const cleanupPending = playit.cleanup_pending;
+  const needsReconcile = cleanupPending || recoveryStates.includes(playit.state);
+  const stateKind = recoveryStates.includes(playit.state)
     ? "error"
     : "info";
 
@@ -759,14 +819,29 @@ function PlayitSettings({
 
       {user.admin && (
         <div class="mt-4 flex flex-wrap gap-2">
-          {playit.state === "disabled" && (
+          {playit.state === "disabled" && !cleanupPending && (
             <Button variant="primary" disabled={busy} onClick={() => void attach()}>
               {busy ? t("common.creating") : t("playit.connectServer")}
+            </Button>
+          )}
+          {needsReconcile && (
+            <Button variant="ghost" disabled={busy} onClick={() => void reconcile()}>
+              {t("playit.reconcileServer")}
+            </Button>
+          )}
+          {repairStates.includes(playit.state) && (
+            <Button variant="primary" disabled={busy} onClick={() => void repair()}>
+              {busy ? t("common.creating") : t("playit.repairServer")}
             </Button>
           )}
           {playit.state !== "disabled" && (
             <Button variant="danger" disabled={busy} onClick={() => void detach()}>
               {busy ? t("common.deleting") : t("playit.disconnectServer")}
+            </Button>
+          )}
+          {(recoveryStates.includes(playit.state) || cleanupPending) && (
+            <Button variant="subtle" disabled={busy} onClick={() => void forget()}>
+              {t("playit.forgetServer")}
             </Button>
           )}
         </div>

@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use playit_ipc::model::{
     AccountResponse, AccountTunnelListResponse, AgentLifecycle, ClaimResponse, CommandResponse,
-    ServiceStatus, TunnelCreateResponse, TunnelListResponse, TunnelProtocol,
+    ServiceStatus, SubscribeResponse, TunnelCreateResponse, TunnelListResponse, TunnelProtocol,
 };
 use playit_runtime::PlayitHandle;
 
@@ -35,6 +35,10 @@ impl PlayitService for EmbeddedPlayitService {
 
     async fn lifecycle(&self) -> Result<AgentLifecycle, PlayitError> {
         Ok(self.handle.lifecycle().await)
+    }
+
+    async fn snapshot(&self) -> Result<SubscribeResponse, PlayitError> {
+        Ok(self.handle.subscription_snapshot().await)
     }
 
     async fn account(&self) -> Result<AccountResponse, PlayitError> {

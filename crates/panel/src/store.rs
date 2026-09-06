@@ -9,6 +9,7 @@ use guardian::ScopedFs;
 use playit_integration::PlayitProtocol;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
 /// A panel account.
@@ -41,6 +42,28 @@ pub struct PlayitBinding {
     pub local_address: String,
     /// Local port exposed through the tunnel.
     pub local_port: u16,
+    /// Public Playit agent identity observed when this association was made.
+    /// This is deliberately not a secret and lets account changes be detected
+    /// without persisting credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Unix timestamp at which the association was created or replaced.
+    /// Older panel state has no timestamp and is therefore treated as stale
+    /// rather than as permanently provisioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u64>,
+}
+
+/// A remote tunnel whose deletion is part of the panel's desired state but
+/// could not yet be completed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayitCleanup {
+    /// The server that formerly owned the association. It may no longer exist.
+    pub server_id: String,
+    /// Stable Playit tunnel identifier.
+    pub tunnel_id: String,
+    /// Unix timestamp at which cleanup was requested.
+    pub requested_at: u64,
 }
 
 /// How many and how long to keep successful backups.
@@ -205,12 +228,38 @@ pub struct PanelData {
     /// Every configured server.
     #[serde(default)]
     pub servers: Vec<ServerRecord>,
+    /// Remote Playit deletions waiting for a retry or reconciliation.
+    #[serde(default)]
+    pub playit_cleanup: Vec<PlayitCleanup>,
     /// Global backup storage settings.
     #[serde(default)]
     pub backup_storage: BackupStorageSettings,
     /// All successful backups across all servers and providers.
     #[serde(default)]
     pub backups: Vec<StoredBackup>,
+}
+
+/// Current Unix time used for durable Playit reconciliation metadata.
+pub(crate) fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+/// Queue an idempotent remote Playit deletion without adding duplicate work.
+pub(crate) fn queue_playit_cleanup(data: &mut PanelData, server_id: &str, tunnel_id: &str) {
+    if !data
+        .playit_cleanup
+        .iter()
+        .any(|cleanup| cleanup.server_id == server_id && cleanup.tunnel_id == tunnel_id)
+    {
+        data.playit_cleanup.push(PlayitCleanup {
+            server_id: server_id.into(),
+            tunnel_id: tunnel_id.into(),
+            requested_at: now_unix_seconds(),
+        });
+    }
 }
 
 /// Reads and writes [`PanelData`], serialising concurrent writers.
@@ -570,6 +619,8 @@ mod tests {
                 protocol: PlayitProtocol::Tcp,
                 local_address: "127.0.0.1".into(),
                 local_port: 25565,
+                agent_id: Some("agent-1".into()),
+                created_at: Some(1_756_953_600),
             }),
             created_at: "2026-08-28T00:00:00Z".into(),
             backup_policy: None,

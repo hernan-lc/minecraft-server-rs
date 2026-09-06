@@ -16,7 +16,7 @@ pub mod model;
 pub use client::{IpcPlayitService, PlayitService};
 pub use embedded::EmbeddedPlayitService;
 pub use error::PlayitError;
-pub use manager::PlayitManager;
+pub use manager::{EnsureTunnelDisposition, EnsuredServerTunnel, PlayitManager};
 pub use model::{
     ClaimInfo, PlayitAccount, PlayitAccountStatus, PlayitConnectionState, PlayitProtocol,
     PlayitStatus, PlayitTunnel, TunnelCreateInfo,

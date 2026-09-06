@@ -22,6 +22,10 @@ pub enum PlayitError {
     /// Playit returned a response that cannot be used safely.
     #[error("invalid Playit response: {0}")]
     Protocol(String),
+    /// The requested operation would be ambiguous or conflict with an
+    /// existing account or tunnel association.
+    #[error("Playit conflict: {0}")]
+    Conflict(String),
 }
 
 impl PlayitError {
@@ -31,7 +35,7 @@ impl PlayitError {
             Self::Ipc(playit_ipc::ipc::IpcError::Service(error)) => Some(error.code.clone()),
             Self::Runtime(error) => Some(error.as_service_error().code),
             Self::Rejected(_) => Some(ServiceErrorCode::ApiRejected),
-            Self::Ipc(_) | Self::Unavailable(_) | Self::Protocol(_) => None,
+            Self::Ipc(_) | Self::Unavailable(_) | Self::Protocol(_) | Self::Conflict(_) => None,
         }
     }
 
@@ -44,7 +48,7 @@ impl PlayitError {
             | Self::Unavailable(_) => true,
             Self::Ipc(IpcError::Service(error)) => service_code_is_unavailable(&error.code),
             Self::Runtime(error) => runtime_error_is_unavailable(error),
-            Self::Rejected(_) | Self::Protocol(_) | Self::Ipc(_) => false,
+            Self::Rejected(_) | Self::Protocol(_) | Self::Conflict(_) | Self::Ipc(_) => false,
         }
     }
 
@@ -57,6 +61,27 @@ impl PlayitError {
             }
             Self::Runtime(error) => {
                 runtime_error_has_code(error, ServiceErrorCode::UnsupportedProtocol)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the remote operation is already satisfied because the tunnel
+    /// no longer exists.
+    pub fn is_not_found(&self) -> bool {
+        if matches!(self.service_code(), Some(ServiceErrorCode::TunnelNotFound)) {
+            return true;
+        }
+        // Older Playit daemons sometimes returned a human-readable rejection
+        // before TunnelNotFound was added to the IPC error codes. Deletion is
+        // idempotent, so recognize only the narrow missing-resource wording
+        // and leave all other rejections visible to the caller.
+        match self {
+            Self::Rejected(message) => {
+                let message = message.to_ascii_lowercase();
+                message.contains("not found")
+                    || message.contains("does not exist")
+                    || message.contains("unknown tunnel")
             }
             _ => false,
         }

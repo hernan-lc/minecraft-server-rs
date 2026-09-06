@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::auth::{AdminIdentity, Identity};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
-use crate::store::ServerRecord;
+use crate::store::{queue_playit_cleanup, ServerRecord};
 
 /// A server as the API presents it: stored config plus live status.
 #[derive(Serialize)]
@@ -539,17 +539,24 @@ async fn delete(
     }
 
     // ---- Atomically update persisted state: remove server and clean all user permissions + backups ----
-    // External Playit cleanup happens after local commit so a failed tunnel delete
-    // does not leave an orphan server record binding to a now-deleted tunnel.
+    // Queue Playit cleanup in the same local transaction. The server record is
+    // gone before any remote request, but a failed remote delete remains
+    // durable and retryable rather than becoming an untracked orphan.
+    let playit_binding = record_after_lock.playit.clone();
+    let server_id_for_store = id.clone();
     state
         .store
         .update(|data| {
-            data.servers.retain(|s| s.id != id);
+            if let Some(binding) = playit_binding.as_ref() {
+                queue_playit_cleanup(data, &server_id_for_store, &binding.tunnel_id);
+            }
+            data.servers.retain(|s| s.id != server_id_for_store);
             for user in &mut data.users {
-                user.servers.retain(|sid| sid != &id);
+                user.servers.retain(|sid| sid != &server_id_for_store);
             }
             let before = data.backups.len();
-            data.backups.retain(|b| b.server_id != id);
+            data.backups
+                .retain(|b| b.server_id != server_id_for_store);
             if before != data.backups.len() {
                 tracing::info!(server = %id, removed = before - data.backups.len(), "removed backup metadata for deleted server");
             }
@@ -559,16 +566,37 @@ async fn delete(
     tracing::info!(server = %id, by = %admin.username, "server deleted");
 
     // ---- External Playit cleanup after local commit (best-effort) ----
-    if let Some(binding) = record_after_lock.playit.as_ref() {
+    let mut playit_tunnel_deleted = false;
+    if let Some(binding) = playit_binding.as_ref() {
         match state.playit.account_tunnels().await {
             Ok(tunnels) if tunnels.iter().any(|t| t.id == binding.tunnel_id) => {
-                if let Err(e) = state.playit.delete_tunnel(&binding.tunnel_id).await {
-                    tracing::warn!(server = %id, tunnel = %binding.tunnel_id, error = %e, "playit tunnel deletion failed after server removal; orphan tunnel may need manual cleanup");
+                match state.playit.delete_tunnel(&binding.tunnel_id).await {
+                    Ok(()) => playit_tunnel_deleted = true,
+                    Err(error) if error.is_not_found() => playit_tunnel_deleted = true,
+                    Err(error) => {
+                        tracing::warn!(server = %id, tunnel = %binding.tunnel_id, error = %error, "playit tunnel deletion failed after server removal; cleanup is queued");
+                    }
                 }
             }
-            Ok(_) => {}
+            Ok(_) => playit_tunnel_deleted = true,
             Err(e) => {
-                tracing::warn!(server = %id, error = %e, "playit status failed after server removal; tunnel may remain");
+                tracing::warn!(server = %id, error = %e, "playit status failed after server removal; cleanup is queued");
+            }
+        }
+        if playit_tunnel_deleted {
+            let server_id_for_cleanup = id.clone();
+            let tunnel_id_for_cleanup = binding.tunnel_id.clone();
+            if let Err(error) = state
+                .store
+                .update(move |data| {
+                    data.playit_cleanup.retain(|cleanup| {
+                        cleanup.server_id != server_id_for_cleanup
+                            || cleanup.tunnel_id != tunnel_id_for_cleanup
+                    });
+                })
+                .await
+            {
+                tracing::warn!(server = %id, tunnel = %binding.tunnel_id, error = ?error, "Playit cleanup completed but its queue entry could not be cleared");
             }
         }
     }
@@ -584,7 +612,8 @@ async fn delete(
     Ok(Json(serde_json::json!({
         "ok": true,
         "files_kept": true,
-        "playit_tunnel_deleted": record_after_lock.playit.is_some()
+        "playit_tunnel_deleted": playit_tunnel_deleted,
+        "playit_cleanup_pending": playit_binding.is_some() && !playit_tunnel_deleted,
     })))
 }
 
