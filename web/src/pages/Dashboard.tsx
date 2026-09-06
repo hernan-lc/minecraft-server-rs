@@ -48,11 +48,19 @@ export function Dashboard({
     }
   }
 
+  const cpuFraction = Math.max(0, Math.min(1, (stats?.cpu_percent ?? 0) / 100));
+  const memoryFraction = stats
+    ? Math.max(0, Math.min(1, stats.memory_used_mb / Math.max(1, stats.memory_total_mb)))
+    : 0;
+  const onlineFraction = stats
+    ? Math.max(0, Math.min(1, stats.servers_online / Math.max(1, servers.length)))
+    : 0;
+
   return (
-    <div class="mx-auto w-full max-w-6xl space-y-6 px-4 py-8 sm:px-6">
-      <header class="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 class="text-2xl font-semibold">{t("dashboard.title")}</h1>
+    <div class="mx-auto flex w-full max-w-6xl flex-col gap-3 px-3 py-3 sm:gap-6 sm:px-6 sm:py-8">
+      <header class="flex items-center justify-between gap-3 rounded-2xl border border-ink-700 bg-ink-850 px-3 py-3 sm:items-end sm:border-0 sm:bg-transparent sm:px-0 sm:py-0">
+        <div class="min-w-0">
+          <h1 class="truncate text-xl font-semibold sm:text-2xl">{t("dashboard.title")}</h1>
           <p class="text-sm text-fg-muted">
             {t("dashboard.summary", {
               count: servers.length,
@@ -64,6 +72,7 @@ export function Dashboard({
           <Button
             variant="primary"
             icon={<Icon.Plus size={15} />}
+            class="shrink-0"
             onClick={() => setCreating(true)}
           >
             {t("dashboard.newServer")}
@@ -72,30 +81,34 @@ export function Dashboard({
       </header>
 
       {stats && (
-        <div class="grid gap-4 sm:grid-cols-3">
+        <div class="grid grid-cols-3 gap-2 sm:gap-4">
           <StatCard
-            icon={<Icon.Cpu size={20} />}
+            compact
+            shortLabel={t("dashboard.hostCpuShort")}
+            icon={<Icon.Cpu size={18} />}
             value={`${stats.cpu_percent.toFixed(0)}%`}
             max="100%"
             label={t("dashboard.hostCpu")}
-            fraction={stats.cpu_percent / 100}
+            fraction={cpuFraction}
           />
           <StatCard
-            icon={<Icon.Memory size={20} />}
+            compact
+            shortLabel={t("dashboard.hostMemoryShort")}
+            icon={<Icon.Memory size={18} />}
             value={`${(stats.memory_used_mb / 1024).toFixed(1)} GiB`}
             max={`${(stats.memory_total_mb / 1024).toFixed(1)} GiB`}
             label={t("dashboard.hostMemory")}
-            fraction={stats.memory_used_mb / Math.max(1, stats.memory_total_mb)}
-            tone={
-              stats.memory_used_mb / Math.max(1, stats.memory_total_mb) > 0.9 ? "warn" : "accent"
-            }
+            fraction={memoryFraction}
+            tone={memoryFraction > 0.9 ? "warn" : "accent"}
           />
           <StatCard
-            icon={<Icon.Package size={20} />}
+            compact
+            shortLabel={t("dashboard.serversOnlineShort")}
+            icon={<Icon.Package size={18} />}
             value={String(stats.servers_online)}
             max={String(servers.length)}
             label={t("dashboard.serversOnline")}
-            fraction={stats.servers_online / Math.max(1, servers.length)}
+            fraction={onlineFraction}
           />
         </div>
       )}
@@ -110,7 +123,7 @@ export function Dashboard({
         />
       )}
 
-      <div class="grid gap-4">
+      <div class="grid gap-3 sm:gap-4">
         {servers.map((server) => {
           const actions = serverActionCapabilities(server.status);
           const cpuHostPercent =
@@ -121,60 +134,93 @@ export function Dashboard({
           return (
             <article
               key={server.id}
-              class="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-ink-700 bg-ink-850 px-4 py-4 sm:px-5"
+              class="rounded-2xl border border-ink-700 bg-ink-850 p-3 sm:px-5 sm:py-4"
             >
-              <div class="min-w-0 space-y-1">
-                <button
-                  class="truncate text-base font-semibold hover:text-accent"
-                  onClick={() => onOpen(server.id)}
+              <div class="flex items-start gap-3">
+                <div
+                  class="grid size-9 shrink-0 place-items-center rounded-xl border border-accent/25 bg-accent/10 text-sm font-semibold text-accent sm:size-11 sm:text-base"
+                  aria-hidden="true"
                 >
-                  {server.name}
-                </button>
-                <p class="text-xs text-fg-muted">
-                  {server.core} {server.version} · {t("createServer.port").toLowerCase()}{" "}
-                  {server.port} · Java {server.java_major} · {server.memory.max_mb} MiB ·{" "}
-                  {t("dashboard.upFor", { duration: formatUptime(server.uptime_secs) })}
-                  {server.metrics && (
-                    <>
-                      {" · "}
-                      <span class="tabular-nums text-fg">
-                        {cpuHostPercent === null ? "—" : `${cpuHostPercent.toFixed(0)}%`} CPU ·{" "}
-                        {server.metrics.memory_mb} MiB RSS
-                      </span>
-                    </>
-                  )}
-                </p>
-              </div>
+                  {server.name.slice(0, 1).toUpperCase()}
+                </div>
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-start justify-between gap-2">
+                    <div class="min-w-0">
+                      <button
+                        class="block max-w-full truncate text-left text-base font-semibold hover:text-accent"
+                        onClick={() => onOpen(server.id)}
+                      >
+                        {server.name}
+                      </button>
+                      <div class="mt-1">
+                        <StatusPill status={server.status} />
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      icon={<Icon.FolderOpen size={16} />}
+                      aria-label={t("dashboard.manage")}
+                      title={t("dashboard.manage")}
+                      class="size-9 shrink-0 px-0 sm:h-auto sm:w-auto sm:px-3"
+                      onClick={() => onOpen(server.id)}
+                    >
+                      <span class="hidden sm:inline">{t("dashboard.manage")}</span>
+                    </Button>
+                  </div>
 
-              <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-                <StatusPill status={server.status} />
-                <div class="flex flex-wrap items-center gap-2">
-                  <Button
-                    variant="primary"
-                    icon={<Icon.Play size={13} />}
-                    disabled={!actions.start}
-                    onClick={() => power(server.id, "start")}
-                  >
-                    {t("dashboard.start")}
-                  </Button>
-                  <Button
-                    icon={<Icon.Restart size={15} />}
-                    disabled={!actions.restart}
-                    onClick={() => power(server.id, "restart")}
-                  >
-                    {t("dashboard.restart")}
-                  </Button>
-                  <Button
-                    variant="danger"
-                    icon={<Icon.Stop size={15} />}
-                    disabled={!(actions.stop || actions.cancel)}
-                    onClick={() => power(server.id, "stop")}
-                  >
-                    {actions.cancel ? t("common.cancel") : t("dashboard.stop")}
-                  </Button>
-                  <Button variant="ghost" onClick={() => onOpen(server.id)}>
-                    {t("dashboard.manage")}
-                  </Button>
+                  <p class="mt-2 truncate text-xs text-fg-muted">
+                    {server.core} {server.version} · {t("createServer.port").toLowerCase()} {server.port} ·
+                    Java {server.java_major} · {server.memory.max_mb} MiB
+                  </p>
+                  <p class="mt-1 truncate text-xs text-fg-muted/80">
+                    {t("dashboard.upFor", { duration: formatUptime(server.uptime_secs) })}
+                    {server.metrics && (
+                      <>
+                        {" · "}
+                        <span class="tabular-nums text-fg-muted">
+                          {cpuHostPercent === null ? "—" : `${cpuHostPercent.toFixed(0)}%`} CPU ·{" "}
+                          {server.metrics.memory_mb} MiB RSS
+                        </span>
+                      </>
+                    )}
+                  </p>
+
+                  <div class="mt-3 flex flex-wrap items-center gap-2">
+                    <Button
+                      variant="primary"
+                      icon={<Icon.Play size={13} />}
+                      aria-label={t("dashboard.start")}
+                      title={t("dashboard.start")}
+                      class="size-9 px-0 sm:h-auto sm:w-auto sm:px-4"
+                      disabled={!actions.start}
+                      onClick={() => power(server.id, "start")}
+                    >
+                      <span class="hidden sm:inline">{t("dashboard.start")}</span>
+                    </Button>
+                    <Button
+                      icon={<Icon.Restart size={15} />}
+                      aria-label={t("dashboard.restart")}
+                      title={t("dashboard.restart")}
+                      class="size-9 px-0 sm:h-auto sm:w-auto sm:px-4"
+                      disabled={!actions.restart}
+                      onClick={() => power(server.id, "restart")}
+                    >
+                      <span class="hidden sm:inline">{t("dashboard.restart")}</span>
+                    </Button>
+                    <Button
+                      variant="danger"
+                      icon={<Icon.Stop size={15} />}
+                      aria-label={actions.cancel ? t("common.cancel") : t("dashboard.stop")}
+                      title={actions.cancel ? t("common.cancel") : t("dashboard.stop")}
+                      class="size-9 px-0 sm:h-auto sm:w-auto sm:px-4"
+                      disabled={!(actions.stop || actions.cancel)}
+                      onClick={() => power(server.id, "stop")}
+                    >
+                      <span class="hidden sm:inline">
+                        {actions.cancel ? t("common.cancel") : t("dashboard.stop")}
+                      </span>
+                    </Button>
+                  </div>
                 </div>
               </div>
             </article>

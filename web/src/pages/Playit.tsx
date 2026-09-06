@@ -186,55 +186,68 @@ export function Playit() {
   const safeClaimUrl = safeExternalUrl(activeClaimUrl);
 
   return (
-    <div class="mx-auto w-full max-w-6xl space-y-6 px-4 py-8 sm:px-6">
-      <header class="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 class="text-2xl font-semibold">{t("playit.title")}</h1>
+    <div class="mx-auto flex w-full max-w-6xl flex-col gap-3 px-3 py-3 sm:gap-6 sm:px-6 sm:py-8">
+      <header class="flex items-center justify-between gap-3 rounded-2xl border border-ink-700 bg-ink-850 px-3 py-3 sm:items-end sm:border-0 sm:bg-transparent sm:px-0 sm:py-0">
+        <div class="min-w-0">
+          <h1 class="truncate text-xl font-semibold sm:text-2xl">{t("playit.title")}</h1>
           <p class="text-sm text-fg-muted">{t("playit.subtitle")}</p>
         </div>
         <Button
           variant="ghost"
           icon={<Icon.Refresh size={15} />}
+          aria-label={t("common.refresh")}
+          title={t("common.refresh")}
+          class="size-9 shrink-0 px-0 sm:h-auto sm:w-auto sm:px-4"
           disabled={loading}
           onClick={() => void refresh()}
         >
-          {t("common.refresh")}
+          <span class="hidden sm:inline">{t("common.refresh")}</span>
         </Button>
       </header>
 
       {failed && <Banner kind="error">{failed}</Banner>}
 
-      <Card title={t("playit.connectionSection")}>
-        <div class="grid gap-4 sm:grid-cols-3">
+      <Card title={t("playit.connectionSection")} class="overflow-hidden">
+        <div class="grid grid-cols-3 gap-2 sm:gap-4">
           <Detail
             label={t("playit.connection")}
+            shortLabel={t("playit.connectionShort")}
             value={status ? stateLabel(status.status, t) : t("common.loading")}
             tone={statusTone(status?.status)}
           />
-          <Detail label={t("playit.version")} value={status?.version ?? t("common.none")} />
+          <Detail
+            label={t("playit.version")}
+            shortLabel={t("playit.versionShort")}
+            value={status?.version ?? t("common.none")}
+          />
           <Detail
             label={t("playit.account")}
+            shortLabel={t("playit.accountShort")}
             value={account ? accountLabel(account.status, t) : t("common.none")}
           />
         </div>
 
         {status?.message && <p class="mt-4 text-sm text-fg-muted">{status.message}</p>}
         {account?.agent_id && (
-          <p class="mt-3 text-xs text-fg-muted">
+          <p class="mt-3 break-all text-xs text-fg-muted">
             {t("playit.agentId")}: <span class="font-mono text-fg">{account.agent_id}</span>
           </p>
         )}
-        {accountError && <Banner kind="error">{accountError}</Banner>}
+        {accountError && (
+          <div class="mt-3">
+            <Banner kind="error">{accountError}</Banner>
+          </div>
+        )}
 
         <Actions>
           {status?.status === "needs_claim" && (
-            <Button variant="primary" disabled={busy} onClick={() => void claim()}>
+            <Button variant="primary" class="w-full sm:w-auto" disabled={busy} onClick={() => void claim()}>
               {busy ? t("playit.startingClaim") : t("playit.connect")}
             </Button>
           )}
           {loginUrl && (
             <a
-              class="inline-flex items-center gap-2 rounded-full bg-ink-700 px-4 py-2 text-sm font-medium text-fg hover:bg-ink-600"
+              class="inline-flex w-full items-center justify-center gap-2 rounded-full bg-ink-700 px-4 py-2 text-sm font-medium text-fg hover:bg-ink-600 sm:w-auto"
               href={loginUrl}
               target="_blank"
               rel="noopener noreferrer"
@@ -266,9 +279,9 @@ export function Playit() {
       </Card>
 
       <Card title={t("playit.serverSection")}>
-        <p class="mb-4 text-sm text-fg-muted">{t("playit.serverExplain")}</p>
-        <div class="flex flex-wrap items-end gap-3">
-          <div class="min-w-60 flex-1">
+        <p class="mb-3 text-sm leading-relaxed text-fg-muted sm:mb-4">{t("playit.serverExplain")}</p>
+        <div class="flex flex-col items-stretch gap-3 sm:flex-row sm:items-end">
+          <div class="min-w-0 flex-1">
             <Field label={t("playit.server")}>
               <Select
                 value={selectedServer}
@@ -286,6 +299,7 @@ export function Playit() {
           <Button
             variant="primary"
             icon={<Icon.Plus size={15} />}
+            class="w-full sm:w-auto"
             disabled={busy || !selectedServer || status?.status !== "connected"}
             onClick={() => void attach()}
           >
@@ -302,13 +316,22 @@ export function Playit() {
         {tunnels.length === 0 ? (
           <Empty>{t("playit.noTunnels")}</Empty>
         ) : (
-          <div class="divide-y divide-ink-700">
+          <div class="space-y-2 sm:space-y-0 sm:divide-y sm:divide-ink-700">
             {tunnels.map((tunnel) => {
               const server = servers.find((candidate) => candidate.playit?.tunnel_id === tunnel.id);
               return (
-                <article key={tunnel.id} class="flex flex-wrap items-center justify-between gap-4 py-4 first:pt-0 last:pb-0">
-                  <div class="min-w-0 space-y-1">
-                    <p class="font-medium">{server?.name ?? tunnel.name ?? t("playit.unmanaged")}</p>
+                <article
+                  key={tunnel.id}
+                  class="rounded-xl border border-ink-700 bg-ink-900/45 p-3 sm:flex sm:items-center sm:justify-between sm:gap-4 sm:rounded-none sm:border-0 sm:bg-transparent sm:px-0 sm:py-4 sm:first:pt-0 sm:last:pb-0"
+                >
+                  <div class="min-w-0 flex-1 space-y-1">
+                    <div class="flex items-center gap-2">
+                      <span
+                        class={`size-2 shrink-0 rounded-full ${tunnel.disabled ? "bg-amber-400" : "bg-accent"}`}
+                        aria-hidden="true"
+                      />
+                      <p class="truncate font-medium">{server?.name ?? tunnel.name ?? t("playit.unmanaged")}</p>
+                    </div>
                     <p class="text-xs text-fg-muted">
                       {tunnel.tunnel_type === "minecraft-java"
                         ? "Minecraft Java"
@@ -325,22 +348,32 @@ export function Playit() {
                       <p class="text-xs text-amber-300">{tunnel.disabled_reason}</p>
                     )}
                   </div>
-                  <div class="flex flex-wrap items-center gap-2">
+                  <div class="mt-3 flex min-w-0 items-center gap-2 sm:mt-0 sm:max-w-sm">
+                    <div class="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-ink-700 bg-ink-850 px-3 py-2 text-xs text-fg-muted">
+                      <Icon.Link size={14} />
+                      <span class="truncate">{tunnel.display_address || t("common.none")}</span>
+                    </div>
                     <Button
                       variant="ghost"
                       icon={<Icon.Copy size={15} />}
+                      aria-label={tunnel.display_address || t("playit.copyUnavailable")}
+                      title={t("playit.copyAddress")}
+                      class="size-9 shrink-0 px-0 sm:h-auto sm:w-auto sm:px-3"
                       disabled={!tunnel.display_address}
                       onClick={() => void copyAddress(tunnel.display_address)}
                     >
-                      {tunnel.display_address || t("common.none")}
+                      <span class="hidden sm:inline">{t("playit.copyAddress")}</span>
                     </Button>
                     <Button
                       variant="danger"
                       icon={<Icon.Trash size={15} />}
+                      aria-label={t("common.delete")}
+                      title={t("common.delete")}
+                      class="size-9 shrink-0 px-0 sm:h-auto sm:w-auto sm:px-3"
                       disabled={busy}
                       onClick={() => void remove(tunnel)}
                     >
-                      {t("common.delete")}
+                      <span class="hidden sm:inline">{t("common.delete")}</span>
                     </Button>
                   </div>
                 </article>
@@ -355,10 +388,12 @@ export function Playit() {
 
 function Detail({
   label,
+  shortLabel,
   value,
   tone,
 }: {
   label: string;
+  shortLabel?: string;
   value: string;
   tone?: "good" | "warn" | "bad";
 }) {
@@ -368,9 +403,12 @@ function Detail({
     bad: "text-red-300",
   };
   return (
-    <div class="rounded-lg border border-ink-700 bg-ink-900/60 px-4 py-3">
-      <p class="text-xs uppercase tracking-wider text-fg-muted">{label}</p>
-      <p class={`mt-1 font-medium ${tone ? colours[tone] : "text-fg"}`}>{value}</p>
+    <div class="min-w-0 rounded-xl border border-ink-700 bg-ink-900/60 px-3 py-2.5 sm:rounded-lg sm:px-4 sm:py-3">
+      <p class="truncate text-[10px] uppercase tracking-wider text-fg-muted sm:text-xs">
+        <span class="sm:hidden">{shortLabel ?? label}</span>
+        <span class="hidden sm:inline">{label}</span>
+      </p>
+      <p class={`mt-1 truncate text-sm font-medium sm:text-base ${tone ? colours[tone] : "text-fg"}`}>{value}</p>
     </div>
   );
 }

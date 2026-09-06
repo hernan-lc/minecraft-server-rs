@@ -111,12 +111,12 @@ export function Card({
   return (
     <section class={`rounded-xl border border-ink-700 bg-ink-850 ${extra ?? ""}`}>
       {(title || actions) && (
-        <header class="flex items-center justify-between gap-4 border-b border-ink-700 px-5 py-3.5">
+        <header class="flex items-center justify-between gap-3 border-b border-ink-700 px-3.5 py-3 sm:gap-4 sm:px-5 sm:py-3.5">
           <h2 class="text-sm font-semibold tracking-wide text-fg">{title}</h2>
           {actions}
         </header>
       )}
-      <div class="p-5">{children}</div>
+      <div class="p-3.5 sm:p-5">{children}</div>
     </section>
   );
 }

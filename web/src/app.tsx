@@ -269,7 +269,7 @@ export function App() {
         </div>
       </nav>
 
-      <main class="min-h-0 flex-1 overflow-y-auto">
+      <main class="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
         {route.page === "server" && (
           <ServerDetail
             id={route.id}

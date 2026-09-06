@@ -145,7 +145,7 @@ export function ServerDetail({
                 visually distinguishable in a list of similar names. */}
             <div
               class="grid size-12 shrink-0 place-items-center rounded-xl border border-ink-700 text-lg font-semibold sm:size-14 sm:text-xl"
-              style={{ background: tileColour(server.id) }}
+              style={{ background: tileColour(server.id ?? id) }}
               aria-hidden="true"
             >
               {server.name.slice(0, 1).toUpperCase()}
@@ -393,9 +393,9 @@ function Divider() {
 }
 
 /** A stable tint per server, so two similarly named servers still look different. */
-function tileColour(id: string): string {
+function tileColour(id: string | null | undefined): string {
   let hash = 0;
-  for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) % 360;
+  for (const char of id ?? "server") hash = (hash * 31 + char.charCodeAt(0)) % 360;
   return `linear-gradient(140deg, hsl(${hash} 45% 22%), hsl(${(hash + 40) % 360} 45% 14%))`;
 }
 
@@ -476,28 +476,31 @@ function Installed({ server, onChanged }: { server: Server; onChanged: () => voi
         </div>
       )}
 
-      <div class="mt-4 flex flex-wrap gap-2">
+      <div class="mt-4 flex flex-col gap-2 sm:flex-row">
         {!server.installed && (
           <Button
             variant="primary"
+            class="w-full sm:w-auto"
             disabled={busy || lifecycleBusy}
             title={lifecycleBusy ? t("settings.mustStopToUpdate") : undefined}
             onClick={prepare}
           >
-            {busy ? t("settings.updating") : "Install"}
+            {busy ? t("settings.updating") : t("common.install")}
           </Button>
         )}
         {server.needs_install && (
           <Button
             variant="primary"
+            class="w-full sm:w-auto"
             disabled={busy || lifecycleBusy}
             title={lifecycleBusy ? t("settings.mustStopToUpdate") : undefined}
             onClick={prepare}
           >
-            {busy ? t("settings.updating") : "Install"}
+            {busy ? t("settings.updating") : t("common.install")}
           </Button>
         )}
         <Button
+          class="w-full sm:w-auto"
           disabled={busy || lifecycleBusy}
           title={lifecycleBusy ? t("settings.mustStopToUpdate") : undefined}
           onClick={update}
@@ -591,9 +594,9 @@ function Settings({
   }
 
   return (
-    <form onSubmit={submit} class="space-y-5 overflow-y-auto pb-6">
-      <Card title={t("settings.serverSection")}>
-        <div class="grid gap-4 sm:grid-cols-2">
+    <form onSubmit={submit} class="min-w-0 space-y-3 overflow-y-auto pb-6 sm:space-y-5">
+      <Card title={t("settings.serverSection")} class="overflow-hidden">
+        <div class="grid gap-3 sm:gap-4 sm:grid-cols-2">
           <Field label={t("createServer.name")}>
             <Input value={form.name} onInput={(e) => set({ name: (e.target as HTMLInputElement).value })} />
           </Field>
@@ -645,7 +648,7 @@ function Settings({
           )}
         </div>
 
-        <label class="mt-4 flex items-center gap-2.5 text-sm text-fg-muted">
+        <label class="mt-3 flex items-start gap-2.5 border-t border-ink-700 pt-3 text-sm text-fg-muted sm:mt-4 sm:items-center">
           <input
             type="checkbox"
             checked={form.eula_accepted}
@@ -660,8 +663,8 @@ function Settings({
 
       <Installed server={server} onChanged={onSaved} />
 
-      <Card title={t("settings.recoverySection")}>
-        <div class="grid gap-4 sm:grid-cols-3">
+      <Card title={t("settings.recoverySection")} class="overflow-hidden">
+        <div class="grid gap-3 sm:gap-4 sm:grid-cols-3">
           <Field label={t("settings.maxRetries")}>
             <Input
               type="number"
@@ -684,7 +687,7 @@ function Settings({
             />
           </Field>
         </div>
-        <label class="mt-4 flex items-center gap-2.5 text-sm text-fg-muted">
+        <label class="mt-3 flex items-start gap-2.5 border-t border-ink-700 pt-3 text-sm text-fg-muted sm:mt-4 sm:items-center">
           <input
             type="checkbox"
             checked={form.auto_restart}
@@ -695,12 +698,12 @@ function Settings({
         </label>
       </Card>
 
-      <div class="flex items-center gap-3">
-        <Button type="submit" variant="primary" disabled={busy}>
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+        <Button type="submit" variant="primary" class="w-full sm:w-auto" disabled={busy}>
           {busy ? t("common.saving") : t("settings.saveChanges")}
         </Button>
         {user.admin && (
-          <Button type="button" variant="danger" onClick={remove}>
+          <Button type="button" variant="danger" class="w-full sm:w-auto" onClick={remove}>
             {t("settings.removeServer")}
           </Button>
         )}
@@ -838,19 +841,32 @@ export function PlayitSettings({
     : "info";
 
   return (
-    <Card title={t("playit.serverCardTitle")}>
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p class="font-medium">{t(`playit.serverStates.${playit.state}` as "playit.serverStates.disabled")}</p>
-          <p class="mt-1 text-sm text-fg-muted">
+    <Card title={t("playit.serverCardTitle")} class="overflow-hidden">
+      <div class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-3">
+        <div class="min-w-0 rounded-xl border border-ink-700 bg-ink-900/45 px-3 py-2.5">
+          <div class="flex items-center gap-2">
+            <span
+              class={`size-2 shrink-0 rounded-full ${recoveryStates.includes(playit.state) ? "bg-red-400" : playit.state === "connected" ? "bg-accent" : "bg-amber-400"}`}
+              aria-hidden="true"
+            />
+            <p class="truncate font-medium">{t(`playit.serverStates.${playit.state}` as "playit.serverStates.disabled")}</p>
+          </div>
+          <p class="mt-1 truncate text-sm text-fg-muted">
             {playit.binding
               ? `${playit.binding.local_address}:${playit.binding.local_port}`
               : t("playit.serverNotConfigured")}
           </p>
         </div>
         {playit.tunnel?.display_address && (
-          <Button variant="ghost" icon={<Icon.Copy size={15} />} onClick={() => void copyAddress()}>
-            {playit.tunnel.display_address}
+          <Button
+            variant="ghost"
+            icon={<Icon.Copy size={15} />}
+            aria-label={t("playit.copyAddress")}
+            title={t("playit.copyAddress")}
+            class="w-full justify-start sm:w-auto sm:max-w-full"
+            onClick={() => void copyAddress()}
+          >
+            <span class="truncate">{playit.tunnel.display_address}</span>
           </Button>
         )}
       </div>
@@ -862,35 +878,35 @@ export function PlayitSettings({
       )}
 
       {playit.tunnel && (
-        <p class="mt-3 text-xs text-fg-muted">
+        <p class="mt-3 truncate text-xs text-fg-muted">
           {t("playit.destination")}: <span class="font-mono text-fg">{playit.tunnel.destination}</span>
         </p>
       )}
 
       {user.admin && (
-        <div class="mt-4 flex flex-wrap gap-2">
+        <div class="mt-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
           {playit.state === "disabled" && !cleanupPending && (
-            <Button variant="primary" disabled={busy} onClick={() => void attach()}>
+            <Button variant="primary" class="w-full sm:w-auto" disabled={busy} onClick={() => void attach()}>
               {busy ? t("common.creating") : t("playit.connectServer")}
             </Button>
           )}
           {needsReconcile && (
-            <Button variant="ghost" disabled={busy} onClick={() => void reconcile()}>
+            <Button variant="ghost" class="w-full sm:w-auto" disabled={busy} onClick={() => void reconcile()}>
               {t("playit.reconcileServer")}
             </Button>
           )}
           {repairStates.includes(playit.state) && (
-            <Button variant="primary" disabled={busy} onClick={() => void repair()}>
+            <Button variant="primary" class="w-full sm:w-auto" disabled={busy} onClick={() => void repair()}>
               {busy ? t("common.creating") : t("playit.repairServer")}
             </Button>
           )}
           {playit.state !== "disabled" && (
-            <Button variant="danger" disabled={busy} onClick={() => void detach()}>
+            <Button variant="danger" class="w-full sm:w-auto" disabled={busy} onClick={() => void detach()}>
               {busy ? t("common.deleting") : t("playit.disconnectServer")}
             </Button>
           )}
           {(recoveryStates.includes(playit.state) || cleanupPending) && (
-            <Button variant="subtle" disabled={busy} onClick={() => void forget()}>
+            <Button variant="subtle" class="w-full sm:w-auto" disabled={busy} onClick={() => void forget()}>
               {t("playit.forgetServer")}
             </Button>
           )}
