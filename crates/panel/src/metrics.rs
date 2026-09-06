@@ -31,9 +31,16 @@ pub struct HostMetrics {
 /// What one JVM is currently costing.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct ProcessMetrics {
-    /// Share of a single core, so a 4-thread server can exceed 100.
+    /// Existing sysinfo value: 100 means one fully occupied logical CPU, so a
+    /// multi-threaded process can legitimately exceed 100.
     pub cpu_percent: f32,
-    /// Resident memory in mebibytes.
+    /// Approximate number of logical CPUs consumed.
+    pub cpu_cores: f32,
+    /// Process CPU normalized against the whole panel host, in 0..=100.
+    pub cpu_host_percent: f32,
+    /// Logical CPUs available to the panel host.
+    pub logical_cpu_count: usize,
+    /// Resident memory (RSS) in mebibytes.
     pub memory_mb: u64,
 }
 
@@ -46,6 +53,8 @@ pub struct Metrics {
     disk: Mutex<HashMap<PathBuf, (Instant, u64)>>,
     /// Last host CPU reading, and when it was taken.
     host_cpu: Mutex<(Instant, f32)>,
+    /// The host capacity against which per-process CPU is normalized.
+    logical_cpu_count: usize,
 }
 
 impl Default for Metrics {
@@ -54,11 +63,15 @@ impl Default for Metrics {
 
         // Establish the baseline the first real reading is measured against.
         system.refresh_cpu_usage();
+        let logical_cpu_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or_else(|_| system.cpus().len().max(1));
 
         Metrics {
             system: Mutex::new(system),
             disk: Mutex::new(HashMap::new()),
             host_cpu: Mutex::new((Instant::now(), 0.0)),
+            logical_cpu_count,
         }
     }
 }
@@ -79,8 +92,14 @@ impl Metrics {
         );
 
         let process = system.process(pid)?;
+        let cpu_percent = process.cpu_usage();
+        let (cpu_cores, cpu_host_percent) =
+            normalize_process_cpu(cpu_percent, self.logical_cpu_count);
         Some(ProcessMetrics {
-            cpu_percent: process.cpu_usage(),
+            cpu_percent,
+            cpu_cores,
+            cpu_host_percent,
+            logical_cpu_count: self.logical_cpu_count,
             memory_mb: process.memory() / 1024 / 1024,
         })
     }
@@ -141,6 +160,22 @@ impl Metrics {
 
         bytes
     }
+}
+
+/// Convert sysinfo's one-logical-core percentage to both useful display forms.
+///
+/// Keeping this pure makes the semantics independently testable without
+/// depending on a process's scheduling or the host's current load.
+fn normalize_process_cpu(cpu_percent: f32, logical_cpu_count: usize) -> (f32, f32) {
+    let logical_cpu_count = logical_cpu_count.max(1) as f32;
+    let non_negative = if cpu_percent.is_finite() {
+        cpu_percent.max(0.0)
+    } else {
+        0.0
+    };
+    let cpu_cores = non_negative / 100.0;
+    let cpu_host_percent = (non_negative / logical_cpu_count).clamp(0.0, 100.0);
+    (cpu_cores, cpu_host_percent)
 }
 
 /// Sum every regular file under `root`.
@@ -207,6 +242,22 @@ mod tests {
         assert!(host.memory_total_mb > 0);
         assert!(host.memory_used_mb > 0);
         assert!(host.memory_used_mb <= host.memory_total_mb);
+    }
+
+    #[test]
+    fn process_cpu_exposes_raw_cores_and_host_normalized_values() {
+        let (cores, host_percent) = normalize_process_cpu(278.98, 8);
+
+        assert!((cores - 2.7898).abs() < 0.0001);
+        assert!((host_percent - 34.8725).abs() < 0.0001);
+    }
+
+    #[test]
+    fn process_cpu_normalization_has_a_safe_one_cpu_floor() {
+        let (cores, host_percent) = normalize_process_cpu(150.0, 0);
+
+        assert_eq!(cores, 1.5);
+        assert_eq!(host_percent, 100.0);
     }
 
     #[test]

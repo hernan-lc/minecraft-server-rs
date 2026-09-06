@@ -5,6 +5,7 @@ import { Button, Card, Field, Input, Select, StatCard, StatusPill, formatUptime 
 import * as Icon from "../components/icons";
 import { useToast } from "../components/Toast";
 import { useT } from "../i18n";
+import { serverActionCapabilities } from "../serverActions";
 import type { Server, SystemStats, User } from "../types";
 
 export function Dashboard({
@@ -110,67 +111,75 @@ export function Dashboard({
       )}
 
       <div class="grid gap-4">
-        {servers.map((server) => (
-          <article
-            key={server.id}
-            class="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-ink-700 bg-ink-850 px-4 py-4 sm:px-5"
-          >
-            <div class="min-w-0 space-y-1">
-              <button
-                class="truncate text-base font-semibold hover:text-accent"
-                onClick={() => onOpen(server.id)}
-              >
-                {server.name}
-              </button>
-              <p class="text-xs text-fg-muted">
-                {server.core} {server.version} · {t("createServer.port").toLowerCase()}{" "}
-                {server.port} · Java {server.java_major} · {server.memory.max_mb} MB ·{" "}
-                {t("dashboard.upFor", { duration: formatUptime(server.uptime_secs) })}
-                {server.metrics && (
-                  <>
-                    {" · "}
-                    <span class="tabular-nums text-fg">
-                      {server.metrics.cpu_percent.toFixed(0)}% CPU ·{" "}
-                      {server.metrics.memory_mb} MB used
-                    </span>
-                  </>
-                )}
-              </p>
-            </div>
-
-            <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-              <StatusPill status={server.status} />
-              <div class="flex flex-wrap items-center gap-2">
-                <Button
-                  variant="primary"
-                  icon={<Icon.Play size={13} />}
-                  disabled={server.status !== "offline" && server.status !== "crashed"}
-                  onClick={() => power(server.id, "start")}
+        {servers.map((server) => {
+          const actions = serverActionCapabilities(server.status);
+          const cpuHostPercent =
+            typeof server.metrics?.cpu_host_percent === "number" &&
+            Number.isFinite(server.metrics.cpu_host_percent)
+              ? Math.max(0, Math.min(100, server.metrics.cpu_host_percent))
+              : null;
+          return (
+            <article
+              key={server.id}
+              class="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-ink-700 bg-ink-850 px-4 py-4 sm:px-5"
+            >
+              <div class="min-w-0 space-y-1">
+                <button
+                  class="truncate text-base font-semibold hover:text-accent"
+                  onClick={() => onOpen(server.id)}
                 >
-                  {t("dashboard.start")}
-                </Button>
-                <Button
-                  icon={<Icon.Restart size={15} />}
-                  disabled={server.status === "offline" || server.status === "crashed"}
-                  onClick={() => power(server.id, "restart")}
-                >
-                  {t("dashboard.restart")}
-                </Button>
-                <Button
-                  variant="danger"
-                  icon={<Icon.Stop size={15} />}
-                  disabled={server.status === "offline" || server.status === "crashed"}
-                  onClick={() => power(server.id, "stop")}
-                >
-                  {server.status === "preparing" ? t("common.cancel") : t("dashboard.stop")}
-                </Button>
-                <Button variant="ghost" onClick={() => onOpen(server.id)}>
-                  {t("dashboard.manage")}
-                </Button>
+                  {server.name}
+                </button>
+                <p class="text-xs text-fg-muted">
+                  {server.core} {server.version} · {t("createServer.port").toLowerCase()}{" "}
+                  {server.port} · Java {server.java_major} · {server.memory.max_mb} MiB ·{" "}
+                  {t("dashboard.upFor", { duration: formatUptime(server.uptime_secs) })}
+                  {server.metrics && (
+                    <>
+                      {" · "}
+                      <span class="tabular-nums text-fg">
+                        {cpuHostPercent === null ? "—" : `${cpuHostPercent.toFixed(0)}%`} CPU ·{" "}
+                        {server.metrics.memory_mb} MiB RSS
+                      </span>
+                    </>
+                  )}
+                </p>
               </div>
-            </div>
-          </article>
-        ))}
+
+              <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <StatusPill status={server.status} />
+                <div class="flex flex-wrap items-center gap-2">
+                  <Button
+                    variant="primary"
+                    icon={<Icon.Play size={13} />}
+                    disabled={!actions.start}
+                    onClick={() => power(server.id, "start")}
+                  >
+                    {t("dashboard.start")}
+                  </Button>
+                  <Button
+                    icon={<Icon.Restart size={15} />}
+                    disabled={!actions.restart}
+                    onClick={() => power(server.id, "restart")}
+                  >
+                    {t("dashboard.restart")}
+                  </Button>
+                  <Button
+                    variant="danger"
+                    icon={<Icon.Stop size={15} />}
+                    disabled={!(actions.stop || actions.cancel)}
+                    onClick={() => power(server.id, "stop")}
+                  >
+                    {actions.cancel ? t("common.cancel") : t("dashboard.stop")}
+                  </Button>
+                  <Button variant="ghost" onClick={() => onOpen(server.id)}>
+                    {t("dashboard.manage")}
+                  </Button>
+                </div>
+              </div>
+            </article>
+          );
+        })}
 
         {servers.length === 0 && (
           <Card>

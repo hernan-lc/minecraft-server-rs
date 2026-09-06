@@ -485,36 +485,53 @@ async fn delete(
     // ---- Lifecycle: ensure no managed process/preparation remains before committing deletion ----
     // Must not commit a successful logical deletion while a JVM or preparation task is still alive.
     let status = guardian.status().await;
-    let needs_stop = status.is_running() || status == guardian::ServerStatus::Preparing;
+    let needs_stop = matches!(
+        status,
+        guardian::ServerStatus::Preparing
+            | guardian::ServerStatus::Starting
+            | guardian::ServerStatus::Online
+    );
     if needs_stop {
         guardian
             .stop()
             .await
             .map_err(|e| ApiError::Internal(anyhow::anyhow!("failed to stop server {id}: {e}")))?;
-        if !guardian
-            .wait_for_settled(std::time::Duration::from_secs(10))
-            .await
-        {
+    }
+    // Offline/Crashed and an already-Stopping server both need a final settle
+    // check. A transition already stopping cannot be sent the public `stop`
+    // action again, so use the still-available kill capability if it refuses
+    // to finish in the deletion window.
+    if !guardian
+        .wait_for_settled(std::time::Duration::from_secs(10))
+        .await
+    {
+        if status == guardian::ServerStatus::Stopping {
+            guardian.kill().await.map_err(|e| {
+                ApiError::Internal(anyhow::anyhow!("failed to kill server {id}: {e}"))
+            })?;
+            if !guardian
+                .wait_for_settled(std::time::Duration::from_secs(10))
+                .await
+            {
+                return Err(ApiError::Internal(anyhow::anyhow!(
+                    "server {id} process did not exit after stop; deletion aborted"
+                )));
+            }
+        } else if needs_stop {
             return Err(ApiError::Internal(anyhow::anyhow!(
                 "server {id} process did not exit after stop; deletion aborted"
             )));
-        }
-    } else {
-        // Offline/Crashed: ensure no lingering preparation task or orphaned child.
-        if !guardian
-            .wait_for_settled(std::time::Duration::from_secs(10))
-            .await
-        {
+        } else {
             return Err(ApiError::Internal(anyhow::anyhow!(
                 "server {id} preparation did not settle; deletion aborted"
             )));
         }
-        let snapshot = guardian.snapshot().await;
-        if snapshot.pid.is_some() {
-            return Err(ApiError::Internal(anyhow::anyhow!(
-                "server {id} still has live process"
-            )));
-        }
+    }
+    let snapshot = guardian.snapshot().await;
+    if snapshot.pid.is_some() {
+        return Err(ApiError::Internal(anyhow::anyhow!(
+            "server {id} still has live process"
+        )));
     }
     // Final verification that no process or preparation remains.
     {

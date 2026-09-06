@@ -67,6 +67,19 @@ pub struct ConsoleLine {
     pub line: String,
 }
 
+/// The current provisioning activity, when a server is preparing.
+///
+/// This is state rather than console history: a reconnecting client can render
+/// the latest value without replaying one retained line for every download
+/// callback.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProgressState {
+    /// What is happening, for example `"downloading paper 1.21.8"`.
+    pub stage: String,
+    /// Completion in `0.0..=1.0`, when it can be determined.
+    pub fraction: Option<f32>,
+}
+
 /// Everything a guardian reports about its server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

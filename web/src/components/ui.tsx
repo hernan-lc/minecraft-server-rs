@@ -210,6 +210,7 @@ export function StatCard({
   icon,
   fraction,
   tone = "accent",
+  detail,
 }: {
   value: string;
   max?: string;
@@ -218,6 +219,8 @@ export function StatCard({
   /** 0..1. Omit to render the card without a bar. */
   fraction?: number;
   tone?: "accent" | "warn";
+  /** Optional explanatory line for metrics with more than one unit. */
+  detail?: ComponentChildren;
 }) {
   const clamped = fraction === undefined ? undefined : Math.max(0, Math.min(1, fraction));
   const bar = tone === "warn" ? "bg-amber-400" : "bg-accent";
@@ -235,6 +238,7 @@ export function StatCard({
       </div>
 
       <p class="mt-1 text-sm text-fg-muted">{label}</p>
+      {detail && <p class="mt-1 text-xs text-fg-muted/80">{detail}</p>}
 
       {clamped !== undefined && (
         <>

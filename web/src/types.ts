@@ -113,6 +113,8 @@ export interface Server {
   pid: number | null;
   uptime_secs: number | null;
   crashes: number;
+  /** Current provisioning activity, present while the server is preparing. */
+  progress: ProgressState | null;
   metrics: ProcessMetrics | null;
   installed: Installation | null;
   /** True when starting would download a new artifact first. */
@@ -125,8 +127,28 @@ export interface Server {
   pending_restart: boolean;
 }
 
+export interface ProgressState {
+  stage: string;
+  fraction: number | null;
+}
+
+/** The Guardian snapshot sent with the console WebSocket backfill. */
+export interface ServerSnapshot {
+  status: Status;
+  pid: number | null;
+  uptime_secs: number | null;
+  crashes: number;
+  progress: ProgressState | null;
+}
+
 export interface ProcessMetrics {
   cpu_percent: number;
+  /** Approximate number of logical CPUs consumed by the process. */
+  cpu_cores: number;
+  /** Process CPU normalized against the panel host's logical CPU capacity. */
+  cpu_host_percent: number;
+  logical_cpu_count: number;
+  /** Resident memory (RSS), in MiB. */
   memory_mb: number;
 }
 
@@ -217,7 +239,13 @@ export type ServerEvent =
   | { type: "stopped"; code: number | null }
   | { type: "crashed"; code: number | null; attempt: number }
   | { type: "progress"; stage: string; fraction: number | null }
-  | { type: "backfill"; status: Server; lines: ConsoleLine[] }
+  | {
+      type: "backfill";
+      status: ServerSnapshot;
+      lines: ConsoleLine[];
+      /** Highest console sequence represented by this backfill. */
+      through_seq: number | null;
+    }
   | { type: "lagged"; skipped: number };
 
 export interface FileEntry {

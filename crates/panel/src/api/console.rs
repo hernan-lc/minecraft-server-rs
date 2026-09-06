@@ -112,10 +112,13 @@ async fn pump(
     // delivered late rather than dropped.
     let mut events = guardian.subscribe();
 
+    let snapshot = guardian.snapshot().await;
+    let (lines, through_seq) = guardian.console_backfill().await;
     let backfill = serde_json::json!({
         "type": "backfill",
-        "status": guardian.snapshot().await,
-        "lines": guardian.console().await,
+        "status": snapshot,
+        "lines": lines,
+        "through_seq": through_seq,
     });
     if tx
         .send(Message::Text(backfill.to_string().into()))

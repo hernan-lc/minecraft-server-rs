@@ -309,12 +309,27 @@ impl AppState {
         guardian: Arc<Guardian>,
     ) -> anyhow::Result<()> {
         let status = guardian.status().await;
-        let needs_stop = status.is_running() || status == guardian::ServerStatus::Preparing;
+        let needs_stop = matches!(
+            status,
+            guardian::ServerStatus::Preparing
+                | guardian::ServerStatus::Starting
+                | guardian::ServerStatus::Online
+        );
         if needs_stop {
             guardian
                 .stop()
                 .await
                 .map_err(|e| anyhow::anyhow!("failed to stop server {id}: {e}"))?;
+        }
+        if !guardian
+            .wait_for_settled(std::time::Duration::from_secs(10))
+            .await
+            && status == guardian::ServerStatus::Stopping
+        {
+            guardian
+                .kill()
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to kill server {id}: {e}"))?;
         }
         if !guardian
             .wait_for_settled(std::time::Duration::from_secs(10))

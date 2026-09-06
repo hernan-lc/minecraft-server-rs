@@ -111,6 +111,11 @@ pub async fn resolve_java(
         .map_err(|e| Error::JavaUnavailable(major, e.to_string()))
 }
 
+/// Build the semantic progress label for a server-jar download.
+fn download_stage(core: &str, version: &str) -> String {
+    format!("downloading {core} {version}")
+}
+
 /// Download the server jar for `config`, returning it and the build it resolved to.
 pub async fn resolve_jar(
     config: &ServerConfig,
@@ -126,13 +131,11 @@ pub async fn resolve_jar(
                 .total
                 .filter(|t| *t > 0)
                 .map(|t| p.downloaded as f32 / t as f32);
+            // Keep the stage semantic. The presentation layer owns percentage
+            // formatting; putting it here makes structured and rendered
+            // progress display the same percentage twice.
             progress_for_download(
-                format!(
-                    "downloading {} {} ({}%)",
-                    core_for_progress,
-                    version_for_progress,
-                    fraction.map(|f| (f * 100.0).round() as u32).unwrap_or(0)
-                ),
+                download_stage(&core_for_progress, &version_for_progress),
                 fraction,
             );
         }))
@@ -498,5 +501,13 @@ mod tests {
         assert!(environment.java.is_absolute());
         assert!(environment.jar.is_absolute());
         assert!(environment.directory.is_absolute());
+    }
+
+    #[test]
+    fn download_stage_does_not_embed_a_percentage() {
+        let stage = download_stage("paper", "26.2");
+
+        assert_eq!(stage, "downloading paper 26.2");
+        assert!(!stage.contains('%'));
     }
 }

@@ -5,6 +5,7 @@ import { Backups } from "../components/Backups";
 import { Console } from "../components/Console";
 import { Files } from "../components/Files";
 import { Mods } from "../components/Mods";
+import { ServerActivity } from "../components/ServerActivity";
 import { ServerBackupSettings } from "../components/ServerBackupSettings";
 import {
   Banner,
@@ -25,7 +26,8 @@ import { Tooltip } from "../components/Tooltip";
 import { useDialogs } from "../components/Modal";
 import { useToast } from "../components/Toast";
 import { useT } from "../i18n";
-import type { Server, ServerPlayitView, Status, User } from "../types";
+import { serverActionCapabilities } from "../serverActions";
+import type { ProgressState, Server, ServerPlayitView, Status, User } from "../types";
 
 type Tab = "console" | "files" | "plugins" | "backups" | "settings";
 
@@ -46,13 +48,14 @@ export function ServerDetail({
   const [playit, setPlayit] = useState<ServerPlayitView | null>(null);
   const [tab, setTab] = useState<Tab>("console");
   const [failed, setFailed] = useState<string | null>(null);
-  const [progress, setProgress] = useState<{ stage: string; fraction: number | null } | null>(null);
+  const [progress, setProgress] = useState<ProgressState | null>(null);
 
   async function refresh() {
     try {
       const [nextServer, nextPlayit] = await Promise.all([api.server(id), api.serverPlayit(id)]);
       setServer(nextServer);
       setPlayit(nextPlayit);
+      setProgress(nextServer.status === "preparing" ? nextServer.progress : null);
       setFailed(null);
     } catch (e) {
       setFailed(e instanceof Error ? e.message : t("errors.loadServer"));
@@ -71,16 +74,20 @@ export function ServerDetail({
 
   function onStatus(status: Status) {
     setServer((prev) => (prev ? { ...prev, status } : prev));
-    if (status !== "preparing") setProgress(null);
+    // A new lifecycle begins with a fresh snapshot/progress event. Clear any
+    // previous run immediately so a delayed event cannot bleed into it.
+    setProgress(null);
   }
 
-  function onProgress(p: { stage: string; fraction: number | null } | null) {
+  function onProgress(p: ProgressState | null) {
     setProgress(p);
   }
 
   async function power(action: "start" | "stop" | "restart" | "kill") {
     try {
-      setServer(await api.power(id, action));
+      const nextServer = await api.power(id, action);
+      setServer(nextServer);
+      setProgress(nextServer.status === "preparing" ? nextServer.progress : null);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : t("errors.actionFailed"));
     }
@@ -98,7 +105,7 @@ export function ServerDetail({
     );
   }
 
-  const running = server.status !== "offline" && server.status !== "crashed";
+  const actions = serverActionCapabilities(server.status);
 
   const tabs: { id: Tab; icon: JSX.Element }[] = [
     { id: "console", icon: <Icon.Terminal size={15} /> },
@@ -108,9 +115,21 @@ export function ServerDetail({
     { id: "settings", icon: <Icon.Settings size={15} /> },
   ];
 
-  const memoryFraction = server.metrics
-    ? server.metrics.memory_mb / server.memory.max_mb
-    : 0;
+  const cpuHostPercent =
+    typeof server.metrics?.cpu_host_percent === "number" &&
+    Number.isFinite(server.metrics.cpu_host_percent)
+      ? Math.max(0, Math.min(100, server.metrics.cpu_host_percent))
+      : null;
+  const cpuCores =
+    typeof server.metrics?.cpu_cores === "number" && Number.isFinite(server.metrics.cpu_cores)
+      ? server.metrics.cpu_cores
+      : null;
+  const logicalCpuCount =
+    typeof server.metrics?.logical_cpu_count === "number" && server.metrics.logical_cpu_count > 0
+      ? server.metrics.logical_cpu_count
+      : null;
+  const hasCpuMetric = cpuHostPercent !== null && cpuCores !== null && logicalCpuCount !== null;
+  const memoryMb = server.metrics?.memory_mb;
 
   return (
     <div class="mx-auto flex h-full w-full max-w-6xl flex-col gap-5 px-4 py-6 sm:px-6">
@@ -164,15 +183,23 @@ export function ServerDetail({
           <div class="flex items-center gap-2">
             <StatusPill status={server.status} />
 
-            {running ? (
+            {actions.cancel ? (
               <Button
                 variant="ghost"
                 icon={<Icon.Stop size={15} />}
                 onClick={() => power("stop")}
               >
-                {server.status === "preparing" ? t("common.cancel") : t("dashboard.stop")}
+                {t("common.cancel")}
               </Button>
-            ) : (
+            ) : actions.stop ? (
+              <Button
+                variant="ghost"
+                icon={<Icon.Stop size={15} />}
+                onClick={() => power("stop")}
+              >
+                {t("dashboard.stop")}
+              </Button>
+            ) : actions.start ? (
               <Button
                 variant="primary"
                 icon={<Icon.Play size={13} />}
@@ -180,12 +207,12 @@ export function ServerDetail({
               >
                 {t("dashboard.start")}
               </Button>
-            )}
+            ) : null}
 
             <Button
               variant="primary"
               icon={<Icon.Restart size={15} />}
-              disabled={!running}
+              disabled={!actions.restart}
               onClick={() => power("restart")}
             >
               {t("dashboard.restart")}
@@ -201,23 +228,23 @@ export function ServerDetail({
                     {
                       label: t("dashboard.start"),
                       onSelect: () => power("start"),
-                      disabled: running,
+                      disabled: !actions.start,
                     },
                     {
                       label: t("dashboard.restart"),
                       onSelect: () => power("restart"),
-                      disabled: !running,
+                      disabled: !actions.restart,
                     },
                     {
-                      label: t("dashboard.stop"),
+                      label: actions.cancel ? t("common.cancel") : t("dashboard.stop"),
                       onSelect: () => power("stop"),
-                      disabled: !running,
+                      disabled: !(actions.stop || actions.cancel),
                     },
                     {
                       label: t("dashboard.kill"),
                       danger: true,
                       onSelect: () => power("kill"),
-                      disabled: !running,
+                      disabled: !actions.kill,
                     },
                   ],
                   server.name,
@@ -247,43 +274,36 @@ export function ServerDetail({
         </nav>
       </header>
 
-      {!server.eula_accepted && <Banner kind="info">{t("server.eulaWarning")}</Banner>}
+      <ServerActivity status={server.status} progress={progress} />
 
-      {server.status === "preparing" && (
-        <div class="rounded-lg border border-sky-500/40 bg-sky-500/10 px-4 py-3">
-          <p class="text-sm font-medium text-sky-100">{progress?.stage ?? t("server.preparing")}</p>
-          {progress?.fraction !== null && progress?.fraction !== undefined && (
-            <div class="mt-2 flex items-center gap-3">
-              <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-sky-900">
-                <div
-                  class="h-full bg-sky-400 transition-[width] duration-300"
-                  style={{ width: `${Math.max(0, Math.min(1, progress.fraction ?? 0)) * 100}%` }}
-                />
-              </div>
-              <span class="shrink-0 text-xs tabular-nums text-sky-100">
-                {Math.round((progress?.fraction ?? 0) * 100)}%
-              </span>
-            </div>
-          )}
-        </div>
-      )}
+      {!server.eula_accepted && <Banner kind="info">{t("server.eulaWarning")}</Banner>}
 
       {tab === "console" && (
         <div class="grid gap-4 sm:grid-cols-3">
           <StatCard
             icon={<Icon.Cpu size={20} />}
-            value={`${(server.metrics?.cpu_percent ?? 0).toFixed(2)}%`}
-            max="100%"
+            value={hasCpuMetric ? `${cpuHostPercent.toFixed(2)}%` : "—"}
+            max={hasCpuMetric ? "100%" : undefined}
             label={t("server.cpuUsage")}
-            fraction={(server.metrics?.cpu_percent ?? 0) / 100}
+            fraction={hasCpuMetric ? cpuHostPercent / 100 : undefined}
+            detail={
+              hasCpuMetric
+                ? t("server.cpuCores", {
+                    cores: cpuCores.toFixed(2),
+                    count: logicalCpuCount,
+                  })
+                : t("server.notRunning")
+            }
           />
           <StatCard
             icon={<Icon.Memory size={20} />}
-            value={`${server.metrics?.memory_mb ?? 0} MB`}
-            max={`${server.memory.max_mb} MB`}
+            value={memoryMb === undefined ? "—" : `${memoryMb} MiB`}
             label={t("server.memoryUsage")}
-            fraction={memoryFraction}
-            tone={memoryFraction > 0.9 ? "warn" : "accent"}
+            detail={
+              memoryMb === undefined
+                ? t("server.notRunning")
+                : t("server.heapMax", { memory: server.memory.max_mb })
+            }
           />
           <StatCard
             icon={<Icon.Folder size={20} />}
@@ -294,7 +314,15 @@ export function ServerDetail({
       )}
 
       <div class="flex min-h-0 flex-1 flex-col">
-        {tab === "console" && <Console serverId={id} onStatus={onStatus} onProgress={onProgress} />}
+        {tab === "console" && (
+          <Console
+            serverId={id}
+            status={server.status}
+            progress={progress}
+            onStatus={onStatus}
+            onProgress={onProgress}
+          />
+        )}
         {tab === "files" && <Files serverId={id} />}
         {tab === "plugins" && <Mods server={server} />}
         {tab === "backups" && (
@@ -355,7 +383,7 @@ function Installed({ server, onChanged }: { server: Server; onChanged: () => voi
   const dialogs = useDialogs();
   const [busy, setBusy] = useState(false);
 
-  const running = server.status !== "offline" && server.status !== "crashed";
+  const lifecycleBusy = server.status !== "offline" && server.status !== "crashed";
 
   async function update() {
     const confirmed = await dialogs.confirm({
@@ -430,8 +458,8 @@ function Installed({ server, onChanged }: { server: Server; onChanged: () => voi
         {!server.installed && (
           <Button
             variant="primary"
-            disabled={busy || running}
-            title={running ? t("settings.mustStopToUpdate") : undefined}
+            disabled={busy || lifecycleBusy}
+            title={lifecycleBusy ? t("settings.mustStopToUpdate") : undefined}
             onClick={prepare}
           >
             {busy ? t("settings.updating") : "Install"}
@@ -440,16 +468,16 @@ function Installed({ server, onChanged }: { server: Server; onChanged: () => voi
         {server.needs_install && (
           <Button
             variant="primary"
-            disabled={busy || running}
-            title={running ? t("settings.mustStopToUpdate") : undefined}
+            disabled={busy || lifecycleBusy}
+            title={lifecycleBusy ? t("settings.mustStopToUpdate") : undefined}
             onClick={prepare}
           >
             {busy ? t("settings.updating") : "Install"}
           </Button>
         )}
         <Button
-          disabled={busy || running}
-          title={running ? t("settings.mustStopToUpdate") : undefined}
+          disabled={busy || lifecycleBusy}
+          title={lifecycleBusy ? t("settings.mustStopToUpdate") : undefined}
           onClick={update}
         >
           {busy ? t("settings.updating") : t("settings.update")}

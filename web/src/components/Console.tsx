@@ -3,13 +3,40 @@ import { openConsole } from "../api";
 import { useT } from "../i18n";
 import * as Icon from "./icons";
 import { IconButton } from "./ui";
-import type { ConsoleLine, ServerEvent, Status } from "../types";
+import type { ConsoleLine, ProgressState, ServerEvent, Status } from "../types";
 
 /** Keep the DOM bounded; the backend keeps the authoritative buffer. */
 const MAX_LINES = 2000;
 
 /** Give up after this many failed reconnects rather than retrying forever. */
 const MAX_RECONNECTS = 8;
+
+type ConsoleEntry =
+  | { kind: "line"; line: ConsoleLine }
+  | { kind: "notice"; id: number; line: ConsoleLine };
+
+function uniqueLines(lines: ConsoleLine[]): ConsoleLine[] {
+  const seen = new Set<number>();
+  return lines.filter((line) => {
+    if (seen.has(line.seq)) return false;
+    seen.add(line.seq);
+    return true;
+  });
+}
+
+/** Merge a reconnect backfill with lines received while the socket reopened. */
+function mergeBackfill(previous: ConsoleEntry[], incoming: ConsoleLine[]): ConsoleEntry[] {
+  const bySeq = new Map<number, ConsoleLine>();
+  for (const entry of previous) {
+    if (entry.kind === "line") bySeq.set(entry.line.seq, entry.line);
+  }
+  for (const line of incoming) bySeq.set(line.seq, line);
+
+  return [...bySeq.values()]
+    .sort((left, right) => left.seq - right.seq)
+    .slice(-MAX_LINES)
+    .map((line) => ({ kind: "line" as const, line }));
+}
 
 /** Colour a line by what it obviously is, without parsing log formats strictly. */
 function lineClass(line: ConsoleLine): string {
@@ -23,15 +50,19 @@ function lineClass(line: ConsoleLine): string {
 
 export function Console({
   serverId,
+  status,
+  progress,
   onStatus,
   onProgress,
 }: {
   serverId: string;
+  status?: Status;
+  progress?: ProgressState | null;
   onStatus: (status: Status) => void;
-  onProgress?: (p: { stage: string; fraction: number | null } | null) => void;
+  onProgress?: (p: ProgressState | null) => void;
 }) {
   const t = useT();
-  const [lines, setLines] = useState<ConsoleLine[]>([]);
+  const [lines, setLines] = useState<ConsoleEntry[]>([]);
   const [connected, setConnected] = useState(false);
   const [draft, setDraft] = useState("");
   const [history, setHistory] = useState<string[]>([]);
@@ -40,15 +71,24 @@ export function Console({
   const [gaveUp, setGaveUp] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
-  const [progress, setProgress] = useState<{ stage: string; fraction: number | null } | null>(null);
 
   const socket = useRef<WebSocket | null>(null);
   const scroller = useRef<HTMLDivElement | null>(null);
   const pinned = useRef(true);
+  const lastSeqRef = useRef<number | null>(null);
+  const noticeIdRef = useRef(0);
+  const compactProgressPercent =
+    status === "preparing" &&
+    typeof progress?.fraction === "number" &&
+    Number.isFinite(progress.fraction)
+      ? Math.round(Math.max(0, Math.min(1, progress.fraction)) * 100)
+      : null;
 
   useEffect(() => {
     setGaveUp(false);
     setLines([]);
+    lastSeqRef.current = null;
+    noticeIdRef.current = 0;
     let closed = false;
     let retry: number | undefined;
     let attempt = 0;
@@ -94,26 +134,45 @@ export function Console({
       ws.onmessage = (event) => {
         const message: ServerEvent = JSON.parse(event.data);
         switch (message.type) {
-          case "backfill":
-            setLines(message.lines.slice(-MAX_LINES));
+          case "backfill": {
+            const backfill = uniqueLines(message.lines).slice(-MAX_LINES);
+            setLines((previous) => mergeBackfill(previous, backfill));
+
+            const highestLine = backfill.reduce(
+              (highest, line) => Math.max(highest, line.seq),
+              -1,
+            );
+            const highest = Math.max(message.through_seq ?? -1, highestLine);
+            if (highest >= 0) {
+              lastSeqRef.current = Math.max(lastSeqRef.current ?? -1, highest);
+            }
             onStatus(message.status.status);
+            onProgress?.(
+              message.status.status === "preparing" ? message.status.progress : null,
+            );
             break;
-          case "console":
+          }
+          case "console": {
+            if (lastSeqRef.current !== null && message.seq <= lastSeqRef.current) break;
+            lastSeqRef.current = message.seq;
+            const line = message as unknown as ConsoleLine;
             setLines((prev) => {
-              const next = [...prev, message as unknown as ConsoleLine];
+              if (prev.some((entry) => entry.kind === "line" && entry.line.seq === line.seq)) {
+                return prev;
+              }
+              const next = [...prev, { kind: "line" as const, line }];
               return next.length > MAX_LINES ? next.slice(-MAX_LINES) : next;
             });
             break;
+          }
           case "status":
             onStatus(message.status);
             if (message.status !== "preparing") {
-              setProgress(null);
               onProgress?.(null);
             }
             break;
           case "progress": {
             const p = { stage: message.stage, fraction: message.fraction };
-            setProgress(p);
             onProgress?.(p);
             break;
           }
@@ -121,11 +180,15 @@ export function Console({
             setLines((prev) => [
               ...prev,
               {
-                seq: -1,
-                stream: "system",
-                line: t("console.skipped", { count: message.skipped }),
+                kind: "notice" as const,
+                id: ++noticeIdRef.current,
+                line: {
+                  seq: -1,
+                  stream: "system" as const,
+                  line: t("console.skipped", { count: message.skipped }),
+                },
               },
-            ]);
+            ].slice(-MAX_LINES));
             break;
         }
       };
@@ -184,9 +247,12 @@ export function Console({
 
   const rendered = useMemo(
     () =>
-      lines.map((line, index) => (
-        <div key={`${line.seq}-${index}`} class={`whitespace-pre-wrap break-words ${lineClass(line)}`}>
-          {line.line}
+      lines.map((entry) => (
+        <div
+          key={entry.kind === "line" ? entry.line.seq : `notice-${entry.id}`}
+          class={`whitespace-pre-wrap break-words ${lineClass(entry.line)}`}
+        >
+          {entry.line.line}
         </div>
       )),
     [lines],
@@ -203,12 +269,24 @@ export function Console({
       <div class="flex items-center justify-between">
         <h2 class="flex items-center gap-2.5 text-lg font-semibold">
           {t("console.title")}
+          {expanded && status && (
+            <span class="text-sm font-normal text-fg-muted">
+              · {t(`status.${status}` as "status.offline")}
+              {compactProgressPercent !== null && ` · ${compactProgressPercent}%`}
+            </span>
+          )}
           <span
             class={`size-2.5 rounded-full ${
               connected ? "bg-accent" : gaveUp ? "bg-red-500" : "animate-pulse bg-amber-400"
             }`}
             role="status"
-            aria-label={connected ? t("console.live") : t("console.reconnecting")}
+            aria-label={
+              connected
+                ? t("console.connected")
+                : gaveUp
+                  ? t("console.disconnectedState")
+                  : t("console.reconnecting")
+            }
           />
         </h2>
 
@@ -218,25 +296,6 @@ export function Console({
           onClick={() => setExpanded((v) => !v)}
         />
       </div>
-
-      {progress && (
-        <div class="rounded-xl border border-sky-500/40 bg-sky-500/10 px-4 py-3">
-          <div class="flex items-center justify-between gap-3 text-sm text-sky-100">
-            <span class="truncate font-medium">{progress.stage}</span>
-            {progress.fraction !== null && (
-              <span class="shrink-0 tabular-nums">{Math.round(progress.fraction * 100)}%</span>
-            )}
-          </div>
-          {progress.fraction !== null && (
-            <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-sky-900">
-              <div
-                class="h-full bg-sky-400 transition-[width] duration-300"
-                style={{ width: `${Math.max(0, Math.min(1, progress.fraction)) * 100}%` }}
-              />
-            </div>
-          )}
-        </div>
-      )}
 
       <div class="relative min-h-0 flex-1 overflow-hidden rounded-xl bg-ink-950">
         <div

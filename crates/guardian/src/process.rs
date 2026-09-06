@@ -10,7 +10,7 @@
 use crate::config::{GuardianConfig, ServerConfig, MAX_ARGUMENT_BYTES};
 use crate::environment::{prepare, Provision, ServerEnvironment};
 use crate::error::{Error, Result};
-use crate::events::{ConsoleLine, ServerEvent, ServerStatus, Stream};
+use crate::events::{ConsoleLine, ProgressState, ServerEvent, ServerStatus, Stream};
 use crate::fs::ScopedFs;
 use crate::install::Installation;
 use crate::sandbox::SandboxPolicy;
@@ -30,6 +30,9 @@ use tokio::task::AbortHandle;
 
 /// How often the supervisor checks whether the child has exited.
 const REAP_INTERVAL: Duration = Duration::from_millis(200);
+/// Minimum interval between transport progress events when a download is not
+/// otherwise crossing a visible percentage boundary.
+const PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(100);
 /// Maximum size of one line sent to the Minecraft console.
 pub const MAX_COMMAND_BYTES: usize = 8 * 1024;
 
@@ -67,13 +70,57 @@ fn may_start(status: ServerStatus) -> bool {
     matches!(status, ServerStatus::Offline | ServerStatus::Crashed)
 }
 
-/// Whether `stop` and `kill` are permitted from `status`.
+/// Whether `restart` is safe to request without racing another transition.
+fn may_restart(status: ServerStatus) -> bool {
+    status == ServerStatus::Online
+}
+
+/// Whether a graceful `stop` is permitted from `status`.
 ///
 /// `Preparing` counts: a download the operator no longer wants must be
 /// abandonable, or a slow provision leaves the server unusable until the panel
 /// itself is restarted.
 fn may_stop(status: ServerStatus) -> bool {
-    status.is_running() || status == ServerStatus::Preparing
+    matches!(
+        status,
+        ServerStatus::Preparing | ServerStatus::Starting | ServerStatus::Online
+    )
+}
+
+/// The last progress value sent over the event stream. The current value is
+/// stored separately so it remains authoritative even when transport events
+/// are coalesced.
+#[derive(Debug)]
+struct ProgressEmission {
+    at: Instant,
+    stage: String,
+    percent: Option<u8>,
+    complete: bool,
+}
+
+fn begin_progress(state: &mut RunState) {
+    state.status = Some(ServerStatus::Preparing);
+    state.progress = Some(ProgressState {
+        stage: "Preparing server".into(),
+        fraction: None,
+    });
+    state.progress_sequence = 0;
+    state.progress_emission = None;
+}
+
+fn clear_progress(state: &mut RunState) {
+    state.progress = None;
+    state.progress_emission = None;
+}
+
+fn normalize_fraction(fraction: Option<f32>) -> Option<f32> {
+    fraction.and_then(|value| {
+        if value.is_finite() {
+            Some(value.clamp(0.0, 1.0))
+        } else {
+            None
+        }
+    })
 }
 
 /// Mutable runtime state, guarded as one unit so status and process cannot disagree.
@@ -108,6 +155,12 @@ struct RunState {
     generation: u64,
     /// Prevents new starts while the owning panel is shutting down.
     shutting_down: bool,
+    /// Current provisioning activity, present only while preparing.
+    progress: Option<ProgressState>,
+    /// Callback order, used to ignore progress tasks that execute late.
+    progress_sequence: u64,
+    /// Transport-throttling state for progress events.
+    progress_emission: Option<ProgressEmission>,
 }
 
 /// A point-in-time view of a server, cheap enough to serialise on every poll.
@@ -121,6 +174,8 @@ pub struct Snapshot {
     pub uptime_secs: Option<u64>,
     /// Consecutive crashes not yet cleared by a successful start.
     pub crashes: u32,
+    /// Current provisioning activity, when the server is preparing.
+    pub progress: Option<ProgressState>,
 }
 
 /// Supervises exactly one Minecraft server.
@@ -194,7 +249,18 @@ impl Guardian {
 
     /// The retained console lines, oldest first.
     pub async fn console(&self) -> Vec<ConsoleLine> {
-        self.console.lock().await.iter().cloned().collect()
+        self.console_backfill().await.0
+    }
+
+    /// The retained console lines and the newest sequence included in them.
+    ///
+    /// The watermark lets a client ignore a live event that was queued after
+    /// subscription but is already present in the backfill. `None` means the
+    /// retained buffer is empty.
+    pub async fn console_backfill(&self) -> (Vec<ConsoleLine>, Option<u64>) {
+        let lines: Vec<_> = self.console.lock().await.iter().cloned().collect();
+        let through_seq = lines.last().map(|line| line.seq);
+        (lines, through_seq)
     }
 
     /// The current configuration.
@@ -256,6 +322,7 @@ impl Guardian {
             pid: state.pid,
             uptime_secs: state.started_at.map(|t| t.elapsed().as_secs()),
             crashes: self.crashes.load(Ordering::Relaxed),
+            progress: state.progress.clone(),
         }
     }
 
@@ -267,8 +334,78 @@ impl Guardian {
     }
 
     async fn set_status(&self, status: ServerStatus) {
-        self.state.lock().await.status = Some(status);
+        let mut state = self.state.lock().await;
+        state.status = Some(status);
+        if status != ServerStatus::Preparing {
+            clear_progress(&mut state);
+        } else if state.progress.is_none() {
+            begin_progress(&mut state);
+        }
+        drop(state);
         self.emit(ServerEvent::Status { status });
+    }
+
+    /// Record the newest provisioning value and emit only useful transport
+    /// updates. The state update is never throttled.
+    async fn record_progress(
+        &self,
+        preparation_id: Option<u64>,
+        sequence: u64,
+        stage: String,
+        fraction: Option<f32>,
+    ) {
+        let next = ProgressState {
+            stage,
+            fraction: normalize_fraction(fraction),
+        };
+        let mut state = self.state.lock().await;
+
+        let owns_active_preparation = state.status == Some(ServerStatus::Preparing)
+            && preparation_id.is_none_or(|id| id == state.preparation_id);
+        if preparation_id.is_some() && !owns_active_preparation {
+            // A callback can already be queued when cancellation or a
+            // failed preparation clears the state. It must not resurrect the
+            // old progress in a client's live event stream.
+            return;
+        }
+        if sequence < state.progress_sequence {
+            // The callback schedules an async state update, so a later
+            // callback can acquire the mutex first. Never let that reorder
+            // the authoritative current value backwards.
+            return;
+        }
+        state.progress_sequence = sequence;
+        if owns_active_preparation {
+            state.progress = Some(next.clone());
+        }
+
+        let percent = next
+            .fraction
+            .map(|fraction| (fraction * 100.0).round() as u8);
+        let complete = next.fraction == Some(1.0);
+        let now = Instant::now();
+        let should_emit = state.progress_emission.as_ref().is_none_or(|previous| {
+            previous.stage != next.stage
+                || previous.percent != percent
+                || now.duration_since(previous.at) >= PROGRESS_EVENT_INTERVAL
+                || (complete && !previous.complete)
+        });
+        if should_emit {
+            state.progress_emission = Some(ProgressEmission {
+                at: now,
+                stage: next.stage.clone(),
+                percent,
+                complete,
+            });
+            // Keep the lifecycle transition and its progress event ordered.
+            // Emitting after releasing the lock would allow a concurrent
+            // Starting/Offline status event to overtake this older update.
+            self.emit(ServerEvent::Progress {
+                stage: next.stage.clone(),
+                fraction: next.fraction,
+            });
+        }
+        drop(state);
     }
 
     async fn push_line(&self, stream: Stream, line: String) {
@@ -328,7 +465,7 @@ impl Guardian {
                     action: "reinstall",
                 });
             }
-            state.status = Some(ServerStatus::Preparing);
+            begin_progress(&mut state);
             state.intentional = false;
             state.next_preparation_id = state.next_preparation_id.wrapping_add(1);
             let preparation_id = state.next_preparation_id;
@@ -337,7 +474,7 @@ impl Guardian {
             let this = Arc::clone(self);
             let task = tokio::spawn(async move {
                 let _resource_lock = this.lock_resources().await;
-                let result = this.provision(Provision::Force).await;
+                let result = this.provision(Provision::Force, Some(preparation_id)).await;
                 let changed = {
                     let mut state = this.state.lock().await;
                     if state.preparation_id == preparation_id {
@@ -345,6 +482,7 @@ impl Guardian {
                         state.preparation_cancel = None;
                         if state.status == Some(ServerStatus::Preparing) {
                             state.status = Some(ServerStatus::Offline);
+                            clear_progress(&mut state);
                             true
                         } else {
                             false
@@ -378,7 +516,7 @@ impl Guardian {
     /// Reuses the recorded installation when it already satisfies the config,
     /// so this is a local, offline operation in the common case.
     pub async fn prepare(self: &Arc<Self>) -> Result<ServerEnvironment> {
-        self.provision(Provision::IfNeeded).await
+        self.provision(Provision::IfNeeded, None).await
     }
 
     /// Pre-download / install without launching, with status-machine handling.
@@ -396,7 +534,7 @@ impl Guardian {
                     action: "prepare",
                 });
             }
-            state.status = Some(ServerStatus::Preparing);
+            begin_progress(&mut state);
             state.intentional = false;
             state.next_preparation_id = state.next_preparation_id.wrapping_add(1);
             let preparation_id = state.next_preparation_id;
@@ -404,7 +542,9 @@ impl Guardian {
             let this = Arc::clone(self);
             let task = tokio::spawn(async move {
                 let _resource_lock = this.lock_resources().await;
-                let result = this.provision(Provision::IfNeeded).await;
+                let result = this
+                    .provision(Provision::IfNeeded, Some(preparation_id))
+                    .await;
                 let changed = {
                     let mut state = this.state.lock().await;
                     if state.preparation_id == preparation_id {
@@ -412,6 +552,7 @@ impl Guardian {
                         state.preparation_cancel = None;
                         if state.status == Some(ServerStatus::Preparing) {
                             state.status = Some(ServerStatus::Offline);
+                            clear_progress(&mut state);
                             true
                         } else {
                             false
@@ -440,27 +581,25 @@ impl Guardian {
         }
     }
 
-    async fn provision(self: &Arc<Self>, mode: Provision) -> Result<ServerEnvironment> {
+    async fn provision(
+        self: &Arc<Self>,
+        mode: Provision,
+        preparation_id: Option<u64>,
+    ) -> Result<ServerEnvironment> {
         let config = self.config().await;
         let this = Arc::downgrade(self);
+        let next_progress_sequence = Arc::new(AtomicU64::new(0));
 
         let progress = move |stage: String, fraction: Option<f32>| {
             let Some(guardian) = this.upgrade() else {
                 return;
             };
-
-            guardian.emit(ServerEvent::Progress {
-                stage: stage.clone(),
-                fraction,
+            let sequence = next_progress_sequence.fetch_add(1, Ordering::Relaxed);
+            tokio::spawn(async move {
+                guardian
+                    .record_progress(preparation_id, sequence, stage, fraction)
+                    .await;
             });
-
-            // Also recorded to the console, so a client that connects part-way
-            // through a long download still sees why the server is not up yet.
-            let line = match fraction {
-                Some(f) => format!("{stage} ({}%)", (f * 100.0).round() as u32),
-                None => stage,
-            };
-            tokio::spawn(async move { guardian.say(line).await });
         };
 
         let env = prepare(&config, &self.data_dir, mode, progress).await?;
@@ -493,7 +632,7 @@ impl Guardian {
                 });
             }
             state.intentional = false;
-            state.status = Some(ServerStatus::Preparing);
+            begin_progress(&mut state);
             state.next_preparation_id = state.next_preparation_id.wrapping_add(1);
             let preparation_id = state.next_preparation_id;
             state.preparation_id = preparation_id;
@@ -546,7 +685,10 @@ impl Guardian {
                     Some(environment) => Ok(environment),
                     None => {
                         let limit = Duration::from_secs(self.policy().await.prepare_timeout_secs);
-                        let preparation = tokio::time::timeout(limit, self.prepare());
+                        let preparation = tokio::time::timeout(
+                            limit,
+                            self.provision(Provision::IfNeeded, Some(preparation_id)),
+                        );
                         tokio::pin!(preparation);
                         tokio::select! {
                             result = &mut preparation => match result {
@@ -584,6 +726,7 @@ impl Guardian {
                     state.preparation_cancel = None;
                     let changed = if state.status == Some(ServerStatus::Preparing) {
                         state.status = Some(ServerStatus::Offline);
+                        clear_progress(&mut state);
                         true
                     } else {
                         false
@@ -728,6 +871,7 @@ impl Guardian {
             state.intentional = false;
             state.child = Some(child);
             state.active = Some(config.clone());
+            clear_progress(&mut state);
             state.status = Some(ServerStatus::Starting);
             state.generation
         };
@@ -908,10 +1052,11 @@ impl Guardian {
     /// Abandon an in-flight provision, leaving the server offline.
     ///
     /// Safe to lose the race with a launch that has just spawned: if a child
-    /// exists by the time the lock is taken, this becomes an ordinary kill
-    /// rather than a status change that contradicts a running process.
+    /// exists by the time the lock is taken, this becomes an ordinary kill and
+    /// a `Stopping` transition rather than a status change that contradicts a
+    /// running process.
     pub async fn cancel_preparation(&self) -> Result<()> {
-        let (launched, changed) = {
+        let (launched, changed, next_status) = {
             let mut state = self.state.lock().await;
 
             if let Some(cancel) = state.preparation_cancel.take() {
@@ -928,23 +1073,34 @@ impl Guardian {
             }
             if launched {
                 state.intentional = true;
+                clear_progress(&mut state);
+                state.status = Some(ServerStatus::Stopping);
             }
             let changed = if !launched && state.status == Some(ServerStatus::Preparing) {
                 state.status = Some(ServerStatus::Offline);
+                clear_progress(&mut state);
                 true
             } else {
                 false
             };
-            (launched, changed)
+            (
+                launched,
+                changed || launched,
+                if launched {
+                    ServerStatus::Stopping
+                } else {
+                    ServerStatus::Offline
+                },
+            )
         };
 
         if !launched {
             self.say("preparation cancelled").await;
-            if changed {
-                self.emit(ServerEvent::Status {
-                    status: ServerStatus::Offline,
-                });
-            }
+        }
+        if changed {
+            self.emit(ServerEvent::Status {
+                status: next_status,
+            });
         }
 
         Ok(())
@@ -967,6 +1123,7 @@ impl Guardian {
                 true
             } else {
                 state.intentional = true;
+                clear_progress(&mut state);
                 state.status = Some(ServerStatus::Stopping);
                 false
             }
@@ -1005,17 +1162,22 @@ impl Guardian {
 
     /// Stop this server as part of panel shutdown and prevent auto-restarts.
     pub async fn shutdown(&self) -> Result<()> {
-        let (should_stop, changed) = {
+        let (should_stop, already_stopping, changed) = {
             let mut state = self.state.lock().await;
             state.shutting_down = true;
             if state.status == Some(ServerStatus::Crashed) {
                 state.status = Some(ServerStatus::Offline);
-                (false, true)
+                clear_progress(&mut state);
+                (false, false, true)
             } else {
                 (
                     state.status.is_some_and(|status| {
-                        status == ServerStatus::Preparing || status.is_running()
+                        matches!(
+                            status,
+                            ServerStatus::Preparing | ServerStatus::Starting | ServerStatus::Online
+                        )
                     }),
+                    state.status == Some(ServerStatus::Stopping),
                     false,
                 )
             }
@@ -1028,6 +1190,25 @@ impl Guardian {
         }
         if should_stop {
             self.stop().await
+        } else if already_stopping {
+            // `stop` is deliberately not idempotent for the public action
+            // matrix, but panel shutdown still has to finish a transition
+            // that was already in progress and retain the kill fallback.
+            let deadline = Duration::from_secs(self.policy().await.stop_timeout_secs);
+            if self.wait_for_exit(deadline).await {
+                Ok(())
+            } else {
+                self.say("graceful stop timed out during shutdown, killing process")
+                    .await;
+                self.kill().await?;
+                if self.wait_for_exit(Duration::from_secs(10)).await {
+                    Ok(())
+                } else {
+                    Err(Error::Task(
+                        "the server process did not exit after shutdown kill".into(),
+                    ))
+                }
+            }
         } else {
             Ok(())
         }
@@ -1092,6 +1273,7 @@ impl Guardian {
                 }
                 state.intentional = true;
                 let should_emit = current != ServerStatus::Stopping;
+                clear_progress(&mut state);
                 state.status = Some(ServerStatus::Stopping);
                 if let Some(child) = state.child.as_mut() {
                     let _ = child.start_kill();
@@ -1111,9 +1293,16 @@ impl Guardian {
         Ok(())
     }
 
-    /// Stop and start again, tolerating an already-stopped server.
+    /// Stop and start again from an online server.
     pub async fn restart(self: &Arc<Self>) -> Result<()> {
-        if may_stop(self.status().await) {
+        let current = self.status().await;
+        if !may_restart(current) {
+            return Err(Error::InvalidTransition {
+                current: current.as_str(),
+                action: "restart",
+            });
+        }
+        if current == ServerStatus::Online {
             self.stop().await?;
         }
         // The supervisor clears the child asynchronously; wait for it so the
@@ -1253,6 +1442,143 @@ mod tests {
 
         assert!(may_stop(ServerStatus::Starting));
         assert!(may_stop(ServerStatus::Online));
+        assert!(!may_stop(ServerStatus::Stopping));
+    }
+
+    #[test]
+    fn restart_is_only_available_for_online_servers() {
+        assert!(may_restart(ServerStatus::Online));
+
+        assert!(!may_restart(ServerStatus::Offline));
+        assert!(!may_restart(ServerStatus::Crashed));
+        assert!(!may_restart(ServerStatus::Preparing));
+        assert!(!may_restart(ServerStatus::Starting));
+        assert!(!may_restart(ServerStatus::Stopping));
+    }
+
+    #[test]
+    fn progress_fractions_are_kept_in_the_public_range() {
+        assert_eq!(normalize_fraction(None), None);
+        assert_eq!(normalize_fraction(Some(-0.5)), Some(0.0));
+        assert_eq!(normalize_fraction(Some(1.5)), Some(1.0));
+        assert!(normalize_fraction(Some(f32::NAN)).is_none());
+    }
+
+    #[tokio::test]
+    async fn progress_is_current_state_and_clears_when_preparation_ends() {
+        let guardian = Guardian::new(
+            ServerConfig::paper("/tmp/mcpanel-progress", "1.21.8"),
+            GuardianConfig::default(),
+            "/tmp/mcpanel-progress",
+        );
+
+        {
+            let mut state = guardian.state.lock().await;
+            state.preparation_id = 7;
+            begin_progress(&mut state);
+        }
+        guardian
+            .record_progress(Some(7), 0, "downloading paper 26.2".into(), Some(0.33))
+            .await;
+        guardian
+            .record_progress(Some(7), 1, "downloading paper 26.2".into(), Some(0.38))
+            .await;
+
+        let snapshot = guardian.snapshot().await;
+        let progress = snapshot.progress.expect("preparing has progress");
+        assert_eq!(progress.stage, "downloading paper 26.2");
+        assert_eq!(progress.fraction, Some(0.38));
+
+        guardian
+            .record_progress(Some(7), 0, "downloading paper 26.2".into(), Some(0.10))
+            .await;
+        assert_eq!(
+            guardian.snapshot().await.progress.unwrap().fraction,
+            Some(0.38)
+        );
+
+        guardian.set_status(ServerStatus::Starting).await;
+        assert!(guardian.snapshot().await.progress.is_none());
+
+        {
+            let mut state = guardian.state.lock().await;
+            state.preparation_id = 8;
+            begin_progress(&mut state);
+        }
+        guardian.set_status(ServerStatus::Crashed).await;
+        assert!(guardian.snapshot().await.progress.is_none());
+
+        {
+            let mut state = guardian.state.lock().await;
+            state.preparation_id = 9;
+            begin_progress(&mut state);
+        }
+        guardian.cancel_preparation().await.unwrap();
+        assert_eq!(guardian.status().await, ServerStatus::Offline);
+        assert!(guardian.snapshot().await.progress.is_none());
+    }
+
+    #[tokio::test]
+    async fn progress_callbacks_update_state_without_console_history_spam() {
+        let guardian = Guardian::new(
+            ServerConfig::paper("/tmp/mcpanel-progress-spam", "1.21.8"),
+            GuardianConfig::default(),
+            "/tmp/mcpanel-progress-spam",
+        );
+        let mut events = guardian.subscribe();
+        {
+            let mut state = guardian.state.lock().await;
+            state.preparation_id = 9;
+            begin_progress(&mut state);
+        }
+
+        for (sequence, fraction) in [0.3301, 0.3302, 0.3310, 0.3390, 0.3400]
+            .into_iter()
+            .enumerate()
+        {
+            guardian
+                .record_progress(
+                    Some(9),
+                    sequence as u64,
+                    "downloading paper 26.2".into(),
+                    Some(fraction),
+                )
+                .await;
+        }
+
+        let console = guardian.console().await;
+        assert!(
+            console.is_empty(),
+            "progress callbacks must not become retained console lines: {console:?}"
+        );
+        assert_eq!(
+            guardian.snapshot().await.progress.unwrap().fraction,
+            Some(0.34)
+        );
+
+        let emitted = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| matches!(event, ServerEvent::Progress { .. }))
+            .count();
+        assert!(
+            emitted < 5,
+            "coalescing should avoid one transport event per callback, got {emitted}"
+        );
+    }
+
+    #[tokio::test]
+    async fn console_backfill_reports_its_sequence_watermark() {
+        let guardian = Guardian::new(
+            ServerConfig::paper("/tmp/mcpanel-console-watermark", "1.21.8"),
+            GuardianConfig::default(),
+            "/tmp/mcpanel-console-watermark",
+        );
+
+        guardian.say("first").await;
+        guardian.say("second").await;
+
+        let (lines, through_seq) = guardian.console_backfill().await;
+        assert_eq!(lines.len(), 2);
+        assert_eq!(through_seq, Some(lines[1].seq));
     }
 
     #[test]
