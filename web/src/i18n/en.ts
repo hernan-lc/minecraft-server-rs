@@ -205,13 +205,16 @@ export const en = {
     metaPort: "Port",
     metaUptime: "Uptime",
     cpuUsage: "CPU usage",
+    cpuShort: "CPU",
     cpuCores: "{cores} logical cores · host capacity {count}",
     memoryUsage: "Process memory (RSS)",
+    memoryShort: "RAM",
     heapMax: "Heap max: {memory} MiB",
     notRunning: "Not running",
     startingActivity: "Starting Minecraft server…",
     stoppingActivity: "Stopping Minecraft server…",
     storageUsage: "Storage usage",
+    storageShort: "Disk",
     eulaWarning:
       "The Minecraft EULA has not been accepted for this server, so it will refuse to start. Accept it under Settings.",
     tabs: {

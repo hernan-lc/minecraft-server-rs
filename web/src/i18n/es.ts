@@ -208,13 +208,16 @@ export const es: Dictionary = {
     metaPort: "Puerto",
     metaUptime: "Tiempo activo",
     cpuUsage: "Uso de CPU",
+    cpuShort: "CPU",
     cpuCores: "{cores} núcleos lógicos · capacidad del host {count}",
     memoryUsage: "Memoria del proceso (RSS)",
+    memoryShort: "RAM",
     heapMax: "Máximo del heap: {memory} MiB",
     notRunning: "No está ejecutándose",
     startingActivity: "Iniciando el servidor de Minecraft…",
     stoppingActivity: "Deteniendo el servidor de Minecraft…",
     storageUsage: "Uso de disco",
+    storageShort: "Disco",
     eulaWarning:
       "No se ha aceptado el EULA de Minecraft para este servidor, así que no arrancará. Acéptalo en Ajustes.",
     tabs: {

@@ -211,6 +211,8 @@ export function StatCard({
   fraction,
   tone = "accent",
   detail,
+  compact = false,
+  shortLabel,
 }: {
   value: string;
   max?: string;
@@ -221,24 +223,53 @@ export function StatCard({
   tone?: "accent" | "warn";
   /** Optional explanatory line for metrics with more than one unit. */
   detail?: ComponentChildren;
+  /** Use a dense one-line metric tile on narrow screens. */
+  compact?: boolean;
+  /** Short label shown in the dense mobile tile. */
+  shortLabel?: string;
 }) {
   const clamped = fraction === undefined ? undefined : Math.max(0, Math.min(1, fraction));
   const bar = tone === "warn" ? "bg-amber-400" : "bg-accent";
 
   return (
-    <section class="relative overflow-hidden rounded-2xl border border-ink-700 bg-ink-850 px-5 py-4">
-      <div class="flex items-start justify-between gap-3">
-        <p class="flex items-baseline gap-1.5">
-          <span class="text-2xl font-semibold tabular-nums tracking-tight sm:text-3xl">
+    <section
+      title={label}
+      aria-label={label}
+      class={`relative min-w-0 overflow-hidden border border-ink-700 bg-ink-850 ${
+        compact ? "rounded-xl px-2.5 py-2 sm:rounded-2xl sm:px-5 sm:py-4" : "rounded-2xl px-5 py-4"
+      }`}
+    >
+      <div class="flex min-w-0 items-center justify-between gap-1.5">
+        <p class="min-w-0 flex items-baseline gap-1">
+          <span
+            class={`min-w-0 truncate font-semibold tabular-nums tracking-tight ${
+              compact ? "text-sm sm:text-2xl" : "text-2xl sm:text-3xl"
+            }`}
+          >
             {value}
           </span>
-          {max && <span class="text-sm text-fg-muted">/ {max}</span>}
+          {max && (
+            <span class={`shrink-0 text-sm text-fg-muted ${compact ? "hidden sm:inline" : ""}`}>
+              / {max}
+            </span>
+          )}
         </p>
-        <span class="shrink-0 text-fg-muted">{icon}</span>
+        <span title={label} class="shrink-0 text-fg-muted">
+          {icon}
+        </span>
       </div>
 
-      <p class="mt-1 text-sm text-fg-muted">{label}</p>
-      {detail && <p class="mt-1 text-xs text-fg-muted/80">{detail}</p>}
+      <p class={`truncate text-fg-muted ${compact ? "mt-0.5 text-[10px] leading-4 sm:mt-1 sm:text-sm" : "mt-1 text-sm"}`}>
+        {compact ? (
+          <>
+            <span class="sm:hidden">{shortLabel ?? label}</span>
+            <span class="hidden sm:inline">{label}</span>
+          </>
+        ) : (
+          label
+        )}
+      </p>
+      {detail && <p class={`mt-1 text-xs text-fg-muted/80 ${compact ? "hidden sm:block" : ""}`}>{detail}</p>}
 
       {clamped !== undefined && (
         <>
@@ -249,7 +280,7 @@ export function StatCard({
             } to-transparent transition-[height] duration-500`}
             style={{ height: `${clamped * 100}%` }}
           />
-          <div class="absolute inset-x-0 bottom-0 h-1 bg-ink-700">
+          <div class="absolute inset-x-0 bottom-0 h-0.5 bg-ink-700 sm:h-1">
             <div
               class={`h-full ${bar} transition-[width] duration-500`}
               style={{ width: `${clamped * 100}%` }}

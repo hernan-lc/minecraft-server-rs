@@ -130,16 +130,21 @@ export function ServerDetail({
       : null;
   const hasCpuMetric = cpuHostPercent !== null && cpuCores !== null && logicalCpuCount !== null;
   const memoryMb = server.metrics?.memory_mb;
+  const memoryFraction =
+    typeof memoryMb === "number" && server.memory.max_mb > 0
+      ? Math.max(0, Math.min(1, memoryMb / server.memory.max_mb))
+      : undefined;
 
   return (
-    <div class="mx-auto flex h-full w-full max-w-6xl flex-col gap-5 px-4 py-6 sm:px-6">
-      <header class="space-y-4">
-        <div class="flex flex-wrap items-start justify-between gap-4">
-          <div class="flex min-w-0 items-start gap-4">
+    <div class="mx-auto flex h-full w-full max-w-6xl flex-col gap-3 px-3 py-3 sm:gap-5 sm:px-6 sm:py-6">
+      <header class="space-y-3 sm:space-y-4">
+        <div class="rounded-2xl border border-ink-700 bg-ink-850 p-3 sm:p-5">
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div class="flex min-w-0 items-start gap-3 sm:gap-4">
             {/* A stable identity tile, coloured from the id so servers stay
                 visually distinguishable in a list of similar names. */}
             <div
-              class="grid size-14 shrink-0 place-items-center rounded-xl border border-ink-700 text-xl font-semibold"
+              class="grid size-12 shrink-0 place-items-center rounded-xl border border-ink-700 text-lg font-semibold sm:size-14 sm:text-xl"
               style={{ background: tileColour(server.id) }}
               aria-hidden="true"
             >
@@ -155,11 +160,11 @@ export function ServerDetail({
                 {t("server.back")}
               </button>
 
-              <h1 class="mt-0.5 truncate text-2xl font-semibold tracking-tight">
+              <h1 class="mt-0.5 truncate text-xl font-semibold tracking-tight sm:text-2xl">
                 {server.name}
               </h1>
 
-              <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-muted">
+              <div class="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-fg-muted sm:gap-x-3">
                 <Meta icon={<Icon.Gamepad size={14} />} label={t("server.metaVersion")}>
                   Minecraft {server.version}
                 </Meta>
@@ -180,7 +185,7 @@ export function ServerDetail({
             </div>
           </div>
 
-          <div class="flex items-center gap-2">
+            <div class="flex min-w-0 items-center justify-between gap-1 sm:justify-end sm:gap-2">
             <StatusPill status={server.status} />
 
             {actions.cancel ? (
@@ -251,25 +256,34 @@ export function ServerDetail({
                 )
               }
             />
+            </div>
           </div>
         </div>
 
-        <nav class="-mx-4 flex gap-1 overflow-x-auto px-4 sm:mx-0 sm:px-0">
-          <div class="flex gap-1 rounded-full border border-ink-700 bg-ink-850 p-1">
-            {tabs.map(({ id, icon }) => (
-              <button
-                key={id}
-                onClick={() => setTab(id)}
-                class={`inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${
-                  tab === id
-                    ? "bg-accent text-ink-950"
-                    : "text-fg-muted hover:bg-ink-700 hover:text-fg"
-                }`}
-              >
-                {icon}
-                {t(`server.tabs.${id}` as "server.tabs.console")}
-              </button>
-            ))}
+        <nav class="-mx-3 flex px-3 sm:mx-0 sm:px-0">
+          <div class="flex w-full gap-0.5 rounded-2xl border border-ink-700 bg-ink-850 p-1 sm:w-fit sm:rounded-full">
+            {tabs.map(({ id, icon }) => {
+              const label = t(`server.tabs.${id}` as "server.tabs.console");
+              return (
+                <Tooltip key={id} label={label} wrapperClass="min-w-0 flex-1 sm:flex-none">
+                  <button
+                    type="button"
+                    aria-label={label}
+                    aria-current={tab === id ? "page" : undefined}
+                    title={label}
+                    onClick={() => setTab(id)}
+                    class={`inline-flex h-10 w-full min-w-0 items-center justify-center rounded-xl px-1.5 text-sm font-medium transition-colors sm:h-auto sm:w-auto sm:gap-2 sm:rounded-full sm:px-4 sm:py-1.5 ${
+                      tab === id
+                        ? "bg-accent text-ink-950"
+                        : "text-fg-muted hover:bg-ink-700 hover:text-fg"
+                    }`}
+                  >
+                    {icon}
+                    <span class="hidden whitespace-nowrap sm:inline">{label}</span>
+                  </button>
+                </Tooltip>
+              );
+            })}
           </div>
         </nav>
       </header>
@@ -279,9 +293,11 @@ export function ServerDetail({
       {!server.eula_accepted && <Banner kind="info">{t("server.eulaWarning")}</Banner>}
 
       {tab === "console" && (
-        <div class="grid gap-4 sm:grid-cols-3">
+        <div class="grid grid-cols-3 gap-2 sm:gap-4">
           <StatCard
-            icon={<Icon.Cpu size={20} />}
+            compact
+            shortLabel={t("server.cpuShort")}
+            icon={<Icon.Cpu size={18} />}
             value={hasCpuMetric ? `${cpuHostPercent.toFixed(2)}%` : "—"}
             max={hasCpuMetric ? "100%" : undefined}
             label={t("server.cpuUsage")}
@@ -296,9 +312,13 @@ export function ServerDetail({
             }
           />
           <StatCard
-            icon={<Icon.Memory size={20} />}
+            compact
+            shortLabel={t("server.memoryShort")}
+            icon={<Icon.Memory size={18} />}
             value={memoryMb === undefined ? "—" : `${memoryMb} MiB`}
             label={t("server.memoryUsage")}
+            fraction={memoryFraction}
+            tone={memoryFraction !== undefined && memoryFraction > 0.9 ? "warn" : "accent"}
             detail={
               memoryMb === undefined
                 ? t("server.notRunning")
@@ -306,7 +326,9 @@ export function ServerDetail({
             }
           />
           <StatCard
-            icon={<Icon.Folder size={20} />}
+            compact
+            shortLabel={t("server.storageShort")}
+            icon={<Icon.Folder size={18} />}
             value={formatBytes(server.disk_bytes)}
             label={t("server.storageUsage")}
           />

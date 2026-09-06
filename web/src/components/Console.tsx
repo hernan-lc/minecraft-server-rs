@@ -263,7 +263,7 @@ export function Console({
       class={
         expanded
           ? "fixed inset-0 z-50 flex flex-col bg-ink-900 p-4"
-          : "flex min-h-0 flex-1 flex-col gap-3 rounded-2xl border border-ink-700 bg-ink-850 p-4 sm:p-5"
+          : "flex min-h-[18rem] flex-1 flex-col gap-2.5 rounded-2xl border border-ink-700 bg-ink-850 p-3 sm:min-h-0 sm:gap-3 sm:p-5"
       }
     >
       <div class="flex items-center justify-between">
@@ -301,7 +301,7 @@ export function Console({
         <div
           ref={scroller}
           onScroll={onScroll}
-          class="h-full overflow-y-auto px-4 py-3 font-mono text-[13px] leading-relaxed"
+          class="h-full overflow-y-auto px-3 py-2.5 font-mono text-[13px] leading-relaxed sm:px-4 sm:py-3"
         >
           {rendered.length === 0 ? <p class="text-fg-muted">{t("console.empty")}</p> : rendered}
         </div>
@@ -323,7 +323,7 @@ export function Console({
 
       <form
         onSubmit={send}
-        class="flex items-center gap-2.5 rounded-xl border border-ink-700 bg-ink-950 px-3.5 py-2.5 focus-within:border-accent/60"
+        class="flex items-center gap-2 rounded-xl border border-ink-700 bg-ink-950 px-3 py-2.5 focus-within:border-accent/60"
       >
         <span class="shrink-0 text-fg-muted">
           <Icon.Terminal size={16} />

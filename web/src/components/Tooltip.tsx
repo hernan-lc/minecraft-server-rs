@@ -13,12 +13,14 @@ export function Tooltip({
   label,
   side = "bottom",
   align = "center",
+  wrapperClass,
   class: extra,
   children,
 }: {
   label: string;
   side?: "top" | "bottom";
   align?: "center" | "start" | "end";
+  wrapperClass?: string;
   class?: string;
   children: ComponentChildren;
 }) {
@@ -34,7 +36,7 @@ export function Tooltip({
   }[align];
 
   return (
-    <span class="group/tooltip relative inline-flex items-center">
+    <span class={`group/tooltip relative inline-flex items-center ${wrapperClass ?? ""}`}>
       {children}
       <span
         role="tooltip"
