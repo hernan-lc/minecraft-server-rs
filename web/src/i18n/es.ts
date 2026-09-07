@@ -171,6 +171,7 @@ export const es: Dictionary = {
     serverReconciled: "Asociación de Playit reconciliada.",
     tunnelCleanupPending: "La asociación local se eliminó; se reintentará borrar el túnel de Playit.",
     tunnelsSection: "Todos los túneles de la cuenta",
+    tunnelsNeedClaim: "Reclama tu agente de Playit arriba para cargar los túneles.",
     noTunnels: "La cuenta de Playit no informa de ningún túnel actualmente.",
     unmanaged: "Túnel no administrado",
     agent: "Agente",

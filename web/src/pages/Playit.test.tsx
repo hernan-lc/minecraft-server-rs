@@ -180,6 +180,34 @@ describe("Playit page refresh lifecycle", () => {
     await waitFor(() => expect(screen.getByText(message)).toBeInTheDocument());
   });
 
+  it("explains tunnel load failures as a claim step while the agent needs setup", async () => {
+    apiMock.playitStatus.mockResolvedValue({
+      status: "needs_claim",
+      version: "1.0.10",
+      message: null,
+    });
+    apiMock.playitAccount.mockResolvedValue({
+      status: "guest",
+      agent_id: null,
+      login_link: null,
+      claim_url: null,
+    });
+    apiMock.playitTunnels.mockRejectedValue(
+      new Error("Playit is temporarily unavailable. Try again shortly."),
+    );
+
+    renderPlayit();
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("Claim your Playit agent above to load tunnels."),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText("Playit is temporarily unavailable. Try again shortly."),
+    ).toBeNull();
+  });
+
   it("clears a local claim URL once the account is connected", async () => {
     apiMock.playitStatus
       .mockResolvedValueOnce({ status: "needs_claim", version: "1", message: null })

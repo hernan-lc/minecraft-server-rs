@@ -314,7 +314,12 @@ export function Playit() {
       </Card>
 
       <Card title={t("playit.tunnelsSection")}>
-        {tunnelError && <Banner kind="error">{tunnelError}</Banner>}
+        {tunnelError &&
+          (status?.status === "needs_claim" ? (
+            <Banner kind="info">{t("playit.tunnelsNeedClaim")}</Banner>
+          ) : (
+            <Banner kind="error">{tunnelError}</Banner>
+          ))}
         {tunnels.length === 0 ? (
           <Empty>{t("playit.noTunnels")}</Empty>
         ) : (

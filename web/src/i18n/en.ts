@@ -168,6 +168,7 @@ export const en = {
     serverReconciled: "Playit association reconciled.",
     tunnelCleanupPending: "The local association is cleared; Playit tunnel deletion will be retried.",
     tunnelsSection: "All account tunnels",
+    tunnelsNeedClaim: "Claim your Playit agent above to load tunnels.",
     noTunnels: "No tunnels are currently reported by the Playit account.",
     unmanaged: "Unmanaged tunnel",
     agent: "Agent",
