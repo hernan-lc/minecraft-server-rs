@@ -40,17 +40,29 @@ type ButtonProps = JSX.IntrinsicElements["button"] & {
   variant?: "primary" | "ghost" | "danger" | "subtle";
   /** Rendered before the label. */
   icon?: ComponentChildren;
+  /**
+   * Fixed-square icon button (icon-only on mobile, labelled on desktop).
+   *
+   * The base padding is omitted at the source instead of overridden with
+   * `px-0`: Tailwind emits `px-0` before `px-4` in the stylesheet, so with
+   * equal specificity the base padding always wins and crushes the icon
+   * into a dot inside a fixed-size button. Callers restore desktop padding
+   * with `sm:px-3 sm:py-2`-style classes, which win as responsive variants.
+   */
+  square?: boolean;
 };
 
 export function Button({
   variant = "subtle",
   icon,
+  square = false,
   class: extra,
   children,
   ...props
 }: ButtonProps) {
   const base =
-    "inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-medium " +
+    "inline-flex items-center justify-center gap-2 rounded-full text-sm font-medium " +
+    (square ? "p-0 " : "px-4 py-2 ") +
     "transition-colors disabled:opacity-40 disabled:cursor-not-allowed focus:outline-none " +
     "focus-visible:ring-2 focus-visible:ring-accent/60";
   const variants = {

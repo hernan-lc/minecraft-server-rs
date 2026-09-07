@@ -1,5 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { api } from "../api";
+import { LanguagePicker } from "../components/LanguagePicker";
 import { Banner, Button, Field, Input } from "../components/ui";
 import { useT } from "../i18n";
 
@@ -38,11 +39,21 @@ export function Setup({ onDone }: { onDone: () => void }) {
   }
 
   if (needsSetup === null) {
-    return <div class="grid h-full place-items-center text-fg-muted">{t("common.loading")}</div>;
+    return (
+      <div class="relative grid h-full place-items-center text-fg-muted">
+        <div class="absolute right-4 top-4">
+          <LanguagePicker />
+        </div>
+        {t("common.loading")}
+      </div>
+    );
   }
   if (!needsSetup) {
     return (
-      <div class="grid min-h-full place-items-center px-6 py-16">
+      <div class="relative grid min-h-full place-items-center px-6 py-16">
+        <div class="absolute right-4 top-4">
+          <LanguagePicker />
+        </div>
         <div class="w-full max-w-sm rounded-2xl border border-ink-700 bg-ink-850 p-8 text-center">
           <p class="text-sm">{t("setup.alreadyDone")}</p>
           <a href="/" class="mt-4 inline-block text-accent underline">
@@ -54,7 +65,10 @@ export function Setup({ onDone }: { onDone: () => void }) {
   }
 
   return (
-    <div class="grid min-h-full place-items-center px-6 py-16">
+    <div class="relative grid min-h-full place-items-center px-6 py-16">
+      <div class="absolute right-4 top-4">
+        <LanguagePicker />
+      </div>
       <form onSubmit={submit} class="w-full max-w-sm space-y-5 rounded-2xl border border-ink-700 bg-ink-850 p-8">
         <div class="space-y-1">
           <h1 class="text-lg font-semibold">{t("setup.heading")}</h1>

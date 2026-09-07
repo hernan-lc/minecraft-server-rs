@@ -3,6 +3,7 @@ import { api } from "../api";
 import { Modal } from "../components/Modal";
 import { Button, Card, Field, Input, Select, StatCard, StatusPill, formatUptime } from "../components/ui";
 import * as Icon from "../components/icons";
+import { tileColour } from "../components/serverTile";
 import { useToast } from "../components/Toast";
 import { useT } from "../i18n";
 import { serverActionCapabilities } from "../serverActions";
@@ -138,7 +139,8 @@ export function Dashboard({
             >
               <div class="flex items-start gap-3">
                 <div
-                  class="grid size-9 shrink-0 place-items-center rounded-xl border border-accent/25 bg-accent/10 text-sm font-semibold text-accent sm:size-11 sm:text-base"
+                  class="grid size-9 shrink-0 place-items-center rounded-xl border border-ink-700 text-sm font-semibold text-fg sm:size-11 sm:text-base"
+                  style={{ background: tileColour(server.id) }}
                   aria-hidden="true"
                 >
                   {server.name.slice(0, 1).toUpperCase()}
@@ -158,10 +160,11 @@ export function Dashboard({
                     </div>
                     <Button
                       variant="ghost"
-                      icon={<Icon.FolderOpen size={16} />}
+                      square
+                      icon={<Icon.FolderOpen size={19} />}
                       aria-label={t("dashboard.manage")}
                       title={t("dashboard.manage")}
-                      class="size-9 shrink-0 px-0 sm:h-auto sm:w-auto sm:px-3"
+                      class="size-11 shrink-0 sm:h-auto sm:w-auto sm:px-3 sm:py-2"
                       onClick={() => onOpen(server.id)}
                     >
                       <span class="hidden sm:inline">{t("dashboard.manage")}</span>
@@ -172,36 +175,40 @@ export function Dashboard({
                     {server.core} {server.version} · {t("createServer.port").toLowerCase()} {server.port} ·
                     Java {server.java_major} · {server.memory.max_mb} MiB
                   </p>
-                  <p class="mt-1 truncate text-xs text-fg-muted/80">
-                    {t("dashboard.upFor", { duration: formatUptime(server.uptime_secs) })}
-                    {server.metrics && (
-                      <>
-                        {" · "}
-                        <span class="tabular-nums text-fg-muted">
-                          {cpuHostPercent === null ? "—" : `${cpuHostPercent.toFixed(0)}%`} CPU ·{" "}
-                          {server.metrics.memory_mb} MiB RSS
-                        </span>
-                      </>
-                    )}
-                  </p>
+                  {server.uptime_secs !== null && (
+                    <p class="mt-1 truncate text-xs text-fg-muted/80">
+                      {t("dashboard.upFor", { duration: formatUptime(server.uptime_secs) })}
+                      {server.metrics && (
+                        <>
+                          {" · "}
+                          <span class="tabular-nums text-fg-muted">
+                            {cpuHostPercent === null ? "—" : `${cpuHostPercent.toFixed(0)}%`} CPU ·{" "}
+                            {server.metrics.memory_mb} MiB RSS
+                          </span>
+                        </>
+                      )}
+                    </p>
+                  )}
 
                   <div class="mt-3 flex flex-wrap items-center gap-2">
                     <Button
                       variant="primary"
-                      icon={<Icon.Play size={13} />}
+                      square
+                      icon={<Icon.Play size={18} />}
                       aria-label={t("dashboard.start")}
                       title={t("dashboard.start")}
-                      class="size-9 px-0 sm:h-auto sm:w-auto sm:px-4"
+                      class="size-11 shrink-0 sm:h-auto sm:w-auto sm:px-4 sm:py-2"
                       disabled={!actions.start}
                       onClick={() => power(server.id, "start")}
                     >
                       <span class="hidden sm:inline">{t("dashboard.start")}</span>
                     </Button>
                     <Button
-                      icon={<Icon.Restart size={15} />}
+                      square
+                      icon={<Icon.Restart size={19} />}
                       aria-label={t("dashboard.restart")}
                       title={t("dashboard.restart")}
-                      class="size-9 px-0 sm:h-auto sm:w-auto sm:px-4"
+                      class="size-11 shrink-0 sm:h-auto sm:w-auto sm:px-4 sm:py-2"
                       disabled={!actions.restart}
                       onClick={() => power(server.id, "restart")}
                     >
@@ -209,10 +216,11 @@ export function Dashboard({
                     </Button>
                     <Button
                       variant="danger"
-                      icon={<Icon.Stop size={15} />}
+                      square
+                      icon={<Icon.Stop size={19} />}
                       aria-label={actions.cancel ? t("common.cancel") : t("dashboard.stop")}
                       title={actions.cancel ? t("common.cancel") : t("dashboard.stop")}
-                      class="size-9 px-0 sm:h-auto sm:w-auto sm:px-4"
+                      class="size-11 shrink-0 sm:h-auto sm:w-auto sm:px-4 sm:py-2"
                       disabled={!(actions.stop || actions.cancel)}
                       onClick={() => power(server.id, "stop")}
                     >

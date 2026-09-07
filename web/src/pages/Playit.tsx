@@ -194,10 +194,11 @@ export function Playit() {
         </div>
         <Button
           variant="ghost"
-          icon={<Icon.Refresh size={15} />}
+          square
+          icon={<Icon.Refresh size={19} />}
           aria-label={t("common.refresh")}
           title={t("common.refresh")}
-          class="size-9 shrink-0 px-0 sm:h-auto sm:w-auto sm:px-4"
+          class="size-11 shrink-0 sm:h-auto sm:w-auto sm:px-4 sm:py-2"
           disabled={loading}
           onClick={() => void refresh()}
         >
@@ -355,10 +356,11 @@ export function Playit() {
                     </div>
                     <Button
                       variant="ghost"
-                      icon={<Icon.Copy size={15} />}
+                      square
+                      icon={<Icon.Copy size={19} />}
                       aria-label={tunnel.display_address || t("playit.copyUnavailable")}
                       title={t("playit.copyAddress")}
-                      class="size-9 shrink-0 px-0 sm:h-auto sm:w-auto sm:px-3"
+                      class="size-11 shrink-0 sm:h-auto sm:w-auto sm:px-3 sm:py-2"
                       disabled={!tunnel.display_address}
                       onClick={() => void copyAddress(tunnel.display_address)}
                     >
@@ -366,10 +368,11 @@ export function Playit() {
                     </Button>
                     <Button
                       variant="danger"
-                      icon={<Icon.Trash size={15} />}
+                      square
+                      icon={<Icon.Trash size={19} />}
                       aria-label={t("common.delete")}
                       title={t("common.delete")}
-                      class="size-9 shrink-0 px-0 sm:h-auto sm:w-auto sm:px-3"
+                      class="size-11 shrink-0 sm:h-auto sm:w-auto sm:px-3 sm:py-2"
                       disabled={busy}
                       onClick={() => void remove(tunnel)}
                     >

@@ -1,5 +1,6 @@
 import { useState } from "preact/hooks";
 import { api } from "../api";
+import { LanguagePicker } from "../components/LanguagePicker";
 import { Banner, Button, Field, Input } from "../components/ui";
 import { useT } from "../i18n";
 
@@ -59,7 +60,10 @@ export function Recovery({ onDone }: { onDone: () => void }) {
 
   if (success) {
     return (
-      <div class="grid min-h-full place-items-center px-6 py-16">
+      <div class="relative grid min-h-full place-items-center px-6 py-16">
+        <div class="absolute right-4 top-4">
+          <LanguagePicker />
+        </div>
         <div class="w-full max-w-sm space-y-4 rounded-2xl border border-ink-700 bg-ink-850 p-8 text-center">
           <p class="text-sm text-green-400">{t("recovery.success")}</p>
           <Button variant="primary" class="w-full" onClick={onDone}>
@@ -71,7 +75,10 @@ export function Recovery({ onDone }: { onDone: () => void }) {
   }
 
   return (
-    <div class="grid min-h-full place-items-center px-6 py-16">
+    <div class="relative grid min-h-full place-items-center px-6 py-16">
+      <div class="absolute right-4 top-4">
+        <LanguagePicker />
+      </div>
       <form onSubmit={submit} class="w-full max-w-sm space-y-5 rounded-2xl border border-ink-700 bg-ink-850 p-8">
         <div class="space-y-1">
           <h1 class="text-lg font-semibold">{t("recovery.heading")}</h1>

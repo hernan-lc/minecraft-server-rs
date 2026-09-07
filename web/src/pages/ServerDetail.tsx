@@ -21,6 +21,7 @@ import {
   formatUptime,
 } from "../components/ui";
 import * as Icon from "../components/icons";
+import { tileColour } from "../components/serverTile";
 import { useMenu } from "../components/Menu";
 import { Tooltip } from "../components/Tooltip";
 import { useDialogs } from "../components/Modal";
@@ -177,10 +178,14 @@ export function ServerDetail({
                 <Meta icon={<Icon.Link size={14} />} label={t("server.metaPort")}>
                   :{server.port}
                 </Meta>
-                <Divider />
-                <Meta icon={<Icon.Clock size={14} />} label={t("server.metaUptime")}>
-                  {formatUptime(server.uptime_secs)}
-                </Meta>
+                {server.uptime_secs !== null && (
+                  <>
+                    <Divider />
+                    <Meta icon={<Icon.Clock size={14} />} label={t("server.metaUptime")}>
+                      {formatUptime(server.uptime_secs)}
+                    </Meta>
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -392,13 +397,6 @@ function Divider() {
   return <span class="hidden h-3 w-px bg-ink-600 sm:block" aria-hidden="true" />;
 }
 
-/** A stable tint per server, so two similarly named servers still look different. */
-function tileColour(id: string | null | undefined): string {
-  let hash = 0;
-  for (const char of id ?? "server") hash = (hash * 31 + char.charCodeAt(0)) % 360;
-  return `linear-gradient(140deg, hsl(${hash} 45% 22%), hsl(${(hash + 40) % 360} 45% 14%))`;
-}
-
 function Installed({ server, onChanged }: { server: Server; onChanged: () => void }) {
   const t = useT();
   const toast = useToast();
@@ -477,18 +475,10 @@ function Installed({ server, onChanged }: { server: Server; onChanged: () => voi
       )}
 
       <div class="mt-4 flex flex-col gap-2 sm:flex-row">
-        {!server.installed && (
-          <Button
-            variant="primary"
-            class="w-full sm:w-auto"
-            disabled={busy || lifecycleBusy}
-            title={lifecycleBusy ? t("settings.mustStopToUpdate") : undefined}
-            onClick={prepare}
-          >
-            {busy ? t("settings.updating") : t("common.install")}
-          </Button>
-        )}
-        {server.needs_install && (
+        {/* One button for both cases: a fresh server has nothing installed
+            and always needs an install, so two separate conditions rendered
+            the same Install button twice. */}
+        {(!server.installed || server.needs_install) && (
           <Button
             variant="primary"
             class="w-full sm:w-auto"

@@ -1,10 +1,11 @@
 import type { ComponentChildren } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import { api } from "./api";
-import { Button, Select } from "./components/ui";
+import { Button } from "./components/ui";
 import * as Icon from "./components/icons";
 import { Tooltip } from "./components/Tooltip";
-import { LANGUAGES, useI18n, type Language } from "./i18n";
+import { LanguagePicker } from "./components/LanguagePicker";
+import { useI18n } from "./i18n";
 import { BackupsSettings } from "./pages/BackupsSettings";
 import { Dashboard } from "./pages/Dashboard";
 import { Login } from "./pages/Login";
@@ -57,45 +58,6 @@ function useRoute(): [Route, (route: Route) => void] {
       setRoute(next);
     },
   ];
-}
-
-/** Switches the active language and remembers the choice. */
-function LanguagePicker() {
-  const { language, setLanguage, t } = useI18n();
-  const options = () =>
-    Object.entries(LANGUAGES).map(([code, { label }]) => (
-      <option key={code} value={code}>
-        {label}
-      </option>
-    ));
-
-  return (
-    <>
-      <Select
-        value={language}
-        aria-label={t("nav.language")}
-        onChange={(e) => setLanguage((e.target as HTMLSelectElement).value as Language)}
-        class="hidden !w-auto !py-1.5 !text-xs lg:block"
-      >
-        {options()}
-      </Select>
-
-      <Tooltip label={t("nav.language")}>
-        <span class="group relative hidden size-9 items-center justify-center rounded-lg text-fg-muted transition-colors hover:bg-ink-700 hover:text-fg focus-within:bg-ink-700 focus-within:text-fg lg:hidden">
-          <Icon.Globe size={16} />
-          <select
-            value={language}
-            aria-label={t("nav.language")}
-            title={t("nav.language")}
-            onChange={(e) => setLanguage((e.target as HTMLSelectElement).value as Language)}
-            class="absolute inset-0 h-full w-full cursor-pointer appearance-none opacity-0 focus:outline-none"
-          >
-            {options()}
-          </select>
-        </span>
-      </Tooltip>
-    </>
-  );
 }
 
 function HeaderNavButton({
@@ -252,10 +214,11 @@ export function App() {
               <Button
                 type="button"
                 variant="ghost"
+                square
                 aria-label={t("nav.signOut")}
                 title={t("nav.signOut")}
-                icon={<Icon.LogOut size={16} />}
-                class="h-9 w-9 px-0 lg:w-auto lg:px-4"
+                icon={<Icon.LogOut size={18} />}
+                class="size-9 lg:h-auto lg:w-auto lg:px-4 lg:py-2"
                 onClick={async () => {
                   await api.logout();
                   setUser(null);
