@@ -8,6 +8,11 @@
 use std::ffi::OsStr;
 
 /// Windows `CREATE_NO_WINDOW` (`0x0800_0000`).
+///
+/// Only referenced by the Windows flag path; the portable unit test below
+/// still pins the SDK value on every platform, hence the targeted allow
+/// instead of a `cfg(windows)` gate.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Apply `CREATE_NO_WINDOW` to a std child command. No-op on other OSes.
