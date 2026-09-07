@@ -32,14 +32,19 @@ pub mod events;
 pub mod fs;
 pub mod hidden;
 pub mod install;
+pub mod java;
 pub mod process;
 pub mod sandbox;
 
 pub use backup::Backup;
 pub use config::{GuardianConfig, Memory, ServerConfig, MAX_SERVER_MEMORY_MB};
-pub use environment::{prepare, resolve_jar, resolve_java, Provision, ServerEnvironment};
+pub use environment::{
+    prepare, prepare_with_resolver, resolve_jar, resolve_java, resolve_java_with, Provision,
+    ServerEnvironment,
+};
 pub use error::{Error, Result};
 pub use events::{ConsoleLine, ProgressState, ServerEvent, ServerStatus, Stream};
 pub use fs::ScopedFs;
 pub use install::Installation;
+pub use java::{DiscoveryBackend, JavaResolver, SystemDiscovery, DISCOVERY_TTL};
 pub use process::{Guardian, Snapshot};

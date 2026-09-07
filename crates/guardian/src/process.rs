@@ -8,11 +8,12 @@
 //! handlers, WebSocket sessions and the supervisor task without coordination.
 
 use crate::config::{GuardianConfig, ServerConfig, MAX_ARGUMENT_BYTES};
-use crate::environment::{prepare, Provision, ServerEnvironment};
+use crate::environment::{prepare_with_resolver, Provision, ServerEnvironment};
 use crate::error::{Error, Result};
 use crate::events::{ConsoleLine, ProgressState, ServerEvent, ServerStatus, Stream};
 use crate::fs::ScopedFs;
 use crate::install::Installation;
+use crate::java::JavaResolver;
 use crate::sandbox::SandboxPolicy;
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -178,6 +179,11 @@ pub struct Guardian {
     policy: RwLock<GuardianConfig>,
     data_dir: PathBuf,
     sandbox_policy: SandboxPolicy,
+    /// The panel's shared Java resolver. Guardians created standalone (tests,
+    /// examples) own a private one; guardians created by the panel share the
+    /// process-wide instance so catalog reads and server Starts reuse a
+    /// single cached discovery pass.
+    java: Arc<JavaResolver>,
     state: Mutex<RunState>,
     resource_lock: Arc<Mutex<()>>,
     events: broadcast::Sender<ServerEvent>,
@@ -208,12 +214,31 @@ impl Guardian {
         data_dir: impl Into<PathBuf>,
         sandbox_policy: SandboxPolicy,
     ) -> Arc<Self> {
+        let data_dir = data_dir.into();
+        let java = Arc::new(JavaResolver::new(&data_dir));
+        Self::new_with_sandbox_policy_and_java(config, policy, data_dir, sandbox_policy, java)
+    }
+
+    /// Build a guardian sharing the panel's [`JavaResolver`].
+    ///
+    /// The panel passes its process-wide resolver so server provisioning and
+    /// the Java catalog share one cached discovery pass. Standalone callers
+    /// should prefer [`Guardian::new`] / [`Guardian::new_with_sandbox_policy`],
+    /// which create a private resolver.
+    pub fn new_with_sandbox_policy_and_java(
+        config: ServerConfig,
+        policy: GuardianConfig,
+        data_dir: impl Into<PathBuf>,
+        sandbox_policy: SandboxPolicy,
+        java: Arc<JavaResolver>,
+    ) -> Arc<Self> {
         let (events, _) = broadcast::channel(1024);
         Arc::new(Guardian {
             config: RwLock::new(config),
             policy: RwLock::new(policy),
             data_dir: data_dir.into(),
             sandbox_policy,
+            java,
             state: Mutex::new(RunState {
                 status: Some(ServerStatus::Offline),
                 ..RunState::default()
@@ -596,7 +621,8 @@ impl Guardian {
             });
         };
 
-        let env = prepare(&config, &self.data_dir, mode, progress).await?;
+        let env =
+            prepare_with_resolver(&config, &self.data_dir, mode, &self.java, progress).await?;
         *self.environment.write().await = Some(env.clone());
         Ok(env)
     }

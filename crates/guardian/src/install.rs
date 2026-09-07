@@ -30,6 +30,16 @@ pub struct Installation {
     pub java_major: u32,
     /// The `java` launcher that was selected.
     pub java: PathBuf,
+    /// The Java home the launcher was resolved from.
+    ///
+    /// Bound to [`Installation::java`]: warm Starts require the recorded
+    /// launcher to be exactly `<java_home>/bin/java[.exe]`, so editing this
+    /// file alone cannot redirect a Start at an arbitrary executable.
+    /// Records written before this field existed load it as empty and fall
+    /// back to deriving the home from the launcher path; new saves always
+    /// write it.
+    #[serde(default)]
+    pub java_home: PathBuf,
     /// The downloaded server jar.
     pub jar: PathBuf,
     /// RFC 3339 timestamp of the install.
@@ -131,6 +141,7 @@ mod tests {
             build: "112".into(),
             java_major: 21,
             java: dir.join("java"),
+            java_home: dir.into(),
             jar: dir.join("server.jar"),
             installed_at: "2026-08-19T00:00:00Z".into(),
         }

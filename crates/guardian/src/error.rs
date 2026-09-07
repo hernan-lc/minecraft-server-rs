@@ -20,6 +20,14 @@ pub enum Error {
     #[error("minecraft core: {0}")]
     Core(#[from] minecraft_core::Error),
 
+    /// The resolved artifact is an installer (e.g. Forge), not a runnable
+    /// server jar, and installer provisioning is not implemented yet.
+    #[error("installer-based servers ({core}) are not supported yet")]
+    UnsupportedInstaller {
+        /// Provider whose artifact needs installation first.
+        core: String,
+    },
+
     /// A filesystem operation failed, with the path that caused it.
     #[error("io error at {path}: {source}")]
     Io {
@@ -129,7 +137,8 @@ impl Error {
             | Error::InvalidConfiguration(_)
             | Error::InvalidCommand(_)
             | Error::StartCancelled
-            | Error::SandboxUnavailable => self.to_string(),
+            | Error::SandboxUnavailable
+            | Error::UnsupportedInstaller { .. } => self.to_string(),
             Error::JavaUnavailable(major, _) => format!("Java {major} is unavailable"),
             Error::Java(_)
             | Error::Core(_)

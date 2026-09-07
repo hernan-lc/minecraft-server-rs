@@ -32,6 +32,11 @@ async fn providers(_: Identity) -> ApiResult<Json<Vec<ProviderView>>> {
     let ids = client()?.providers();
     Ok(Json(
         ids.into_iter()
+            // Installer-backed providers (Forge) are hidden until an explicit
+            // installer-provisioning flow exists: advertising them would let
+            // provisioning publish an installer jar as `server.jar`, which can
+            // never boot.
+            .filter(|id| is_advertised_provider(&id.to_string()))
             .map(|id| {
                 let id = id.to_string();
                 // Velocity and Waterfall are proxies: they have no world and
@@ -41,6 +46,16 @@ async fn providers(_: Identity) -> ApiResult<Json<Vec<ProviderView>>> {
             })
             .collect(),
     ))
+}
+
+/// Whether a provider id is offered in the create-server catalog.
+///
+/// Forge resolves to an installer artifact rather than a runnable server jar.
+/// Until installer provisioning exists it is rejected at provisioning time
+/// ([`guardian::Error::UnsupportedInstaller`]) and hidden here so operators
+/// cannot select a server type the panel cannot install.
+fn is_advertised_provider(id: &str) -> bool {
+    !matches!(id, "forge")
 }
 
 async fn versions(_: Identity, Path(provider): Path<String>) -> ApiResult<Json<Vec<String>>> {
@@ -107,8 +122,10 @@ fn java_view(install: &java_path::JavaInstallation, include_path: bool) -> JavaV
     }
 }
 
-async fn javas(identity: Identity) -> Json<Vec<JavaView>> {
-    let installs = java_path::discover().unwrap_or_default();
+async fn javas(State(state): State<Arc<AppState>>, identity: Identity) -> Json<Vec<JavaView>> {
+    // Shared cached discovery: a burst of catalog reads shares one backend
+    // pass, and server Starts reuse the same cache instead of scanning again.
+    let installs = state.java_resolver.javas().unwrap_or_default();
     let mut out: Vec<JavaView> = installs
         .iter()
         .map(|install| java_view(install, identity.admin))
@@ -197,5 +214,23 @@ mod tests {
         let value = serde_json::to_value(java_view(&installation(), true)).unwrap();
 
         assert_eq!(value["path"], "/host/jdks/java-21/bin/java");
+    }
+
+    #[test]
+    fn forge_is_hidden_from_the_create_server_catalog() {
+        // Forge ships an installer, not a runnable jar; offering it would let
+        // provisioning publish an installer as `server.jar`.
+        assert!(!is_advertised_provider("forge"));
+        for id in [
+            "paper",
+            "vanilla",
+            "fabric",
+            "purpur",
+            "mohist",
+            "velocity",
+            "waterfall",
+        ] {
+            assert!(is_advertised_provider(id), "{id} must stay advertised");
+        }
     }
 }

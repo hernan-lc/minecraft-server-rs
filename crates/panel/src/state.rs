@@ -40,6 +40,10 @@ pub struct AppState {
     guardians: RwLock<HashMap<String, Arc<Guardian>>>,
     /// Root for Playit state, JDKs, server directories and `panel.json`.
     pub data_dir: PathBuf,
+    /// Process-wide cached Java discovery, shared by the Java catalog, server
+    /// provisioning and reinstalls so a catalog refresh and a server Start
+    /// never trigger two independent machine-wide scans.
+    pub java_resolver: Arc<guardian::JavaResolver>,
     /// Per-process CPU and memory sampling.
     pub metrics: Metrics,
     /// Short-lived grants for browser-driven downloads.
@@ -202,10 +206,13 @@ impl AppState {
         }
 
         let mut guardians = HashMap::new();
+        // One silent discovery pass at most: the resolver caches it, and warm
+        // Starts never consult discovery at all.
+        let java_resolver = Arc::new(guardian::JavaResolver::new(&data_dir));
         for record in store.read().await.servers {
             guardians.insert(
                 record.id.clone(),
-                spawn_guardian(&record, &data_dir, sandbox_policy),
+                spawn_guardian(&record, &data_dir, sandbox_policy, &java_resolver),
             );
         }
 
@@ -224,6 +231,7 @@ impl AppState {
             login_limiter: LoginLimiter::default(),
             guardians: RwLock::new(guardians),
             data_dir,
+            java_resolver,
             metrics: Metrics::default(),
             tickets: Tickets::default(),
             playit: Arc::new(playit),
@@ -287,7 +295,12 @@ impl AppState {
 
     /// Register a guardian for a newly created server.
     pub async fn insert_guardian(&self, record: &ServerRecord) -> Arc<Guardian> {
-        let guardian = spawn_guardian(record, &self.data_dir, self.sandbox_policy);
+        let guardian = spawn_guardian(
+            record,
+            &self.data_dir,
+            self.sandbox_policy,
+            &self.java_resolver,
+        );
         self.guardians
             .write()
             .await
@@ -592,12 +605,14 @@ fn spawn_guardian(
     record: &ServerRecord,
     data_dir: &Path,
     sandbox_policy: guardian::sandbox::SandboxPolicy,
+    java_resolver: &Arc<guardian::JavaResolver>,
 ) -> Arc<Guardian> {
-    Guardian::new_with_sandbox_policy(
+    Guardian::new_with_sandbox_policy_and_java(
         record.config.clone(),
         record.policy.clone(),
         data_dir,
         sandbox_policy,
+        Arc::clone(java_resolver),
     )
 }
 
