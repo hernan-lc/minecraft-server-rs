@@ -294,43 +294,36 @@ async fn attach_server_playit(
     // used when a new tunnel must be created, and never bypasses the reuse
     // logic that keeps repeated attaches idempotent.
     let custom_name = tunnel_name(body.name)?;
-    let ensured = if let Some(existing_binding) = previous_binding.as_ref() {
-        match inspect_existing_binding(&state, &record, existing_binding, &current_agent_id).await?
-        {
-            ExistingBinding::Present(ensured) => ensured,
-            // A retry is an explicit repair request. The stable matcher
-            // still runs first, so a missing stale id cannot create a
-            // duplicate when the same managed tunnel is visible again.
-            ExistingBinding::Missing => {
-                state
-                    .playit
-                    .ensure_server_tunnel_with_name(
-                        &id,
-                        &record.name,
-                        record.config.port,
-                        custom_name,
-                    )
-                    .await?
-            }
-        }
-    } else {
-        state
-            .playit
-            .ensure_server_tunnel_with_name(&id, &record.name, record.config.port, custom_name)
-            .await?
-    };
+    // A retry is an explicit repair request. The stored tunnel is adopted in
+    // place when it is still visible (even across an agent change) and
+    // recreated through the stable-name path when Playit no longer reports
+    // it, so repair heals remote deletions instead of failing on them.
+    // A persisted binding is input from an older state file, not proof that
+    // its destination is still safe. Repairs always fall back to loopback
+    // rather than carrying an untrusted address into Playit.
+    let desired_address = previous_binding
+        .as_ref()
+        .map(|binding| binding.local_address.clone())
+        .filter(|address| is_loopback_address(address))
+        .unwrap_or_else(|| "127.0.0.1".into());
+    let ensured = state
+        .playit
+        .reconcile_server_tunnel(
+            &id,
+            &record.name,
+            record.config.port,
+            previous_binding
+                .as_ref()
+                .map(|binding| binding.tunnel_id.as_str()),
+            &desired_address,
+            custom_name,
+        )
+        .await?;
 
     let binding = PlayitBinding {
         tunnel_id: ensured.tunnel.tunnel_id.clone(),
         protocol: PlayitProtocol::Tcp,
-        // A persisted binding is input from an older state file, not proof
-        // that its destination is still safe. Repairs always fall back to
-        // loopback rather than carrying an untrusted address into Playit.
-        local_address: previous_binding
-            .as_ref()
-            .filter(|binding| is_loopback_address(&binding.local_address))
-            .map(|binding| binding.local_address.clone())
-            .unwrap_or_else(|| "127.0.0.1".into()),
+        local_address: desired_address,
         local_port: record.config.port,
         agent_id: Some(current_agent_id),
         created_at: previous_binding
@@ -433,11 +426,6 @@ async fn compensate_attach_failure(
     }
 }
 
-enum ExistingBinding {
-    Present(EnsuredServerTunnel),
-    Missing,
-}
-
 async fn required_current_agent_id(state: &AppState) -> ApiResult<String> {
     let account = state.playit.account().await?;
     account
@@ -448,114 +436,6 @@ async fn required_current_agent_id(state: &AppState) -> ApiResult<String> {
                 "the current Playit agent id is not available yet".into(),
             ))
         })
-}
-
-/// Inspect a stored binding without ever creating a second tunnel for it.
-/// A live Java tunnel with a safe but stale assignment is repaired in place;
-/// disabled, ambiguous, and incompatible tunnels remain visible as conflicts.
-async fn inspect_existing_binding(
-    state: &AppState,
-    record: &ServerRecord,
-    binding: &PlayitBinding,
-    current_agent_id: &str,
-) -> ApiResult<ExistingBinding> {
-    if binding
-        .agent_id
-        .as_deref()
-        .is_some_and(|agent_id| agent_id != current_agent_id)
-    {
-        return Err(ApiError::Conflict(
-            "this Playit association belongs to a different account or agent; reconcile it explicitly"
-                .into(),
-        ));
-    }
-
-    if !is_loopback_address(&binding.local_address) {
-        return Err(ApiError::Conflict(
-            "the stored Playit association has an unsafe local destination; forget it before repairing"
-                .into(),
-        ));
-    }
-
-    // Use the resilient tunnel source: when the account-wide list is
-    // denied, what is visible on the current agent is enough to repair the
-    // stored binding instead of failing the attach.
-    let tunnels = state.playit.visible_tunnels().await?;
-    let matches: Vec<_> = tunnels
-        .into_iter()
-        .filter(|tunnel| tunnel.id == binding.tunnel_id)
-        .collect();
-    if matches.len() > 1 {
-        return Err(ApiError::Conflict(
-            "Playit returned duplicate records for the stored tunnel id".into(),
-        ));
-    }
-    let Some(tunnel) = matches.into_iter().next() else {
-        return Ok(ExistingBinding::Missing);
-    };
-
-    if tunnel.disabled {
-        return Err(ApiError::Conflict(format!(
-            "Playit disabled this tunnel{}",
-            tunnel
-                .disabled_reason
-                .as_deref()
-                .map(|reason| format!(": {reason}"))
-                .unwrap_or_default()
-        )));
-    }
-    // The current-agent fallback list carries no semantic tunnel type, so
-    // `None` is unknown-but-repairable when the stored id matched exactly.
-    if tunnel
-        .tunnel_type
-        .as_deref()
-        .is_some_and(|kind| kind != "minecraft-java")
-    {
-        return Err(ApiError::Conflict(
-            "the stored Playit tunnel is not a Minecraft Java tunnel".into(),
-        ));
-    }
-    if tunnel.protocol != PlayitProtocol::Tcp {
-        return Err(ApiError::Conflict(
-            "the stored Playit tunnel does not use Minecraft Java TCP".into(),
-        ));
-    }
-
-    // A live tunnel whose destination drifted (e.g. the server port changed)
-    // or whose agent changed is repaired in place: the same tunnel id is
-    // kept and reassigned rather than duplicated.
-    let destination_changed = tunnel.local_address.as_deref()
-        != Some(binding.local_address.as_str())
-        || tunnel.local_port != Some(record.config.port);
-    let agent_changed = tunnel.agent_id.as_deref() != Some(current_agent_id);
-    if destination_changed || agent_changed {
-        state
-            .playit
-            .reassign_tunnel(
-                &binding.tunnel_id,
-                record.config.port,
-                Some(binding.local_address.clone()),
-            )
-            .await?;
-        return Ok(ExistingBinding::Present(EnsuredServerTunnel {
-            tunnel: TunnelCreateInfo {
-                tunnel_id: binding.tunnel_id.clone(),
-                message: Some("Existing Minecraft Java tunnel updated".into()),
-            },
-            disposition: EnsureTunnelDisposition::Updated {
-                previous_agent_id: tunnel.agent_id,
-                destination_changed,
-            },
-        }));
-    }
-
-    Ok(ExistingBinding::Present(EnsuredServerTunnel {
-        tunnel: TunnelCreateInfo {
-            tunnel_id: binding.tunnel_id.clone(),
-            message: Some("Existing Minecraft Java tunnel reused".into()),
-        },
-        disposition: EnsureTunnelDisposition::Reused,
-    }))
 }
 
 /// DELETE `/api/servers/:id/playit`.
@@ -663,9 +543,15 @@ async fn forget_server_playit(
     Ok(Json(server_playit_view(&state, &record).await))
 }
 
-/// Reconcile a stored association in place. It never creates or deletes a
-/// tunnel: missing, disabled, incompatible, and ambiguous records remain
-/// visible for an explicit repair or forget operation.
+/// Reconcile a stored association in place, healing remote deletions.
+///
+/// A still-visible tunnel is adopted (reassigned to the current agent and
+/// destination when it drifted); a tunnel Playit no longer reports — for
+/// example after the tunnel or its agent was deleted remotely — is recreated
+/// through the stable-name path and the binding is updated to the healed
+/// tunnel. Disabled, incompatible, and ambiguous records cannot be healed
+/// automatically: they stay visible for an explicit repair or forget
+/// operation. Reconcile never deletes a tunnel.
 async fn reconcile_server_playit(
     State(state): State<Arc<AppState>>,
     AdminIdentity(admin): AdminIdentity,
@@ -680,45 +566,66 @@ async fn reconcile_server_playit(
         return Ok(Json(server_playit_view(&state, &record).await));
     };
     let current_agent_id = required_current_agent_id(&state).await?;
-    if let Ok(ExistingBinding::Present(_)) =
-        inspect_existing_binding(&state, &record, &binding, &current_agent_id).await
-    {
-        let mut next = binding.clone();
-        next.agent_id = Some(current_agent_id);
-        next.local_port = record.config.port;
-        let server_id = id.clone();
-        let expected_id = binding.tunnel_id.clone();
-        state
-            .store
-            .try_update(move |data| -> ApiResult<()> {
-                let Some(server) = data
-                    .servers
-                    .iter_mut()
-                    .find(|server| server.id == server_id)
-                else {
-                    return Err(ApiError::NotFound("server".into()));
-                };
-                if server
-                    .playit
-                    .as_ref()
-                    .map(|binding| binding.tunnel_id.as_str())
-                    != Some(expected_id.as_str())
-                {
-                    return Err(ApiError::Conflict(
-                        "the server's Playit association changed while it was being reconciled"
-                            .into(),
-                    ));
-                }
-                server.playit = Some(next);
-                Ok(())
-            })
-            .await??;
-        record.playit = state
-            .store
-            .server(&id)
-            .await
-            .and_then(|server| server.playit);
+    // Only the loopback destination is trusted, exactly like an attach
+    // repair: a non-loopback address from an older state file falls back to
+    // loopback instead of being carried into Playit.
+    let desired_address = (is_loopback_address(&binding.local_address))
+        .then(|| binding.local_address.clone())
+        .unwrap_or_else(|| "127.0.0.1".into());
+    let Ok(healed) = state
+        .playit
+        .reconcile_server_tunnel(
+            &id,
+            &record.name,
+            record.config.port,
+            Some(binding.tunnel_id.as_str()),
+            &desired_address,
+            None,
+        )
+        .await
+    else {
+        return Ok(Json(server_playit_view(&state, &record).await));
+    };
+
+    let mut next = binding.clone();
+    next.tunnel_id = healed.tunnel.tunnel_id.clone();
+    next.agent_id = Some(current_agent_id);
+    next.local_address = desired_address;
+    next.local_port = record.config.port;
+    if next.tunnel_id != binding.tunnel_id {
+        next.created_at = Some(now_unix_seconds());
     }
+    let server_id = id.clone();
+    let expected_id = binding.tunnel_id.clone();
+    state
+        .store
+        .try_update(move |data| -> ApiResult<()> {
+            let Some(server) = data
+                .servers
+                .iter_mut()
+                .find(|server| server.id == server_id)
+            else {
+                return Err(ApiError::NotFound("server".into()));
+            };
+            if server
+                .playit
+                .as_ref()
+                .map(|binding| binding.tunnel_id.as_str())
+                != Some(expected_id.as_str())
+            {
+                return Err(ApiError::Conflict(
+                    "the server's Playit association changed while it was being reconciled".into(),
+                ));
+            }
+            server.playit = Some(next);
+            Ok(())
+        })
+        .await??;
+    record.playit = state
+        .store
+        .server(&id)
+        .await
+        .and_then(|server| server.playit);
 
     Ok(Json(server_playit_view(&state, &record).await))
 }

@@ -18,6 +18,7 @@ const apiMock = vi.hoisted(() => ({
   playitStatus: vi.fn(),
   playitAccount: vi.fn(),
   playitTunnels: vi.fn(),
+  createPlayitTunnel: vi.fn(),
   servers: vi.fn(),
   serverPlayit: vi.fn(),
   playitClaim: vi.fn(),
@@ -118,6 +119,7 @@ beforeEach(() => {
   apiMock.deletePlayitTunnel.mockResolvedValue({ ok: true });
   apiMock.playitAuthSession.mockResolvedValue({ ...loggedOutSession });
   apiMock.playitAgents.mockResolvedValue([]);
+  apiMock.createPlayitTunnel.mockResolvedValue({ tunnel_id: "tunnel-9", message: null });
 });
 
 afterEach(() => {
@@ -489,6 +491,24 @@ describe("Playit account card", () => {
     await waitFor(() => expect(apiMock.playitAuthTotp).toHaveBeenCalledWith("123456"));
   });
 
+  it("shows an empty agents card when signed in without agents", async () => {
+    apiMock.playitAuthSession.mockResolvedValue({
+      authenticated: true,
+      requires_totp: false,
+      account_id: 7,
+      account_status: "verified",
+      read_only: false,
+    });
+    apiMock.playitAgents.mockResolvedValue([]);
+
+    renderPlayit();
+    await waitFor(() =>
+      expect(
+        screen.getByText("No agents are registered on this account yet."),
+      ).toBeInTheDocument(),
+    );
+  });
+
   it("offers direct setup while the agent needs claiming", async () => {
     apiMock.playitStatus.mockResolvedValue({
       status: "needs_claim",
@@ -513,5 +533,66 @@ describe("Playit account card", () => {
     const button = await screen.findByRole("button", { name: "Connect account" });
     fireEvent.click(button);
     await waitFor(() => expect(apiMock.playitSetupDirect).toHaveBeenCalledOnce());
+  });
+});
+
+describe("Playit tunnel creation", () => {
+  it("creates a standalone tunnel from the form", async () => {
+    renderPlayit();
+    fireEvent.input(await screen.findByLabelText("Name (optional)"), {
+      target: { value: "lobby" },
+    });
+    fireEvent.input(await screen.findByPlaceholderText("25565"), {
+      target: { value: "25566" },
+    });
+    // Selects listen for `input` (which browsers fire on selection change);
+    // `change` events do not reach Preact handlers in this jsdom setup.
+    fireEvent.input(screen.getByLabelText("Protocol"), { target: { value: "udp" } });
+    fireEvent.input(screen.getByLabelText("Local address"), {
+      target: { value: "::1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create tunnel" }));
+
+    await waitFor(() =>
+      expect(apiMock.createPlayitTunnel).toHaveBeenCalledWith({
+        local_port: 25566,
+        protocol: "udp",
+        local_address: "::1",
+        name: "lobby",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("New Playit tunnel created.")).toBeInTheDocument(),
+    );
+  });
+
+  it("rejects an invalid port without calling the API", async () => {
+    renderPlayit();
+    fireEvent.input(await screen.findByPlaceholderText("25565"), {
+      target: { value: "70000" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create tunnel" }));
+
+    await waitFor(() =>
+      expect(screen.getByText("Enter a port between 1 and 65535.")).toBeInTheDocument(),
+    );
+    expect(apiMock.createPlayitTunnel).not.toHaveBeenCalled();
+  });
+
+  it("disables creation while Playit is not connected", async () => {
+    apiMock.playitStatus.mockResolvedValue({
+      status: "needs_claim",
+      version: null,
+      message: null,
+    });
+
+    renderPlayit();
+    const button = await screen.findByRole("button", { name: "Create tunnel" });
+    expect(button).toBeDisabled();
+    await waitFor(() =>
+      expect(
+        screen.getByText("Connect Playit before creating a tunnel."),
+      ).toBeInTheDocument(),
+    );
   });
 });

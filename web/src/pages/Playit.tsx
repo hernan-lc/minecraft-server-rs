@@ -306,6 +306,32 @@ export function Playit() {
       await api.playitDeleteAgent(agent.id, draft.moveTo || null, draft.disable);
       toast.success(t("playit.agentDeleted"));
       await loadAuth();
+      // Deleting an agent reassigns or unassigns its tunnels remotely, so
+      // the tunnel and server views must reload to show the new reality.
+      await refresh();
+    } catch (error) {
+      toast.error(errorText(error, t("errors.playitAction")));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createTunnel(input: {
+    port: number;
+    protocol: "tcp" | "udp" | "both";
+    address: string;
+    name?: string;
+  }) {
+    setBusy(true);
+    try {
+      await api.createPlayitTunnel({
+        local_port: input.port,
+        protocol: input.protocol,
+        local_address: input.address,
+        name: input.name,
+      });
+      toast.success(t("playit.tunnelCreated"));
+      await refresh();
     } catch (error) {
       toast.error(errorText(error, t("errors.playitAction")));
     } finally {
@@ -440,10 +466,6 @@ export function Playit() {
   }
 
   const playitConnected = status?.status === "connected";
-  const loginUrl = safeExternalUrl(account?.login_link);
-  const claimingComplete = status?.status === "connected" || account?.status === "verified";
-  const activeClaimUrl = claimingComplete ? null : claimUrl ?? account?.claim_url;
-  const safeClaimUrl = safeExternalUrl(activeClaimUrl);
 
   return (
     <div class="mx-auto flex w-full max-w-6xl flex-col gap-3 px-3 py-3 sm:gap-6 sm:px-6 sm:py-8">
@@ -468,364 +490,695 @@ export function Playit() {
 
       {failed && <Banner kind="error">{failed}</Banner>}
 
-      <Card title={t("playit.connectionSection")} class="overflow-hidden">
-        <div class="grid grid-cols-3 gap-2 sm:gap-4">
-          <Detail
-            label={t("playit.connection")}
-            shortLabel={t("playit.connectionShort")}
-            value={status ? stateLabel(status.status, t) : t("common.loading")}
-            tone={statusTone(status?.status)}
-          />
-          <Detail
-            label={t("playit.version")}
-            shortLabel={t("playit.versionShort")}
-            value={status?.version ?? t("common.none")}
-          />
-          <Detail
-            label={t("playit.account")}
-            shortLabel={t("playit.accountShort")}
-            value={account ? accountLabel(account.status, t) : t("common.none")}
-          />
-        </div>
+      <ConnectionCard
+        status={status}
+        account={account}
+        accountError={accountError}
+        claimUrl={claimUrl}
+        busy={busy}
+        onClaim={() => void claim()}
+      />
 
-        {status?.message && <p class="mt-4 text-sm text-fg-muted">{status.message}</p>}
-        {account?.agent_id && (
-          <p class="mt-3 break-all text-xs text-fg-muted">
-            {t("playit.agentId")}: <span class="font-mono text-fg">{account.agent_id}</span>
+      <AccountCard
+        authFailure={authFailure}
+        authSession={authSession}
+        email={email}
+        password={password}
+        totp={totp}
+        authBusy={authBusy}
+        busy={busy}
+        needsClaim={status?.status === "needs_claim"}
+        onEmailChange={setEmail}
+        onPasswordChange={setPassword}
+        onTotpChange={setTotp}
+        onLogin={() => void login()}
+        onTotp={() => void submitTotp()}
+        onLogout={() => void logout()}
+        onConnectDirect={() => void connectDirect()}
+        onReconnectAgent={() => void reconnectAgent()}
+        onDisconnectAgent={() => void disconnectAgent()}
+      />
+
+      {authSession?.authenticated && (
+        <AgentsCard
+          agents={agents}
+          agentsFailure={agentsFailure}
+          currentAgentId={account?.agent_id ?? null}
+          agentDrafts={agentDrafts}
+          busy={busy}
+          onDraftChange={setAgentDrafts}
+          onDeleteAgent={(agent) => void deleteAgent(agent)}
+        />
+      )}
+
+      <ServerTunnelsCard
+        servers={servers}
+        serverViews={serverViews}
+        serverViewErrors={serverViewErrors}
+        canConnect={playitConnected}
+        busy={busy}
+        onConnect={(id) => void connectServer(id)}
+        onDisconnect={(server) => void disconnectServer(server)}
+        onRepair={(id) => void connectServer(id)}
+        onReconcile={(id) => void reconcileServer(id)}
+        onForget={(server) => void forgetServer(server)}
+        onCopyAddress={(address) => void copyAddress(address)}
+      />
+
+      <TunnelsCard
+        tunnels={tunnels}
+        tunnelError={tunnelError}
+        needsClaim={status?.status === "needs_claim"}
+        servers={servers}
+        busy={busy}
+        canCreate={playitConnected}
+        onCreate={(input) => void createTunnel(input)}
+        onRemove={(tunnel) => void remove(tunnel)}
+        onCopyAddress={(address) => void copyAddress(address)}
+      />
+    </div>
+  );
+}
+
+function ConnectionCard({
+  status,
+  account,
+  accountError,
+  claimUrl,
+  busy,
+  onClaim,
+}: {
+  status: PlayitStatus | null;
+  account: PlayitAccount | null;
+  accountError: string | null;
+  claimUrl: string | null;
+  busy: boolean;
+  onClaim: () => void;
+}) {
+  const t = useT();
+  const loginUrl = safeExternalUrl(account?.login_link);
+  const claimingComplete = status?.status === "connected" || account?.status === "verified";
+  const activeClaimUrl = claimingComplete ? null : claimUrl ?? account?.claim_url;
+  const safeClaimUrl = safeExternalUrl(activeClaimUrl);
+
+  return (
+    <Card title={t("playit.connectionSection")} class="overflow-hidden">
+      <div class="grid grid-cols-3 gap-2 sm:gap-4">
+        <Detail
+          label={t("playit.connection")}
+          shortLabel={t("playit.connectionShort")}
+          value={status ? stateLabel(status.status, t) : t("common.loading")}
+          tone={statusTone(status?.status)}
+        />
+        <Detail
+          label={t("playit.version")}
+          shortLabel={t("playit.versionShort")}
+          value={status?.version ?? t("common.none")}
+        />
+        <Detail
+          label={t("playit.account")}
+          shortLabel={t("playit.accountShort")}
+          value={account ? accountLabel(account.status, t) : t("common.none")}
+        />
+      </div>
+
+      {status?.message && <p class="mt-4 text-sm text-fg-muted">{status.message}</p>}
+      {account?.agent_id && (
+        <p class="mt-3 break-all text-xs text-fg-muted">
+          {t("playit.agentId")}: <span class="font-mono text-fg">{account.agent_id}</span>
+        </p>
+      )}
+      {accountError && (
+        <div class="mt-3">
+          <Banner kind="error">{accountError}</Banner>
+        </div>
+      )}
+
+      <Actions>
+        {status?.status === "needs_claim" && (
+          <Button variant="primary" class="w-full sm:w-auto" disabled={busy} onClick={onClaim}>
+            {busy ? t("playit.startingClaim") : t("playit.connect")}
+          </Button>
+        )}
+        {loginUrl && (
+          <a
+            class="inline-flex w-full items-center justify-center gap-2 rounded-full bg-ink-700 px-4 py-2 text-sm font-medium text-fg hover:bg-ink-600 sm:w-auto"
+            href={loginUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {t("playit.openAccount")}
+          </a>
+        )}
+      </Actions>
+
+      {activeClaimUrl && (
+        <div class="mt-4 space-y-2">
+          <Banner kind="info">
+            {t("playit.claimInstructions")} {" "}
+            {safeClaimUrl ? (
+              <a
+                class="font-medium text-accent underline"
+                href={safeClaimUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {t("playit.openClaim")}
+              </a>
+            ) : (
+              t("playit.claimLinkUnavailable")
+            )}
+          </Banner>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function AccountCard({
+  authFailure,
+  authSession,
+  email,
+  password,
+  totp,
+  authBusy,
+  busy,
+  needsClaim,
+  onEmailChange,
+  onPasswordChange,
+  onTotpChange,
+  onLogin,
+  onTotp,
+  onLogout,
+  onConnectDirect,
+  onReconnectAgent,
+  onDisconnectAgent,
+}: {
+  authFailure: string | null;
+  authSession: PlayitAuthSession | null;
+  email: string;
+  password: string;
+  totp: string;
+  authBusy: boolean;
+  busy: boolean;
+  needsClaim: boolean;
+  onEmailChange: (value: string) => void;
+  onPasswordChange: (value: string) => void;
+  onTotpChange: (value: string) => void;
+  onLogin: () => void;
+  onTotp: () => void;
+  onLogout: () => void;
+  onConnectDirect: () => void;
+  onReconnectAgent: () => void;
+  onDisconnectAgent: () => void;
+}) {
+  const t = useT();
+  return (
+    <Card title={t("playit.accountSection")}>
+      {authFailure && (
+        <div class="mb-3">
+          <Banner kind="error">{authFailure}</Banner>
+        </div>
+      )}
+      {!authSession?.authenticated && !authSession?.requires_totp && (
+        <form
+          className="grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onLogin();
+          }}
+        >
+          <Field label={t("playit.email")}>
+            <Input
+              type="email"
+              autoComplete="username"
+              value={email}
+              onInput={(event) => onEmailChange(event.currentTarget.value)}
+            />
+          </Field>
+          <Field label={t("playit.password")}>
+            <Input
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onInput={(event) => onPasswordChange(event.currentTarget.value)}
+            />
+          </Field>
+          <Button type="button" variant="primary" disabled={authBusy} onClick={onLogin}>
+            {authBusy ? t("playit.signingIn") : t("playit.signIn")}
+          </Button>
+        </form>
+      )}
+      {authSession?.requires_totp && (
+        <form
+          className="grid gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-end"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onTotp();
+          }}
+        >
+          <Field label={t("playit.totpCode")} hint={t("playit.totpPrompt")}>
+            <Input
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              value={totp}
+              onInput={(event) => onTotpChange(event.currentTarget.value)}
+            />
+          </Field>
+          <Button type="button" variant="primary" disabled={authBusy} onClick={onTotp}>
+            {t("playit.verify")}
+          </Button>
+          <Button type="button" variant="ghost" disabled={authBusy} onClick={onLogout}>
+            {t("common.cancel")}
+          </Button>
+        </form>
+      )}
+      {authSession?.authenticated && (
+        <div className="space-y-3">
+          <p className="text-sm text-fg-muted">
+            {t("playit.signedInAs", {
+              id: authSession.account_id ?? t("common.unknown"),
+              status: authSession.account_status ?? t("common.unknown"),
+            })}
+            {authSession.read_only ? ` · ${t("playit.readOnly")}` : ""}
+          </p>
+          <Actions>
+            {needsClaim && (
+              <Button variant="primary" disabled={busy} onClick={onConnectDirect}>
+                {busy ? t("playit.startingClaim") : t("playit.connectAccount")}
+              </Button>
+            )}
+            <Button variant="ghost" disabled={authBusy} onClick={onLogout}>
+              {t("playit.signOut")}
+            </Button>
+            <Button variant="ghost" disabled={busy} onClick={onReconnectAgent}>
+              {t("playit.reconnectAgent")}
+            </Button>
+            <Button variant="ghost" disabled={busy} onClick={onDisconnectAgent}>
+              {t("playit.disconnectAgent")}
+            </Button>
+          </Actions>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+type AgentDraft = { moveTo: string; disable: boolean };
+
+function AgentsCard({
+  agents,
+  agentsFailure,
+  currentAgentId,
+  agentDrafts,
+  busy,
+  onDraftChange,
+  onDeleteAgent,
+}: {
+  agents: PlayitAgent[];
+  agentsFailure: string | null;
+  currentAgentId: string | null;
+  agentDrafts: Record<string, AgentDraft>;
+  busy: boolean;
+  onDraftChange: (updater: (previous: Record<string, AgentDraft>) => Record<string, AgentDraft>) => void;
+  onDeleteAgent: (agent: PlayitAgent) => void;
+}) {
+  const t = useT();
+  return (
+    <Card title={t("playit.agentsSection")}>
+      {agentsFailure ? (
+        <Banner kind="error">{agentsFailure}</Banner>
+      ) : agents.length === 0 ? (
+        <Empty>{t("playit.noAgents")}</Empty>
+      ) : (
+        <div className="space-y-2">
+          {agents.map((agent) => (
+            <AgentRow
+              key={agent.id}
+              agent={agent}
+              agents={agents}
+              isCurrent={agent.id === currentAgentId}
+              draft={agentDrafts[agent.id] ?? { moveTo: "", disable: false }}
+              busy={busy}
+              onDraftChange={(draft) =>
+                onDraftChange((previous) => ({ ...previous, [agent.id]: draft }))
+              }
+              onDelete={() => onDeleteAgent(agent)}
+            />
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function AgentRow({
+  agent,
+  agents,
+  isCurrent,
+  draft,
+  busy,
+  onDraftChange,
+  onDelete,
+}: {
+  agent: PlayitAgent;
+  agents: PlayitAgent[];
+  isCurrent: boolean;
+  draft: AgentDraft;
+  busy: boolean;
+  onDraftChange: (draft: AgentDraft) => void;
+  onDelete: () => void;
+}) {
+  const t = useT();
+  return (
+    <div className="flex flex-col gap-2 rounded-xl border border-ink-700 p-3 sm:flex-row sm:items-center">
+      <div className="min-w-0 flex-1">
+        <p className="truncate font-medium">{agent.name}</p>
+        <p className="break-all font-mono text-xs text-fg-muted">{agent.id}</p>
+        {isCurrent && <p className="text-xs text-accent">{t("playit.currentAgent")}</p>}
+      </div>
+      {!isCurrent && (
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <Select
+            aria-label={t("playit.moveTunnelsTo")}
+            value={draft.moveTo}
+            onInput={(event) => onDraftChange({ ...draft, moveTo: event.currentTarget.value })}
+          >
+            <option value="">{t("playit.unassignTunnels")}</option>
+            {agents
+              .filter((other) => other.id !== agent.id)
+              .map((other) => (
+                <option key={other.id} value={other.id}>
+                  {other.name}
+                </option>
+              ))}
+          </Select>
+          <label className="flex items-center gap-1 text-sm">
+            <input
+              type="checkbox"
+              checked={draft.disable}
+              onChange={(event) => onDraftChange({ ...draft, disable: event.currentTarget.checked })}
+            />
+            {t("playit.disableTunnels")}
+          </label>
+          <Button variant="danger" disabled={busy} onClick={onDelete}>
+            {t("playit.deleteAgent")}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ServerTunnelsCard({
+  servers,
+  serverViews,
+  serverViewErrors,
+  canConnect,
+  busy,
+  onConnect,
+  onDisconnect,
+  onRepair,
+  onReconcile,
+  onForget,
+  onCopyAddress,
+}: {
+  servers: Server[];
+  serverViews: Record<string, ServerPlayitView>;
+  serverViewErrors: Record<string, string>;
+  canConnect: boolean;
+  busy: boolean;
+  onConnect: (id: string) => void;
+  onDisconnect: (server: Server) => void;
+  onRepair: (id: string) => void;
+  onReconcile: (id: string) => void;
+  onForget: (server: Server) => void;
+  onCopyAddress: (address: string) => void;
+}) {
+  const t = useT();
+  return (
+    <Card title={t("playit.serverSection")}>
+      <p class="mb-3 text-sm leading-relaxed text-fg-muted sm:mb-4">{t("playit.serverExplain")}</p>
+      {servers.length === 0 ? (
+        <Empty>{t("playit.noServers")}</Empty>
+      ) : (
+        <div class="space-y-2 sm:space-y-0 sm:divide-y sm:divide-ink-700">
+          {servers.map((server) => (
+            <ServerTunnelRow
+              key={server.id}
+              server={server}
+              view={serverViews[server.id]}
+              loadError={serverViewErrors[server.id] ?? null}
+              canConnect={canConnect}
+              busy={busy}
+              onConnect={() => onConnect(server.id)}
+              onDisconnect={() => onDisconnect(server)}
+              onRepair={() => onRepair(server.id)}
+              onReconcile={() => onReconcile(server.id)}
+              onForget={() => onForget(server)}
+              onCopyAddress={onCopyAddress}
+            />
+          ))}
+        </div>
+      )}
+      {!canConnect && servers.length > 0 && (
+        <p class="mt-3 text-xs text-fg-muted">{t("playit.connectBeforeTunnel")}</p>
+      )}
+    </Card>
+  );
+}
+
+function TunnelsCard({
+  tunnels,
+  tunnelError,
+  needsClaim,
+  servers,
+  busy,
+  canCreate,
+  onCreate,
+  onRemove,
+  onCopyAddress,
+}: {
+  tunnels: PlayitTunnel[];
+  tunnelError: string | null;
+  needsClaim: boolean;
+  servers: Server[];
+  busy: boolean;
+  canCreate: boolean;
+  onCreate: (input: { port: number; protocol: "tcp" | "udp" | "both"; address: string; name?: string }) => void;
+  onRemove: (tunnel: PlayitTunnel) => void;
+  onCopyAddress: (address: string) => void;
+}) {
+  const t = useT();
+  return (
+    <Card title={t("playit.tunnelsSection")}>
+      {tunnelError &&
+        (needsClaim ? (
+          <Banner kind="info">{t("playit.tunnelsNeedClaim")}</Banner>
+        ) : (
+          <Banner kind="error">{tunnelError}</Banner>
+        ))}
+      <CreateTunnelForm busy={busy} canCreate={canCreate} onCreate={onCreate} />
+      {tunnels.length === 0 ? (
+        <Empty>{t("playit.noTunnels")}</Empty>
+      ) : (
+        <div class="space-y-2 sm:space-y-0 sm:divide-y sm:divide-ink-700">
+          {tunnels.map((tunnel) => {
+            const server = servers.find((candidate) => candidate.playit?.tunnel_id === tunnel.id);
+            return (
+              <TunnelRow
+                key={tunnel.id}
+                tunnel={tunnel}
+                serverName={server?.name ?? null}
+                busy={busy}
+                onRemove={() => onRemove(tunnel)}
+                onCopyAddress={onCopyAddress}
+              />
+            );
+          })}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function TunnelRow({
+  tunnel,
+  serverName,
+  busy,
+  onRemove,
+  onCopyAddress,
+}: {
+  tunnel: PlayitTunnel;
+  serverName: string | null;
+  busy: boolean;
+  onRemove: () => void;
+  onCopyAddress: (address: string) => void;
+}) {
+  const t = useT();
+  return (
+    <article class="rounded-xl border border-ink-700 bg-ink-900/45 p-3 sm:flex sm:items-center sm:justify-between sm:gap-4 sm:rounded-none sm:border-0 sm:bg-transparent sm:px-0 sm:py-4 sm:first:pt-0 sm:last:pb-0">
+      <div class="min-w-0 flex-1 space-y-1">
+        <div class="flex items-center gap-2">
+          <span
+            class={`size-2 shrink-0 rounded-full ${tunnel.disabled ? "bg-amber-400" : "bg-accent"}`}
+            aria-hidden="true"
+          />
+          <p class="truncate font-medium">{serverName ?? tunnel.name ?? t("playit.unmanaged")}</p>
+        </div>
+        <p class="text-xs text-fg-muted">
+          {tunnel.tunnel_type === "minecraft-java" ? "Minecraft Java" : tunnel.protocol.toUpperCase()}
+          {tunnel.destination && ` · ${tunnel.destination}`}
+          {tunnel.disabled && ` · ${t("playit.disabled")}`}
+        </p>
+        {tunnel.agent_id && (
+          <p class="text-xs text-fg-muted">
+            {t("playit.agent")}: <span class="font-mono">{tunnel.agent_id}</span>
           </p>
         )}
-        {accountError && (
-          <div class="mt-3">
-            <Banner kind="error">{accountError}</Banner>
-          </div>
-        )}
+        {tunnel.disabled_reason && <p class="text-xs text-amber-300">{tunnel.disabled_reason}</p>}
+      </div>
+      <div class="mt-3 flex min-w-0 items-center gap-2 sm:mt-0 sm:max-w-sm">
+        <div class="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-ink-700 bg-ink-850 px-3 py-2 text-xs text-fg-muted">
+          <Icon.Link size={14} />
+          <span class="truncate">{tunnel.display_address || t("common.none")}</span>
+        </div>
+        <Button
+          variant="ghost"
+          square
+          icon={<Icon.Copy size={19} />}
+          aria-label={tunnel.display_address || t("playit.copyUnavailable")}
+          title={t("playit.copyAddress")}
+          class="size-11 shrink-0 sm:h-auto sm:w-auto sm:px-3 sm:py-2"
+          disabled={!tunnel.display_address}
+          onClick={() => onCopyAddress(tunnel.display_address)}
+        >
+          <span class="hidden sm:inline">{t("playit.copyAddress")}</span>
+        </Button>
+        <Button
+          variant="danger"
+          square
+          icon={<Icon.Trash size={19} />}
+          aria-label={t("common.delete")}
+          title={t("common.delete")}
+          class="size-11 shrink-0 sm:h-auto sm:w-auto sm:px-3 sm:py-2"
+          disabled={busy}
+          onClick={onRemove}
+        >
+          <span class="hidden sm:inline">{t("common.delete")}</span>
+        </Button>
+      </div>
+    </article>
+  );
+}
 
-        <Actions>
-          {status?.status === "needs_claim" && (
-            <Button variant="primary" class="w-full sm:w-auto" disabled={busy} onClick={() => void claim()}>
-              {busy ? t("playit.startingClaim") : t("playit.connect")}
-            </Button>
-          )}
-          {loginUrl && (
-            <a
-              class="inline-flex w-full items-center justify-center gap-2 rounded-full bg-ink-700 px-4 py-2 text-sm font-medium text-fg hover:bg-ink-600 sm:w-auto"
-              href={loginUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              {t("playit.openAccount")}
-            </a>
-          )}
-        </Actions>
+function CreateTunnelForm({
+  busy,
+  canCreate,
+  onCreate,
+}: {
+  busy: boolean;
+  canCreate: boolean;
+  onCreate: (input: { port: number; protocol: "tcp" | "udp" | "both"; address: string; name?: string }) => void;
+}) {
+  const t = useT();
+  const [name, setName] = useState("");
+  const [port, setPort] = useState("");
+  const [protocol, setProtocol] = useState<"tcp" | "udp" | "both">("tcp");
+  const [address, setAddress] = useState("127.0.0.1");
+  const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
 
-        {activeClaimUrl && (
-          <div class="mt-4 space-y-2">
-            <Banner kind="info">
-              {t("playit.claimInstructions")} {" "}
-              {safeClaimUrl ? (
-                <a
-                  class="font-medium text-accent underline"
-                  href={safeClaimUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {t("playit.openClaim")}
-                </a>
-              ) : (
-                t("playit.claimLinkUnavailable")
-              )}
-            </Banner>
-          </div>
-        )}
-      </Card>
+  function submit() {
+    const parsed = Number(port);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+      setError(t("playit.invalidTunnelPort"));
+      return;
+    }
+    setError(null);
+    setCreating(true);
+    try {
+      const trimmed = name.trim();
+      onCreate({
+        port: parsed,
+        protocol,
+        address,
+        name: trimmed ? trimmed : undefined,
+      });
+      setName("");
+      setPort("");
+    } finally {
+      setCreating(false);
+    }
+  }
 
-      <Card title={t("playit.accountSection")}>
-        {authFailure && (
-          <div class="mb-3">
-            <Banner kind="error">{authFailure}</Banner>
-          </div>
-        )}
-        {!authSession?.authenticated && !authSession?.requires_totp && (
-          <form
-            className="grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void login();
-            }}
-          >
-            <Field label={t("playit.email")}>
-              <Input
-                type="email"
-                autoComplete="username"
-                value={email}
-                onInput={(event) => setEmail(event.currentTarget.value)}
-              />
-            </Field>
-            <Field label={t("playit.password")}>
-              <Input
-                type="password"
-                autoComplete="current-password"
-                value={password}
-                onInput={(event) => setPassword(event.currentTarget.value)}
-              />
-            </Field>
-            <Button
-              type="button"
-              variant="primary"
-              disabled={authBusy}
-              onClick={() => void login()}
-            >
-              {authBusy ? t("playit.signingIn") : t("playit.signIn")}
-            </Button>
-          </form>
-        )}
-        {authSession?.requires_totp && (
-          <form
-            className="grid gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-end"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void submitTotp();
-            }}
-          >
-            <Field label={t("playit.totpCode")} hint={t("playit.totpPrompt")}>
-              <Input
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                value={totp}
-                onInput={(event) => setTotp(event.currentTarget.value)}
-              />
-            </Field>
-            <Button
-              type="button"
-              variant="primary"
-              disabled={authBusy}
-              onClick={() => void submitTotp()}
-            >
-              {t("playit.verify")}
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              disabled={authBusy}
-              onClick={() => void logout()}
-            >
-              {t("common.cancel")}
-            </Button>
-          </form>
-        )}
-        {authSession?.authenticated && (
-          <div className="space-y-3">
-            <p className="text-sm text-fg-muted">
-              {t("playit.signedInAs", {
-                id: authSession.account_id ?? t("common.unknown"),
-                status: authSession.account_status ?? t("common.unknown"),
-              })}
-              {authSession.read_only ? ` · ${t("playit.readOnly")}` : ""}
+  return (
+    <form
+      class="mb-4 rounded-xl border border-ink-700 bg-ink-900/45 p-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        submit();
+      }}
+    >
+      <h3 class="text-sm font-medium">{t("playit.createTunnelTitle")}</h3>
+      <p class="mt-1 text-xs leading-relaxed text-fg-muted">{t("playit.createTunnelExplain")}</p>
+      <div class="mt-3 grid gap-3 sm:grid-cols-[1fr_130px_150px_130px_auto] sm:items-end">
+        <Field label={t("playit.tunnelName")}>
+          <Input
+            value={name}
+            maxLength={100}
+            disabled={busy || creating}
+            onInput={(event) => setName(event.currentTarget.value)}
+          />
+        </Field>
+        <Field label={t("playit.tunnelPort")}>
+          <Input
+            inputMode="numeric"
+            value={port}
+            placeholder="25565"
+            disabled={busy || creating}
+            onInput={(event) => setPort(event.currentTarget.value)}
+          />
+          {error && (
+            <p class="text-xs text-red-300" role="alert">
+              {error}
             </p>
-            <Actions>
-              {status?.status === "needs_claim" && (
-                <Button variant="primary" disabled={busy} onClick={() => void connectDirect()}>
-                  {busy ? t("playit.startingClaim") : t("playit.connectAccount")}
-                </Button>
-              )}
-              <Button variant="ghost" disabled={authBusy} onClick={() => void logout()}>
-                {t("playit.signOut")}
-              </Button>
-              <Button variant="ghost" disabled={busy} onClick={() => void reconnectAgent()}>
-                {t("playit.reconnectAgent")}
-              </Button>
-              <Button variant="ghost" disabled={busy} onClick={() => void disconnectAgent()}>
-                {t("playit.disconnectAgent")}
-              </Button>
-            </Actions>
-            {agentsFailure ? (
-              <Banner kind="error">{agentsFailure}</Banner>
-            ) : (
-              agents.length > 0 && (
-                <div className="space-y-2">
-                  <h3 className="text-sm font-medium">{t("playit.agentsSection")}</h3>
-                  {agents.map((agent) => {
-                    const draft = agentDrafts[agent.id] ?? { moveTo: "", disable: false };
-                    const isCurrent = agent.id === account?.agent_id;
-                    return (
-                      <div
-                        key={agent.id}
-                        className="flex flex-col gap-2 rounded-xl border border-ink-700 p-3 sm:flex-row sm:items-center"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate font-medium">{agent.name}</p>
-                          <p className="break-all font-mono text-xs text-fg-muted">{agent.id}</p>
-                          {isCurrent && (
-                            <p className="text-xs text-accent">{t("playit.currentAgent")}</p>
-                          )}
-                        </div>
-                        {!isCurrent && (
-                          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                            <Select
-                              aria-label={t("playit.moveTunnelsTo")}
-                              value={draft.moveTo}
-                              onChange={(event) =>
-                                setAgentDrafts((previous) => ({
-                                  ...previous,
-                                  [agent.id]: {
-                                    ...draft,
-                                    moveTo: event.currentTarget.value,
-                                  },
-                                }))
-                              }
-                            >
-                              <option value="">{t("playit.unassignTunnels")}</option>
-                              {agents
-                                .filter((other) => other.id !== agent.id)
-                                .map((other) => (
-                                  <option key={other.id} value={other.id}>
-                                    {other.name}
-                                  </option>
-                                ))}
-                            </Select>
-                            <label className="flex items-center gap-1 text-sm">
-                              <input
-                                type="checkbox"
-                                checked={draft.disable}
-                                onChange={(event) =>
-                                  setAgentDrafts((previous) => ({
-                                    ...previous,
-                                    [agent.id]: {
-                                      ...draft,
-                                      disable: event.currentTarget.checked,
-                                    },
-                                  }))
-                                }
-                              />
-                              {t("playit.disableTunnels")}
-                            </label>
-                            <Button
-                              variant="danger"
-                              disabled={busy}
-                              onClick={() => void deleteAgent(agent)}
-                            >
-                              {t("playit.deleteAgent")}
-                            </Button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )
-            )}
-          </div>
-        )}
-      </Card>
-
-      <Card title={t("playit.serverSection")}>
-        <p class="mb-3 text-sm leading-relaxed text-fg-muted sm:mb-4">{t("playit.serverExplain")}</p>
-        {servers.length === 0 ? (
-          <Empty>{t("playit.noServers")}</Empty>
-        ) : (
-          <div class="space-y-2 sm:space-y-0 sm:divide-y sm:divide-ink-700">
-            {servers.map((server) => (
-              <ServerTunnelRow
-                key={server.id}
-                server={server}
-                view={serverViews[server.id]}
-                loadError={serverViewErrors[server.id] ?? null}
-                canConnect={playitConnected}
-                busy={busy}
-                onConnect={() => void connectServer(server.id)}
-                onDisconnect={() => void disconnectServer(server)}
-                onRepair={() => void connectServer(server.id)}
-                onReconcile={() => void reconcileServer(server.id)}
-                onForget={() => void forgetServer(server)}
-                onCopyAddress={(address) => void copyAddress(address)}
-              />
-            ))}
-          </div>
-        )}
-        {!playitConnected && servers.length > 0 && (
-          <p class="mt-3 text-xs text-fg-muted">{t("playit.connectBeforeTunnel")}</p>
-        )}
-      </Card>
-
-      <Card title={t("playit.tunnelsSection")}>
-        {tunnelError &&
-          (status?.status === "needs_claim" ? (
-            <Banner kind="info">{t("playit.tunnelsNeedClaim")}</Banner>
-          ) : (
-            <Banner kind="error">{tunnelError}</Banner>
-          ))}
-        {tunnels.length === 0 ? (
-          <Empty>{t("playit.noTunnels")}</Empty>
-        ) : (
-          <div class="space-y-2 sm:space-y-0 sm:divide-y sm:divide-ink-700">
-            {tunnels.map((tunnel) => {
-              const server = servers.find((candidate) => candidate.playit?.tunnel_id === tunnel.id);
-              return (
-                <article
-                  key={tunnel.id}
-                  class="rounded-xl border border-ink-700 bg-ink-900/45 p-3 sm:flex sm:items-center sm:justify-between sm:gap-4 sm:rounded-none sm:border-0 sm:bg-transparent sm:px-0 sm:py-4 sm:first:pt-0 sm:last:pb-0"
-                >
-                  <div class="min-w-0 flex-1 space-y-1">
-                    <div class="flex items-center gap-2">
-                      <span
-                        class={`size-2 shrink-0 rounded-full ${tunnel.disabled ? "bg-amber-400" : "bg-accent"}`}
-                        aria-hidden="true"
-                      />
-                      <p class="truncate font-medium">{server?.name ?? tunnel.name ?? t("playit.unmanaged")}</p>
-                    </div>
-                    <p class="text-xs text-fg-muted">
-                      {tunnel.tunnel_type === "minecraft-java"
-                        ? "Minecraft Java"
-                        : tunnel.protocol.toUpperCase()}
-                      {tunnel.destination && ` · ${tunnel.destination}`}
-                      {tunnel.disabled && ` · ${t("playit.disabled")}`}
-                    </p>
-                    {tunnel.agent_id && (
-                      <p class="text-xs text-fg-muted">
-                        {t("playit.agent")}: <span class="font-mono">{tunnel.agent_id}</span>
-                      </p>
-                    )}
-                    {tunnel.disabled_reason && (
-                      <p class="text-xs text-amber-300">{tunnel.disabled_reason}</p>
-                    )}
-                  </div>
-                  <div class="mt-3 flex min-w-0 items-center gap-2 sm:mt-0 sm:max-w-sm">
-                    <div class="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-ink-700 bg-ink-850 px-3 py-2 text-xs text-fg-muted">
-                      <Icon.Link size={14} />
-                      <span class="truncate">{tunnel.display_address || t("common.none")}</span>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      square
-                      icon={<Icon.Copy size={19} />}
-                      aria-label={tunnel.display_address || t("playit.copyUnavailable")}
-                      title={t("playit.copyAddress")}
-                      class="size-11 shrink-0 sm:h-auto sm:w-auto sm:px-3 sm:py-2"
-                      disabled={!tunnel.display_address}
-                      onClick={() => void copyAddress(tunnel.display_address)}
-                    >
-                      <span class="hidden sm:inline">{t("playit.copyAddress")}</span>
-                    </Button>
-                    <Button
-                      variant="danger"
-                      square
-                      icon={<Icon.Trash size={19} />}
-                      aria-label={t("common.delete")}
-                      title={t("common.delete")}
-                      class="size-11 shrink-0 sm:h-auto sm:w-auto sm:px-3 sm:py-2"
-                      disabled={busy}
-                      onClick={() => void remove(tunnel)}
-                    >
-                      <span class="hidden sm:inline">{t("common.delete")}</span>
-                    </Button>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        )}
-      </Card>
-    </div>
+          )}
+        </Field>
+        <Field label={t("playit.tunnelProtocol")}>
+          <Select
+            aria-label={t("playit.tunnelProtocol")}
+            value={protocol}
+            disabled={busy || creating}
+            onInput={(event) => setProtocol(event.currentTarget.value as "tcp" | "udp" | "both")}
+          >
+            <option value="tcp">TCP</option>
+            <option value="udp">UDP</option>
+            <option value="both">TCP + UDP</option>
+          </Select>
+        </Field>
+        <Field label={t("playit.tunnelAddress")}>
+          <Select
+            aria-label={t("playit.tunnelAddress")}
+            value={address}
+            disabled={busy || creating}
+            onInput={(event) => setAddress(event.currentTarget.value)}
+          >
+            <option value="127.0.0.1">127.0.0.1</option>
+            <option value="::1">::1</option>
+          </Select>
+        </Field>
+        <Button
+          type="submit"
+          variant="primary"
+          disabled={busy || creating || !canCreate}
+          icon={<Icon.Plus size={15} />}
+        >
+          {creating ? t("playit.creatingTunnel") : t("playit.createTunnel")}
+        </Button>
+      </div>
+      {!canCreate && <p class="mt-3 text-xs text-fg-muted">{t("playit.createBeforeConnect")}</p>}
+    </form>
   );
 }
 

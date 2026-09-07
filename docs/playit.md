@@ -8,7 +8,15 @@ No separate Playit installation is required. The panel ships an embedded Playit 
 2. Sign in with your playit.gg email and password (plus authenticator code when the account uses TOTP). The panel keeps the session in `<data-dir>/playit/account-session.json` (owner-only on Unix); the password is never stored.
 3. Click **Connect account**. The panel claims this machine's agent under your account with no browser redirect and waits for it to connect. The legacy **Connect** browser-claim link remains as a fallback.
 
-Once connected, choose a server and create its tunnel. The panel uses TCP to `127.0.0.1:<server-port>`, stores the Playit tunnel id in `panel.json`, and polls the service so provisioning, disabled, drifted, and connected states are visible. The server settings page also exposes the same attach/detach controls. Deleting a server or tunnel removes a panel-managed tunnel first when the service is available.
+Once connected, choose a server and create its tunnel. The panel uses TCP to `127.0.0.1:<server-port>`, stores the Playit tunnel id in `panel.json`, and polls the service so provisioning, disabled, drifted, and connected states are visible. The server settings page also exposes the same attach/detach controls. The **Create a tunnel** form in the account-tunnels card creates standalone tunnels (custom port, protocol, and loopback address) without attaching them to a server. Deleting a server or tunnel removes a panel-managed tunnel first when the service is available.
+
+## Repair and reconcile
+
+When Playit and `panel.json` disagree, the panel heals the association instead of failing on it:
+
+- **Repair** (re-attaching a server tunnel) adopts the stored tunnel in place when Playit still reports it — reassigning it to the current agent and destination when it drifted, even across an agent change — and recreates it through the stable `mcpanel:<server-id>` name when Playit no longer reports it.
+- **Reconcile** (`POST /servers/{id}/playit/reconcile`) does the same healing without needing a display name: a remotely deleted tunnel or agent is adopted or recreated and the binding updated. It never deletes a tunnel.
+- Disabled, incompatible (non-Java type/protocol), and ambiguous records cannot be healed automatically; they stay visible for an explicit repair retry or **Forget association**, which drops only the local binding.
 
 ## Account session vs agent secret
 
@@ -55,5 +63,6 @@ See [API — Playit endpoints](api.md#playit) and [Security](security.md) for th
 
 ## Troubleshooting
 
-- If a tunnel shows `drifted`, the remote Playit state no longer matches `panel.json`; re-attach from the server settings or recreate the tunnel.
+- If a tunnel shows `drifted`, the remote Playit state no longer matches `panel.json`; use **Repair tunnel** (or **Reconcile**) on the Playit page to adopt it back in place.
+- If a tunnel shows `missing` (deleted on the Playit website) or the account/agent changed remotely, **Reconcile** recreates the tunnel and updates the binding. If the agent itself was deleted, claim the agent again first (direct **Connect account** or the browser claim), then reconcile.
 - Switching modes requires a claim in the new mode; bindings survive the switch.

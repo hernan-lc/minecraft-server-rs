@@ -487,24 +487,107 @@ impl PlayitManager {
         port: u16,
         custom_name: Option<String>,
     ) -> Result<EnsuredServerTunnel, PlayitError> {
-        let managed_name = format!("mcpanel:{server_id}");
-
         // Prefer the account-wide list, but reuse what is visible on the
         // current agent when the broader list is forbidden. The fallback may
         // not expose tunnels on other agents; that is acceptable.
         let tunnels = self.visible_tunnels().await?;
+        let current_agent_id = self.current_agent_id().await?;
+        self.ensure_by_name(
+            &tunnels,
+            &current_agent_id,
+            server_id,
+            server_name,
+            port,
+            custom_name,
+        )
+        .await
+    }
 
-        let existing = select_unique_tunnel(&tunnels, &managed_name, server_name)?;
+    /// Reconcile a server's stored tunnel association against live Playit
+    /// state, healing what the read-only view cannot.
+    ///
+    /// The panel's stored tunnel id is tried first: a still-visible tunnel
+    /// is adopted in place — reassigned to the current agent and the desired
+    /// destination when it drifted — even when the panel recorded it under a
+    /// different agent (for example after the agent was deleted remotely and
+    /// recreated). A stored tunnel Playit no longer reports falls back to
+    /// the stable-name ensure path, which recreates it when nothing reusable
+    /// remains. Disabled, incompatible, and ambiguous tunnels stay conflicts
+    /// so callers surface them instead of silently duplicating or destroying
+    /// tunnels. This never deletes a tunnel.
+    pub async fn reconcile_server_tunnel(
+        &self,
+        server_id: &str,
+        server_name: &str,
+        port: u16,
+        stored_tunnel_id: Option<&str>,
+        local_address: &str,
+        custom_name: Option<String>,
+    ) -> Result<EnsuredServerTunnel, PlayitError> {
+        let tunnels = self.visible_tunnels().await?;
+        let current_agent_id = self.current_agent_id().await?;
 
+        if let Some(stored) = stored_tunnel_id
+            .map(str::trim)
+            .filter(|stored| !stored.is_empty())
+        {
+            let matches: Vec<_> = tunnels
+                .iter()
+                .filter(|tunnel| tunnel.id == stored)
+                .cloned()
+                .collect();
+            if matches.len() > 1 {
+                return Err(PlayitError::Conflict(
+                    "Playit returned duplicate records for the stored tunnel id".into(),
+                ));
+            }
+            if let Some(existing) = matches.into_iter().next() {
+                return self
+                    .adopt_tunnel(&existing, &current_agent_id, port, local_address)
+                    .await;
+            }
+        }
+
+        self.ensure_by_name(
+            &tunnels,
+            &current_agent_id,
+            server_id,
+            server_name,
+            port,
+            custom_name,
+        )
+        .await
+    }
+
+    /// The current agent id backing tunnel operations. Agent-scoped commands
+    /// always target this agent implicitly, so a missing id fails before any
+    /// remote call instead of acting on an unknown agent.
+    async fn current_agent_id(&self) -> Result<String, PlayitError> {
         let account = self.account().await?;
-        let current_agent_id = account
+        account
             .agent_id
             .as_deref()
             .filter(|agent_id| !agent_id.trim().is_empty())
             .ok_or_else(|| {
                 PlayitError::Unavailable("the current Playit agent id is not available yet".into())
-            })?
-            .to_owned();
+            })
+            .map(str::to_owned)
+    }
+
+    /// Reuse the stable panel-owned tunnel for a server, or one unique legacy
+    /// tunnel with the same server name, updating a drifted tunnel in place
+    /// and creating one only when no compatible existing tunnel remains.
+    async fn ensure_by_name(
+        &self,
+        tunnels: &[PlayitTunnel],
+        current_agent_id: &str,
+        server_id: &str,
+        server_name: &str,
+        port: u16,
+        custom_name: Option<String>,
+    ) -> Result<EnsuredServerTunnel, PlayitError> {
+        let managed_name = format!("mcpanel:{server_id}");
+        let existing = select_unique_tunnel(tunnels, &managed_name, server_name)?;
 
         let Some(existing) = existing else {
             let create_name = custom_name
@@ -519,14 +602,28 @@ impl PlayitManager {
             });
         };
 
-        validate_reusable_minecraft_tunnel(&existing)?;
+        self.adopt_tunnel(&existing, current_agent_id, port, "127.0.0.1")
+            .await
+    }
 
-        let destination_changed = existing.local_address.as_deref() != Some("127.0.0.1")
+    /// Reuse a visible tunnel, repairing a drifted destination or a foreign
+    /// agent assignment in place. Disabled and incompatible tunnels are
+    /// conflicts and must never be silently duplicated.
+    async fn adopt_tunnel(
+        &self,
+        existing: &PlayitTunnel,
+        current_agent_id: &str,
+        port: u16,
+        local_address: &str,
+    ) -> Result<EnsuredServerTunnel, PlayitError> {
+        validate_reusable_minecraft_tunnel(existing)?;
+
+        let destination_changed = existing.local_address.as_deref() != Some(local_address)
             || existing.local_port != Some(port);
-        let agent_changed = existing.agent_id.as_deref() != Some(current_agent_id.as_str());
+        let agent_changed = existing.agent_id.as_deref() != Some(current_agent_id);
 
         if destination_changed || agent_changed {
-            self.reassign_tunnel(&existing.id, port, Some("127.0.0.1".into()))
+            self.reassign_tunnel(&existing.id, port, Some(local_address.to_owned()))
                 .await?;
 
             return Ok(EnsuredServerTunnel {
@@ -543,7 +640,7 @@ impl PlayitManager {
 
         Ok(EnsuredServerTunnel {
             tunnel: TunnelCreateInfo {
-                tunnel_id: existing.id,
+                tunnel_id: existing.id.clone(),
                 message: Some("Existing Minecraft Java tunnel reused".into()),
             },
             disposition: EnsureTunnelDisposition::Reused,
@@ -1792,6 +1889,169 @@ mod tests {
             *reassigned_args.lock().unwrap(),
             vec![("tunnel-1".to_owned(), 25566, Some("127.0.0.1".to_owned()))]
         );
+    }
+
+    #[tokio::test]
+    async fn reconcile_adopts_stored_tunnel_from_a_previous_agent() {
+        let service = running_service();
+        service.account.lock().unwrap().agent_id = Some("agent-1".into());
+        let mut stored = managed_tunnel("custom-name", "stored-tunnel", Some("agent-2"));
+        stored.local_address = Some("::1".into());
+        stored.local_port = Some(25565);
+        service.account_tunnels.lock().unwrap().tunnels.extend([
+            stored,
+            managed_tunnel("mcpanel:server-1", "other-tunnel", Some("agent-1")),
+        ]);
+        let reassigned_args = Arc::clone(&service.reassigned_args);
+        let created = Arc::clone(&service.created);
+        let manager = PlayitManager::with_service(service);
+
+        let healed = manager
+            .reconcile_server_tunnel(
+                "server-1",
+                "Survival SMP",
+                25565,
+                Some("stored-tunnel"),
+                "::1",
+                None,
+            )
+            .await
+            .unwrap();
+
+        // The stored id wins over the stable-name match and is adopted onto
+        // the current agent, preserving the desired loopback destination.
+        assert_eq!(healed.tunnel.tunnel_id, "stored-tunnel");
+        assert_eq!(
+            healed.disposition,
+            EnsureTunnelDisposition::Updated {
+                previous_agent_id: Some("agent-2".into()),
+                destination_changed: false,
+            }
+        );
+        assert_eq!(
+            *reassigned_args.lock().unwrap(),
+            vec![("stored-tunnel".to_owned(), 25565, Some("::1".to_owned()))]
+        );
+        assert!(created.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_reuses_a_matching_stored_tunnel_untouched() {
+        let service = running_service();
+        service.account.lock().unwrap().agent_id = Some("agent-1".into());
+        service
+            .account_tunnels
+            .lock()
+            .unwrap()
+            .tunnels
+            .push(managed_tunnel(
+                "custom-name",
+                "stored-tunnel",
+                Some("agent-1"),
+            ));
+        let reassigned = Arc::clone(&service.reassigned);
+        let created = Arc::clone(&service.created);
+        let manager = PlayitManager::with_service(service);
+
+        let healed = manager
+            .reconcile_server_tunnel(
+                "server-1",
+                "Survival SMP",
+                25565,
+                Some("stored-tunnel"),
+                "127.0.0.1",
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(healed.tunnel.tunnel_id, "stored-tunnel");
+        assert_eq!(healed.disposition, EnsureTunnelDisposition::Reused);
+        assert!(reassigned.lock().unwrap().is_empty());
+        assert!(created.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_recreates_a_remotely_deleted_tunnel() {
+        let service = running_service();
+        service.account.lock().unwrap().agent_id = Some("agent-1".into());
+        let created = Arc::clone(&service.created);
+        let manager = PlayitManager::with_service(service);
+
+        let healed = manager
+            .reconcile_server_tunnel(
+                "server-1",
+                "Survival SMP",
+                25565,
+                Some("deleted-tunnel"),
+                "127.0.0.1",
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(healed.tunnel.tunnel_id, "tunnel-1");
+        assert_eq!(healed.disposition, EnsureTunnelDisposition::Created);
+        let created = created.lock().unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].0, 25565);
+        assert!(matches!(created[0].1, TunnelProtocol::Tcp));
+        assert_eq!(created[0].2.as_deref(), Some("127.0.0.1"));
+        assert_eq!(created[0].3.as_deref(), Some("mcpanel:server-1"));
+    }
+
+    #[tokio::test]
+    async fn reconcile_reports_a_disabled_stored_tunnel_as_conflict() {
+        let service = running_service();
+        service.account.lock().unwrap().agent_id = Some("agent-1".into());
+        let mut tunnel = managed_tunnel("custom-name", "stored-tunnel", Some("agent-1"));
+        tunnel.is_disabled = true;
+        tunnel.disabled_reason = Some("account limit".into());
+        service.account_tunnels.lock().unwrap().tunnels.push(tunnel);
+        let created = Arc::clone(&service.created);
+        let manager = PlayitManager::with_service(service);
+
+        let result = manager
+            .reconcile_server_tunnel(
+                "server-1",
+                "Survival SMP",
+                25565,
+                Some("stored-tunnel"),
+                "127.0.0.1",
+                None,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(PlayitError::Conflict(message)) if message.contains("account limit")
+        ));
+        assert!(created.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_reports_duplicate_stored_ids_as_conflict() {
+        let service = running_service();
+        service.account.lock().unwrap().agent_id = Some("agent-1".into());
+        service.account_tunnels.lock().unwrap().tunnels.extend([
+            managed_tunnel("custom-name", "stored-tunnel", Some("agent-1")),
+            managed_tunnel("other-name", "stored-tunnel", Some("agent-1")),
+        ]);
+        let manager = PlayitManager::with_service(service);
+
+        assert!(matches!(
+            manager
+                .reconcile_server_tunnel(
+                    "server-1",
+                    "Survival SMP",
+                    25565,
+                    Some("stored-tunnel"),
+                    "127.0.0.1",
+                    None,
+                )
+                .await,
+            Err(PlayitError::Conflict(_))
+        ));
     }
 
     #[tokio::test]

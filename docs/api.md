@@ -31,6 +31,8 @@ Everything is under `/api`. Browser sessions use an `HttpOnly` session cookie an
 | `GET` `POST`        | `/servers`                             | List / create                      |
 | `GET` `PATCH` `DELETE` | `/servers/{id}`                     | Inspect / reconfigure / remove     |
 | `GET` `POST` `DELETE` | `/servers/{id}/playit`              | Inspect / attach / detach its tunnel |
+| `POST`              | `/servers/{id}/playit/forget`         | Forget the local association only (admin) |
+| `POST`              | `/servers/{id}/playit/reconcile`      | Heal the association: adopt or recreate its tunnel (admin) |
 | `POST`              | `/servers/{id}/power`                  | `start`, `stop`, `restart`, `kill` |
 | `POST`              | `/servers/{id}/command`                | Send a console command             |
 | `POST`              | `/servers/{id}/reinstall`              | Re-resolve and download the artifact |
