@@ -30,6 +30,7 @@ pub mod environment;
 pub mod error;
 pub mod events;
 pub mod fs;
+pub mod hidden;
 pub mod install;
 pub mod process;
 pub mod sandbox;

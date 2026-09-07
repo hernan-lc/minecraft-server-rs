@@ -159,43 +159,7 @@ pub async fn probe_existing_instance(data_dir: &Path) -> Option<String> {
 }
 
 fn open_browser(url: &str) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // rundll32 is a console program; without this flag it allocates a
-        // visible console window even when the panel itself has none.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = std::process::Command::new("rundll32.exe")
-            .args(["url.dll,FileProtocolHandler", url])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
-        return;
-    }
-    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
-    {
-        let candidates: [&[&str]; 4] = [
-            &["xdg-open", url],
-            &["gio", "open", url],
-            &["kde-open5", url],
-            &["sensible-browser", url],
-        ];
-        for candidate in candidates {
-            if std::process::Command::new(candidate[0])
-                .args(&candidate[1..])
-                .spawn()
-                .is_ok()
-            {
-                return;
-            }
-        }
-        tracing::warn!("could not open browser for setup/recovery");
-        return;
-    }
-    #[cfg(not(any(windows, all(target_os = "linux", not(target_env = "musl")))))]
-    {
-        let _ = url;
-        tracing::warn!("browser opening not supported on this platform");
-    }
+    crate::hidden::open_browser(url);
 }
 
 pub async fn bind_with_fallback(

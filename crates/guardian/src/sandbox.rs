@@ -113,7 +113,7 @@ fn linux_command(
         .map(|relative| PathBuf::from("/server").join(relative))
         .unwrap_or_else(|_| PathBuf::from("/server/server.jar"));
 
-    let mut command = Command::new(bwrap);
+    let mut command = crate::hidden::hidden_tokio_command(&bwrap);
     command
         .arg("--die-with-parent")
         .arg("--new-session")
@@ -189,7 +189,7 @@ fn macos_command(
         profile_path(&directory),
         profile_path(&directory),
     );
-    let mut command = Command::new(sandbox_exec);
+    let mut command = crate::hidden::hidden_tokio_command(&sandbox_exec);
     command
         .args(["-p", &profile])
         .arg(&java)
@@ -220,7 +220,7 @@ fn unsandboxed_command(
     if !policy.allows_unsandboxed() {
         return Err(Error::SandboxUnavailable);
     }
-    let mut command = Command::new(java);
+    let mut command = crate::hidden::hidden_tokio_command(java);
     command.current_dir(directory).args(args);
     tracing::warn!(
         "Minecraft is running without a platform sandbox because unsandboxed execution was explicitly enabled"

@@ -10,6 +10,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod hidden;
+
 #[cfg(windows)]
 #[path = "windows.rs"]
 mod backend;

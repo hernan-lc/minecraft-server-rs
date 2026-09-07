@@ -6,7 +6,6 @@
 //! backend owns a GTK main loop of its own instead of reusing the Windows one.
 
 use std::io;
-use std::process::Command;
 use std::sync::mpsc::SyncSender;
 
 use gtk::glib;
@@ -170,7 +169,10 @@ fn open_panel(panel_url: &str) {
 
     let mut last_error = None;
     for candidate in candidates {
-        match Command::new(candidate[0]).args(&candidate[1..]).spawn() {
+        match crate::hidden::hidden_command(candidate[0])
+            .args(&candidate[1..])
+            .spawn()
+        {
             Ok(_) => return,
             Err(error) => last_error = Some(error),
         }

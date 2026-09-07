@@ -36,12 +36,6 @@ const PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(100);
 /// Maximum size of one line sent to the Minecraft console.
 pub const MAX_COMMAND_BYTES: usize = 8 * 1024;
 
-/// Windows `CREATE_NO_WINDOW`. A GUI-subsystem panel passes no console down,
-/// and piped stdio alone does not stop Windows from allocating a visible one
-/// for every JVM it spawns.
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 /// Vanilla and every fork log this once the world is loaded and the port is open.
 /// Core-aware detection: different server families emit different readiness lines.
 pub fn line_means_online(core: &str, line: &str) -> bool {
@@ -823,8 +817,11 @@ impl Guardian {
             // --die-with-parent remains a crash-cleanup fallback.
             .kill_on_drop(false);
 
-        #[cfg(windows)]
-        command.creation_flags(CREATE_NO_WINDOW);
+        // Always hidden on Windows (CREATE_NO_WINDOW): piped stdio alone does
+        // not stop Windows from allocating a visible console for the JVM.
+        // `MCPANEL_CONSOLE=1` only affects the panel's own console, never this
+        // child. Pipes stay piped so the panel console keeps working.
+        crate::hidden::hide_tokio(&mut command);
 
         for (key, value) in sanitized_environment(std::env::vars_os()) {
             let name = key.to_string_lossy();

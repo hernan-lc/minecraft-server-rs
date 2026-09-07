@@ -25,6 +25,7 @@ mod backups;
 mod bind;
 mod error;
 mod filesystem;
+mod hidden;
 mod limits;
 mod metrics;
 mod recovery;
@@ -291,7 +292,7 @@ async fn main() -> Result<()> {
         if state.store.read().await.users.is_empty() {
             let setup_url = format!("{}/setup", panel_url_str);
             tracing::info!("first run: opening setup page");
-            open_browser(&setup_url);
+            crate::hidden::open_browser(&setup_url);
         }
 
         // Handle tray password recovery requests.
@@ -322,7 +323,7 @@ async fn main() -> Result<()> {
                     tracing::info!(user = %admin.username, "password recovery requested");
                     let url = format!("{}/recovery#{}", recovery_panel_url, token);
                     // Never log token or url with token.
-                    open_browser(&url);
+                    crate::hidden::open_browser(&url);
                 }
             })
         });
@@ -360,49 +361,6 @@ async fn main() -> Result<()> {
     }
 
     server_result
-}
-
-fn open_browser(url: &str) {
-    // Use tray helper when available, otherwise direct spawn.
-    // Replicate minimal cross-platform opening without shell.
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // rundll32 is a console program; without this flag it allocates a
-        // visible console window even when the panel itself has none.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = std::process::Command::new("rundll32.exe")
-            .args(["url.dll,FileProtocolHandler", url])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
-        return;
-    }
-    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
-    {
-        let candidates: [&[&str]; 4] = [
-            &["xdg-open", url],
-            &["gio", "open", url],
-            &["kde-open5", url],
-            &["sensible-browser", url],
-        ];
-        for candidate in candidates {
-            if std::process::Command::new(candidate[0])
-                .args(&candidate[1..])
-                .spawn()
-                .is_ok()
-            {
-                return;
-            }
-        }
-        tracing::warn!("could not open browser for setup/recovery");
-        return;
-    }
-    #[cfg(not(any(windows, all(target_os = "linux", not(target_env = "musl")))))]
-    {
-        // Fallback: try via `xdg-open` or warn.
-        let _ = url;
-        tracing::warn!("browser opening not supported on this platform");
-    }
 }
 
 /// Resolve on Ctrl-C, or on SIGTERM under a service manager.
