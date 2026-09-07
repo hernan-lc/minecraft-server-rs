@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/preact";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../i18n";
 import { DialogProvider } from "../components/Modal";
@@ -404,12 +404,14 @@ describe("Playit page refresh lifecycle", () => {
 });
 
 describe("Playit account card", () => {
-  it("shows the sign-in form when logged out", async () => {
+  it("opens the sign-in modal when logged out", async () => {
     renderPlayit();
     await waitFor(() => expect(apiMock.playitAuthSession).toHaveBeenCalled());
-    expect(screen.getByLabelText("Email")).toBeInTheDocument();
+    // Minimalist card: no inline inputs, a single action opens the modal.
+    expect(screen.queryByLabelText("Email")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByLabelText("Email")).toBeInTheDocument();
     expect(screen.getByLabelText("Password")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
   });
 
   it("signs in and loads the agents", async () => {
@@ -435,10 +437,12 @@ describe("Playit account card", () => {
     apiMock.playitAgents.mockResolvedValue([{ id: "agent-1", name: "one" }]);
 
     renderPlayit();
+    await waitFor(() => expect(apiMock.playitAuthSession).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     await waitFor(() => expect(screen.getByLabelText("Email")).toBeInTheDocument());
     fireEvent.input(screen.getByLabelText("Email"), { target: { value: "user@example.com" } });
     fireEvent.input(screen.getByLabelText("Password"), { target: { value: "secret" } });
-    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Sign in" }));
 
     await waitFor(() =>
       expect(apiMock.playitAuthLogin).toHaveBeenCalledWith("user@example.com", "secret"),
@@ -480,14 +484,16 @@ describe("Playit account card", () => {
     });
 
     renderPlayit();
+    await waitFor(() => expect(apiMock.playitAuthSession).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     await waitFor(() => expect(screen.getByLabelText("Email")).toBeInTheDocument());
     fireEvent.input(screen.getByLabelText("Email"), { target: { value: "user@example.com" } });
     fireEvent.input(screen.getByLabelText("Password"), { target: { value: "secret" } });
-    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Sign in" }));
 
     const code = await screen.findByLabelText("Authenticator code", { exact: false });
     fireEvent.input(code, { target: { value: "123456" } });
-    fireEvent.click(screen.getByRole("button", { name: "Verify" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Verify" }));
     await waitFor(() => expect(apiMock.playitAuthTotp).toHaveBeenCalledWith("123456"));
   });
 
@@ -537,8 +543,9 @@ describe("Playit account card", () => {
 });
 
 describe("Playit tunnel creation", () => {
-  it("creates a standalone tunnel from the form", async () => {
+  it("creates a standalone tunnel from the modal form", async () => {
     renderPlayit();
+    fireEvent.click(await screen.findByRole("button", { name: "Create tunnel" }));
     fireEvent.input(await screen.findByLabelText("Name (optional)"), {
       target: { value: "lobby" },
     });
@@ -551,7 +558,9 @@ describe("Playit tunnel creation", () => {
     fireEvent.input(screen.getByLabelText("Local address"), {
       target: { value: "::1" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create tunnel" }));
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Create tunnel" }),
+    );
 
     await waitFor(() =>
       expect(apiMock.createPlayitTunnel).toHaveBeenCalledWith({
@@ -568,10 +577,13 @@ describe("Playit tunnel creation", () => {
 
   it("rejects an invalid port without calling the API", async () => {
     renderPlayit();
+    fireEvent.click(await screen.findByRole("button", { name: "Create tunnel" }));
     fireEvent.input(await screen.findByPlaceholderText("25565"), {
       target: { value: "70000" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create tunnel" }));
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Create tunnel" }),
+    );
 
     await waitFor(() =>
       expect(screen.getByText("Enter a port between 1 and 65535.")).toBeInTheDocument(),

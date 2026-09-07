@@ -559,6 +559,37 @@ impl PlayitManager {
         .await
     }
 
+    /// Adopt one operator-chosen tunnel for a server, reassigning it to the
+    /// current agent and destination in place.
+    ///
+    /// Unlike [`Self::reconcile_server_tunnel`], there is no stable-name
+    /// fallback: an id that is not currently visible is a `NotFound` error,
+    /// and an incompatible tunnel (disabled, wrong type) is a `Conflict`.
+    /// This backs the server-tunnel picker modal so an orphaned account
+    /// tunnel can be reassigned instead of accumulating duplicates.
+    /*     pub async fn adopt_specific_tunnel(
+        &self,
+        tunnel_id: &str,
+        port: u16,
+        local_address: &str,
+    ) -> Result<EnsuredServerTunnel, PlayitError> {
+        let tunnel_id = tunnel_id.trim();
+        if tunnel_id.is_empty() {
+            return Err(PlayitError::Unavailable(
+                "the selected Playit tunnel id is not available".into(),
+            ));
+        }
+        let tunnels = self.visible_tunnels().await?;
+        let current_agent_id = self.current_agent_id().await?;
+        let Some(existing) = tunnels.iter().find(|tunnel| tunnel.id == tunnel_id) else {
+            return Err(PlayitError::NotFound(format!(
+                "Playit tunnel {tunnel_id} is not visible on this account"
+            )));
+        };
+        self.adopt_tunnel(existing, &current_agent_id, port, local_address)
+            .await
+    } */
+
     /// The current agent id backing tunnel operations. Agent-scoped commands
     /// always target this agent implicitly, so a missing id fails before any
     /// remote call instead of acting on an unknown agent.
