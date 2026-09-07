@@ -11,9 +11,12 @@ const apiMock = vi.hoisted(() => ({
   playitAccount: vi.fn(),
   playitTunnels: vi.fn(),
   servers: vi.fn(),
+  serverPlayit: vi.fn(),
   playitClaim: vi.fn(),
   attachPlayit: vi.fn(),
   detachPlayit: vi.fn(),
+  reconcilePlayit: vi.fn(),
+  forgetPlayit: vi.fn(),
   deletePlayitTunnel: vi.fn(),
 }));
 
@@ -66,7 +69,28 @@ beforeEach(() => {
   apiMock.playitTunnels.mockResolvedValue([]);
   apiMock.servers.mockResolvedValue([server]);
   apiMock.playitClaim.mockResolvedValue({ claim_url: "https://playit.gg/claim/test" });
+  apiMock.serverPlayit.mockResolvedValue({
+    state: "disabled",
+    binding: null,
+    tunnel: null,
+    message: null,
+    cleanup_pending: false,
+  });
   apiMock.attachPlayit.mockResolvedValue({});
+  apiMock.reconcilePlayit.mockResolvedValue({
+    state: "connected",
+    binding: null,
+    tunnel: null,
+    message: null,
+    cleanup_pending: false,
+  });
+  apiMock.forgetPlayit.mockResolvedValue({
+    state: "disabled",
+    binding: null,
+    tunnel: null,
+    message: null,
+    cleanup_pending: false,
+  });
   apiMock.detachPlayit.mockResolvedValue({
     state: "disabled",
     binding: null,
@@ -136,11 +160,25 @@ describe("Playit page refresh lifecycle", () => {
     expect(screen.queryByText("old")).toBeNull();
   });
 
-  it("labels the action as connecting rather than always creating", async () => {
+  it("renders every server as its own row with a connect action", async () => {
     renderPlayit();
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Connect server" })).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: "Connect server: Survival" }),
+      ).toBeInTheDocument(),
     );
+    expect(apiMock.serverPlayit).toHaveBeenCalledWith("server-1");
+  });
+
+  it("shows an empty state instead of rows when no servers exist", async () => {
+    apiMock.servers.mockResolvedValue([]);
+    renderPlayit();
+    await waitFor(() =>
+      expect(
+        screen.getByText("No servers yet. Create one from the dashboard, then connect it here."),
+      ).toBeInTheDocument(),
+    );
+    expect(apiMock.serverPlayit).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -159,25 +197,137 @@ describe("Playit page refresh lifecycle", () => {
     });
 
     renderPlayit();
-    await waitFor(() =>
-      expect(
-        screen.getByRole("option", { name: "Survival · :25565" }),
-      ).toBeInTheDocument(),
-    );
-
-    // Drive the controlled select the way a user interaction does: pick the
-    // option, then dispatch the bubbled change Preact listens for.
-    const combo = screen.getByRole("combobox") as HTMLSelectElement;
-    combo.value = "server-1";
-    combo.dispatchEvent(new Event("change", { bubbles: true }));
-    // Preact flushes state asynchronously; wait for the selection to commit
-    // before clicking, since a disabled button ignores clicks.
-    const button = screen.getByRole("button", { name: "Connect server" });
-    await waitFor(() => expect(button).toBeEnabled());
+    const button = await screen.findByRole("button", { name: "Connect server: Survival" });
     fireEvent.click(button);
 
-    await waitFor(() => expect(apiMock.attachPlayit).toHaveBeenCalled());
+    await waitFor(() => expect(apiMock.attachPlayit).toHaveBeenCalledWith("server-1"));
     await waitFor(() => expect(screen.getByText(message)).toBeInTheDocument());
+  });
+
+  it("offers repair and reconcile actions for a drifted server tunnel", async () => {
+    apiMock.serverPlayit.mockResolvedValue({
+      state: "drifted",
+      binding: {
+        tunnel_id: "tunnel-1",
+        protocol: "tcp",
+        local_address: "127.0.0.1",
+        local_port: 25565,
+        agent_id: "agent-1",
+        created_at: null,
+      },
+      tunnel: {
+        id: "tunnel-1",
+        name: "mcpanel:server-1",
+        display_address: "example.playit.gg:1234",
+        destination: "127.0.0.1:25566",
+        protocol: "tcp",
+        tunnel_type: "minecraft-java",
+        agent_id: "agent-1",
+        local_address: "127.0.0.1",
+        local_port: 25566,
+        disabled: false,
+        disabled_reason: null,
+      },
+      message: "The Playit destination is missing or differs from the server port",
+      cleanup_pending: false,
+    });
+    apiMock.attachPlayit.mockResolvedValue({
+      state: "connected",
+      binding: null,
+      tunnel: null,
+      message: null,
+      cleanup_pending: false,
+      disposition: "updated",
+    });
+
+    renderPlayit();
+    const repair = await screen.findByRole("button", { name: "Repair tunnel: Survival" });
+    expect(
+      screen.getByRole("button", { name: "Reconcile: Survival" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Connect server: Survival" }),
+    ).toBeNull();
+
+    fireEvent.click(repair);
+    await waitFor(() => expect(apiMock.attachPlayit).toHaveBeenCalledWith("server-1"));
+    await waitFor(() =>
+      expect(screen.getByText("Existing Playit tunnel updated.")).toBeInTheDocument(),
+    );
+  });
+
+  it("reconciles a broken tunnel from its row", async () => {
+    apiMock.serverPlayit.mockResolvedValue({
+      state: "missing",
+      binding: {
+        tunnel_id: "tunnel-1",
+        protocol: "tcp",
+        local_address: "127.0.0.1",
+        local_port: 25565,
+        agent_id: "agent-1",
+        created_at: null,
+      },
+      tunnel: null,
+      message: "The stored Playit tunnel is missing; repair or forget the association",
+      cleanup_pending: false,
+    });
+
+    renderPlayit();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Reconcile: Survival" }),
+    );
+
+    await waitFor(() => expect(apiMock.reconcilePlayit).toHaveBeenCalledWith("server-1"));
+    await waitFor(() =>
+      expect(screen.getByText("Playit association reconciled.")).toBeInTheDocument(),
+    );
+  });
+
+  it("shows the public address with a copy action for connected servers", async () => {
+    apiMock.serverPlayit.mockResolvedValue({
+      state: "connected",
+      binding: {
+        tunnel_id: "tunnel-1",
+        protocol: "tcp",
+        local_address: "127.0.0.1",
+        local_port: 25565,
+        agent_id: "agent-1",
+        created_at: null,
+      },
+      tunnel: {
+        id: "tunnel-1",
+        name: "mcpanel:server-1",
+        display_address: "example.playit.gg:1234",
+        destination: "127.0.0.1:25565",
+        protocol: "tcp",
+        tunnel_type: "minecraft-java",
+        agent_id: "agent-1",
+        local_address: "127.0.0.1",
+        local_port: 25565,
+        disabled: false,
+        disabled_reason: null,
+      },
+      message: null,
+      cleanup_pending: false,
+    });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+
+    renderPlayit();
+    await waitFor(() =>
+      expect(screen.getByText("example.playit.gg:1234")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Copy address" }));
+
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith("example.playit.gg:1234"),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Address copied.")).toBeInTheDocument(),
+    );
   });
 
   it("explains tunnel load failures as a claim step while the agent needs setup", async () => {

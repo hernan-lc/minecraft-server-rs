@@ -140,10 +140,9 @@ export const es: Dictionary = {
     claimLinkUnavailable: "El enlace de reclamación no está disponible.",
     openAccount: "Abrir cuenta de Playit",
     serverSection: "Túneles de servidores",
-    serverExplain: "Crea un túnel de Minecraft Java hacia el puerto local de Minecraft del servidor.",
-    server: "Servidor",
-    chooseServer: "Elige un servidor",
-    createServerTunnel: "Conectar servidor",
+    serverExplain:
+      "Conecta un servidor para compartirlo públicamente. Los túneles existentes se reutilizan siempre que es posible; los rotos ofrecen reparación.",
+    noServers: "Aún no hay servidores. Crea uno desde el inicio y conéctalo aquí.",
     connectBeforeTunnel: "Conecta Playit antes de conectar un servidor.",
     serverCardTitle: "Túnel de Playit",
     serverStates: {

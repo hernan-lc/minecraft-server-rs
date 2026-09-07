@@ -137,10 +137,9 @@ export const en = {
     claimLinkUnavailable: "The claim link is unavailable.",
     openAccount: "Open Playit account",
     serverSection: "Server tunnels",
-    serverExplain: "Create a Minecraft Java tunnel to a server's local Minecraft port.",
-    server: "Server",
-    chooseServer: "Choose a server",
-    createServerTunnel: "Connect server",
+    serverExplain:
+      "Connect a server to share it publicly. Existing tunnels are reused whenever possible; broken ones offer repair.",
+    noServers: "No servers yet. Create one from the dashboard, then connect it here.",
     connectBeforeTunnel: "Connect Playit before connecting a server.",
     serverCardTitle: "Playit tunnel",
     serverStates: {

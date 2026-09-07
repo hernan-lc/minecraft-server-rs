@@ -1,3 +1,4 @@
+import type { ComponentChildren, ComponentType } from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api } from "../api";
 import {
@@ -6,8 +7,7 @@ import {
   Button,
   Card,
   Empty,
-  Field,
-  Select,
+  IconButton,
 } from "../components/ui";
 import * as Icon from "../components/icons";
 import { useDialogs } from "../components/Modal";
@@ -21,6 +21,8 @@ import type {
   PlayitStatus,
   PlayitTunnel,
   Server,
+  ServerPlayitState,
+  ServerPlayitView,
 } from "../types";
 
 export function Playit() {
@@ -32,8 +34,9 @@ export function Playit() {
   const [account, setAccount] = useState<PlayitAccount | null>(null);
   const [tunnels, setTunnels] = useState<PlayitTunnel[]>([]);
   const [servers, setServers] = useState<Server[]>([]);
+  const [serverViews, setServerViews] = useState<Record<string, ServerPlayitView>>({});
+  const [serverViewErrors, setServerViewErrors] = useState<Record<string, string>>({});
   const [claimUrl, setClaimUrl] = useState<string | null>(null);
-  const [selectedServer, setSelectedServer] = useState("");
   const [failed, setFailed] = useState<string | null>(null);
   const [accountError, setAccountError] = useState<string | null>(null);
   const [tunnelError, setTunnelError] = useState<string | null>(null);
@@ -88,8 +91,35 @@ export function Playit() {
         setTunnelError(errorText(tunnelResult.reason, t("errors.loadPlayitTunnels")));
       }
 
-      if (serverResult.status === "fulfilled") setServers(serverResult.value);
-      else setFailed(errorText(serverResult.reason, t("errors.loadServers")));
+      const serverList =
+        serverResult.status === "fulfilled" ? serverResult.value : [];
+      if (serverResult.status === "fulfilled") {
+        setServers(serverList);
+      } else {
+        setFailed(errorText(serverResult.reason, t("errors.loadServers")));
+      }
+
+      // Per-server Playit states drive the repair actions in the server
+      // list, so they are reloaded with the same generation guard.
+      if (serverList.length > 0) {
+        const viewResults = await Promise.allSettled(
+          serverList.map((server) => api.serverPlayit(server.id)),
+        );
+        if (generation !== refreshGeneration.current) return;
+        const nextViews: Record<string, ServerPlayitView> = {};
+        const nextErrors: Record<string, string> = {};
+        viewResults.forEach((result, index) => {
+          const id = serverList[index].id;
+          if (result.status === "fulfilled") nextViews[id] = result.value;
+          else nextErrors[id] = errorText(result.reason, t("errors.playitAction"));
+        });
+        setServerViews(nextViews);
+        setServerViewErrors(nextErrors);
+      } else {
+        if (generation !== refreshGeneration.current) return;
+        setServerViews({});
+        setServerViewErrors({});
+      }
     })();
     refreshInFlight.current = operation;
     try {
@@ -125,13 +155,66 @@ export function Playit() {
     }
   }
 
-  async function attach() {
-    if (!selectedServer) return;
+  async function connectServer(id: string) {
     setBusy(true);
     try {
-      const view = await api.attachPlayit(selectedServer);
+      const view = await api.attachPlayit(id);
       toast.success(attachSuccessMessage(view.disposition, t));
-      setSelectedServer("");
+      await refresh();
+    } catch (e) {
+      toast.error(errorText(e, t("errors.playitAction")));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnectServer(server: Server) {
+    const confirmed = await dialogs.confirm({
+      title: t("playit.deleteTunnelTitle", { name: server.name }),
+      body: t("playit.detachTunnelBody"),
+      confirmLabel: t("common.delete"),
+      danger: true,
+    });
+    if (!confirmed) return;
+
+    setBusy(true);
+    try {
+      const result = await api.detachPlayit(server.id);
+      if (result.cleanup_pending) toast.info(t("playit.tunnelCleanupPending"));
+      else toast.success(t("playit.tunnelDeleted"));
+      await refresh();
+    } catch (e) {
+      toast.error(errorText(e, t("errors.playitAction")));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reconcileServer(id: string) {
+    setBusy(true);
+    try {
+      await api.reconcilePlayit(id);
+      toast.success(t("playit.serverReconciled"));
+      await refresh();
+    } catch (e) {
+      toast.error(errorText(e, t("errors.playitAction")));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function forgetServer(server: Server) {
+    const confirmed = await dialogs.confirm({
+      title: t("playit.forgetServer"),
+      body: t("playit.forgetServerBody"),
+      confirmLabel: t("playit.forgetServer"),
+    });
+    if (!confirmed) return;
+
+    setBusy(true);
+    try {
+      await api.forgetPlayit(server.id);
+      toast.success(t("playit.serverAssociationForgotten"));
       await refresh();
     } catch (e) {
       toast.error(errorText(e, t("errors.playitAction")));
@@ -180,7 +263,7 @@ export function Playit() {
     }
   }
 
-  const availableServers = servers.filter((server) => !server.playit);
+  const playitConnected = status?.status === "connected";
   const loginUrl = safeExternalUrl(account?.login_link);
   const claimingComplete = status?.status === "connected" || account?.status === "verified";
   const activeClaimUrl = claimingComplete ? null : claimUrl ?? account?.claim_url;
@@ -282,33 +365,29 @@ export function Playit() {
 
       <Card title={t("playit.serverSection")}>
         <p class="mb-3 text-sm leading-relaxed text-fg-muted sm:mb-4">{t("playit.serverExplain")}</p>
-        <div class="flex flex-col items-stretch gap-3 sm:flex-row sm:items-end">
-          <div class="min-w-0 flex-1">
-            <Field label={t("playit.server")}>
-              <Select
-                value={selectedServer}
-                onChange={(event) => setSelectedServer((event.target as HTMLSelectElement).value)}
-              >
-                <option value="">{t("playit.chooseServer")}</option>
-                {availableServers.map((server) => (
-                  <option key={server.id} value={server.id}>
-                    {server.name} · :{server.port}
-                  </option>
-                ))}
-              </Select>
-            </Field>
+        {servers.length === 0 ? (
+          <Empty>{t("playit.noServers")}</Empty>
+        ) : (
+          <div class="space-y-2 sm:space-y-0 sm:divide-y sm:divide-ink-700">
+            {servers.map((server) => (
+              <ServerTunnelRow
+                key={server.id}
+                server={server}
+                view={serverViews[server.id]}
+                loadError={serverViewErrors[server.id] ?? null}
+                canConnect={playitConnected}
+                busy={busy}
+                onConnect={() => void connectServer(server.id)}
+                onDisconnect={() => void disconnectServer(server)}
+                onRepair={() => void connectServer(server.id)}
+                onReconcile={() => void reconcileServer(server.id)}
+                onForget={() => void forgetServer(server)}
+                onCopyAddress={(address) => void copyAddress(address)}
+              />
+            ))}
           </div>
-          <Button
-            variant="primary"
-            icon={<Icon.Plus size={15} />}
-            class="w-full sm:w-auto"
-            disabled={busy || !selectedServer || status?.status !== "connected"}
-            onClick={() => void attach()}
-          >
-            {t("playit.createServerTunnel")}
-          </Button>
-        </div>
-        {status?.status !== "connected" && (
+        )}
+        {!playitConnected && servers.length > 0 && (
           <p class="mt-3 text-xs text-fg-muted">{t("playit.connectBeforeTunnel")}</p>
         )}
       </Card>
@@ -450,6 +529,206 @@ function statusTone(state: PlayitConnectionState | undefined): "good" | "warn" |
 
 function errorText(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
+}
+
+type RowAction = {
+  key: string;
+  label: string;
+  icon: ComponentChildren;
+  variant: "primary" | "ghost" | "danger" | "subtle";
+  disabled: boolean;
+  onClick: () => void;
+};
+
+/**
+ * One server and its Playit tunnel state, with the actions that make sense
+ * for that state: connect a new tunnel, repair a drifted one in place,
+ * reconcile pending work, or forget a conflicting association.
+ */
+function ServerTunnelRow({
+  server,
+  view,
+  loadError,
+  canConnect,
+  busy,
+  onConnect,
+  onDisconnect,
+  onRepair,
+  onReconcile,
+  onForget,
+  onCopyAddress,
+}: {
+  server: Server;
+  view: ServerPlayitView | undefined;
+  loadError: string | null;
+  canConnect: boolean;
+  busy: boolean;
+  onConnect: () => void;
+  onDisconnect: () => void;
+  onRepair: () => void;
+  onReconcile: () => void;
+  onForget: () => void;
+  onCopyAddress: (address: string) => void;
+}) {
+  const t = useT();
+  const state = view?.state;
+  const actionName = (action: string) => `${action}: ${server.name}`;
+
+  const actions: RowAction[] = [];
+  if (view) {
+    const reconcile: RowAction = {
+      key: "reconcile",
+      label: t("playit.reconcileServer"),
+      icon: <Icon.Refresh size={15} />,
+      variant: "ghost",
+      disabled: busy,
+      onClick: onReconcile,
+    };
+    switch (state) {
+      case "disabled":
+        actions.push({
+          key: "connect",
+          label: t("playit.connectServer"),
+          icon: <Icon.Plus size={15} />,
+          variant: "primary",
+          disabled: busy || !canConnect,
+          onClick: onConnect,
+        });
+        break;
+      case "connected":
+        actions.push({
+          key: "disconnect",
+          label: t("playit.disconnectServer"),
+          icon: <Icon.Trash size={15} />,
+          variant: "danger",
+          disabled: busy,
+          onClick: onDisconnect,
+        });
+        break;
+      case "missing":
+      case "drifted":
+      case "agent_mismatch":
+        actions.push(
+          {
+            key: "repair",
+            label: t("playit.repairServer"),
+            icon: <Icon.Restart size={15} />,
+            variant: "primary",
+            disabled: busy || !canConnect,
+            onClick: onRepair,
+          },
+          reconcile,
+        );
+        break;
+      case "provisioning":
+      case "reconnecting":
+      case "unavailable":
+        actions.push(reconcile);
+        break;
+      default:
+        // account_mismatch, ambiguous and disabled_by_playit must be
+        // resolved explicitly; keep only the safe local escape hatch.
+        actions.push({
+          key: "forget",
+          label: t("playit.forgetServer"),
+          icon: <Icon.X size={15} />,
+          variant: "subtle",
+          disabled: busy,
+          onClick: onForget,
+        });
+    }
+    if (view.cleanup_pending && !actions.some((action) => action.key === "reconcile")) {
+      actions.push(reconcile);
+    }
+  }
+
+  const { StateIcon, tone } = rowStateMeta(state, loadError);
+  const toneText =
+    tone === "good" ? "text-accent" : tone === "warn" ? "text-amber-300" : tone === "bad" ? "text-red-300" : "text-fg-muted";
+  const stateText = !view
+    ? loadError ?? t("common.loading")
+    : t(`playit.serverStates.${state}` as "playit.serverStates.disabled");
+
+  return (
+    <article class="rounded-xl border border-ink-700 bg-ink-900/45 p-3 sm:flex sm:items-center sm:justify-between sm:gap-4 sm:rounded-none sm:border-0 sm:bg-transparent sm:px-0 sm:py-4 sm:first:pt-0 sm:last:pb-0">
+      <div class="min-w-0 flex-1 space-y-1">
+        <div class="flex items-center gap-2">
+          <span class={toneText} aria-hidden="true">
+            <StateIcon size={15} />
+          </span>
+          <p class="truncate font-medium">
+            {server.name} <span class="text-fg-muted">· :{server.port}</span>
+          </p>
+        </div>
+        <p class={`text-xs ${toneText}`}>{stateText}</p>
+        {view?.binding && (
+          <p class="text-xs text-fg-muted">
+            {t("playit.destination")}:{" "}
+            <span class="font-mono text-fg">
+              {view.binding.local_address}:{view.binding.local_port}
+            </span>
+          </p>
+        )}
+        {view?.cleanup_pending && (
+          <p class="text-xs text-sky-100">{t("playit.tunnelCleanupPending")}</p>
+        )}
+        {view?.message && state !== "connected" && (
+          <p class="text-xs text-fg-muted">{view.message}</p>
+        )}
+        {loadError && !view && <p class="text-xs text-red-300">{loadError}</p>}
+      </div>
+      <div class="mt-3 flex min-w-0 items-center gap-2 sm:mt-0 sm:max-w-md sm:justify-end">
+        {view?.tunnel?.display_address && (
+          <>
+            <div class="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-ink-700 bg-ink-850 px-3 py-2 text-xs text-fg-muted sm:max-w-56">
+              <Icon.Link size={14} />
+              <span class="truncate">{view.tunnel.display_address}</span>
+            </div>
+            <IconButton
+              label={t("playit.copyAddress")}
+              icon={<Icon.Copy size={17} />}
+              disabled={!view.tunnel.display_address}
+              onClick={() => onCopyAddress(view.tunnel?.display_address ?? "")}
+            />
+          </>
+        )}
+        {actions.map((action) => (
+          <Button
+            key={action.key}
+            variant={action.variant}
+            icon={action.icon}
+            class="shrink-0"
+            disabled={action.disabled}
+            aria-label={actionName(action.label)}
+            title={actionName(action.label)}
+            onClick={action.onClick}
+          >
+            {action.label}
+          </Button>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function rowStateMeta(
+  state: ServerPlayitState | undefined,
+  loadError: string | null,
+): { StateIcon: ComponentType<{ size?: number }>; tone?: "good" | "warn" | "bad" } {
+  if (!state) return { StateIcon: loadError ? Icon.X : Icon.Clock, tone: loadError ? "bad" : undefined };
+  switch (state) {
+    case "connected":
+      return { StateIcon: Icon.Check, tone: "good" };
+    case "disabled":
+      return { StateIcon: Icon.Globe, tone: undefined };
+    case "provisioning":
+    case "reconnecting":
+      return { StateIcon: Icon.Clock, tone: "warn" };
+    case "unavailable":
+      return { StateIcon: Icon.X, tone: "bad" };
+    default:
+      return { StateIcon: Icon.Warning, tone: "warn" };
+  }
 }
 
 function attachSuccessMessage(
