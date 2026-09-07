@@ -585,9 +585,9 @@ async fn delete(
     // ---- External Playit cleanup after local commit (best-effort) ----
     let mut playit_tunnel_deleted = false;
     if let Some(binding) = playit_binding.as_ref() {
-        match state.playit.account_tunnels().await {
+        match state.playit.agent_tunnels().await {
             Ok(tunnels) if tunnels.iter().any(|t| t.id == binding.tunnel_id) => {
-                match state.playit.delete_tunnel(&binding.tunnel_id).await {
+                match state.playit.delete_agent_tunnel(&binding.tunnel_id).await {
                     Ok(()) => playit_tunnel_deleted = true,
                     Err(error) if error.is_not_found() => playit_tunnel_deleted = true,
                     Err(error) => {

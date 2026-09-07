@@ -17,6 +17,7 @@ Everything is under `/api`. Browser sessions use an `HttpOnly` session cookie an
 | `POST`              | `/playit/auth/totp`                   | Complete a TOTP-required login (admin) |
 | `GET` `DELETE`      | `/playit/auth/session`                | Inspect / revoke the account login (admin) |
 | `POST`              | `/playit/auth/validate`               | Validate the account login (admin) |
+| `POST`              | `/playit/auth/change`                 | Switch playit.gg account (admin)   |
 | `POST`              | `/playit/setup/direct`                | Browserless agent setup (admin)    |
 | `GET`               | `/playit/claim/details`               | Inspect a pending claim (admin)    |
 | `POST`              | `/playit/claim/approve`               | Approve a claim (admin)            |
@@ -26,8 +27,9 @@ Everything is under `/api`. Browser sessions use an `HttpOnly` session cookie an
 | `GET`               | `/playit/domains`                     | List account domains (admin)       |
 | `POST`              | `/playit/agent/disconnect`            | Remove the agent secret (admin)    |
 | `POST`              | `/playit/agent/reconnect`             | Restart a stopped agent (admin)    |
-| `GET` `POST`        | `/playit/tunnels`                     | List / create tunnels (admin)      |
-| `DELETE`            | `/playit/tunnels/{id}`                | Delete a tunnel (admin)            |
+| `GET`               | `/playit/agent/ownership`             | Verify the agent against the account (admin) |
+| `GET` `POST`        | `/playit/tunnels`                     | Tunnel catalog / create tunnel (admin) |
+| `DELETE`            | `/playit/tunnels/{id}`                | Delete a tunnel via the account (admin) |
 | `GET` `POST`        | `/servers`                             | List / create                      |
 | `GET` `PATCH` `DELETE` | `/servers/{id}`                     | Inspect / reconfigure / remove     |
 | `GET` `POST` `DELETE` | `/servers/{id}/playit`              | Inspect / attach / detach its tunnel |

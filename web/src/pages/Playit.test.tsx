@@ -31,11 +31,13 @@ const apiMock = vi.hoisted(() => ({
   playitAuthLogin: vi.fn(),
   playitAuthTotp: vi.fn(),
   playitAuthLogout: vi.fn(),
+  playitAuthChange: vi.fn(),
   playitSetupDirect: vi.fn(),
   playitAgents: vi.fn(),
   playitDeleteAgent: vi.fn(),
   playitAgentDisconnect: vi.fn(),
   playitAgentReconnect: vi.fn(),
+  playitOwnership: vi.fn(),
 }));
 
 vi.mock("../api", () => ({ api: apiMock }));
@@ -80,11 +82,18 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+const emptyCatalog = { available: true, source: "account", tunnels: [] };
+
+function openTab(name: "Overview" | "Servers" | "Tunnels" | "Account") {
+  fireEvent.click(screen.getByRole("tab", { name }));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   apiMock.playitStatus.mockResolvedValue(connectedStatus("initial"));
   apiMock.playitAccount.mockResolvedValue(verifiedAccount);
-  apiMock.playitTunnels.mockResolvedValue([]);
+  apiMock.playitTunnels.mockResolvedValue({ ...emptyCatalog });
+  apiMock.playitOwnership.mockResolvedValue({ ownership: "unknown", agent_id: null });
   apiMock.servers.mockResolvedValue([server]);
   apiMock.playitClaim.mockResolvedValue({ claim_url: "https://playit.gg/claim/test" });
   apiMock.serverPlayit.mockResolvedValue({
@@ -116,9 +125,22 @@ beforeEach(() => {
     message: null,
     cleanup_pending: false,
   });
-  apiMock.deletePlayitTunnel.mockResolvedValue({ ok: true });
+  apiMock.deletePlayitTunnel.mockResolvedValue({ ok: true, cleanup_pending: false });
   apiMock.playitAuthSession.mockResolvedValue({ ...loggedOutSession });
   apiMock.playitAgents.mockResolvedValue([]);
+  apiMock.playitAuthChange.mockResolvedValue({
+    session: {
+      authenticated: true,
+      requires_totp: false,
+      account_id: 9,
+      account_status: "verified",
+      read_only: false,
+    },
+    setup: { agent_id: "agent-9", already_configured: false, connected: true, message: null },
+    ownership_before: "unknown",
+    servers_recovered: 0,
+    servers_total: 0,
+  });
   apiMock.createPlayitTunnel.mockResolvedValue({ tunnel_id: "tunnel-9", message: null });
 });
 
@@ -142,13 +164,19 @@ describe("Playit page refresh lifecycle", () => {
 
     renderPlayit();
     await waitFor(() => expect(screen.getByText("initial")).toBeInTheDocument());
+    // The first refresh must fully settle (loading clears last) before the
+    // overlap starts. Otherwise its in-flight requests consume the mocks
+    // queued below for the overlapping refreshes.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Refresh" })).not.toBeDisabled(),
+    );
 
     const claimRequest = deferred<{ claim_url: string }>();
     apiMock.playitClaim.mockImplementationOnce(() => claimRequest.promise);
 
     const oldStatus = deferred<ReturnType<typeof connectedStatus>>();
     const oldAccount = deferred<typeof verifiedAccount>();
-    const oldTunnels = deferred<never[]>();
+    const oldTunnels = deferred<{ available: boolean; source: string; tunnels: never[] }>();
     const oldServers = deferred<Server[]>();
     const newStatus = connectedStatus("newer");
 
@@ -160,7 +188,7 @@ describe("Playit page refresh lifecycle", () => {
       .mockResolvedValueOnce(verifiedAccount);
     apiMock.playitTunnels
       .mockImplementationOnce(() => oldTunnels.promise)
-      .mockResolvedValueOnce([]);
+      .mockResolvedValueOnce({ ...emptyCatalog });
     apiMock.servers
       .mockImplementationOnce(() => oldServers.promise)
       .mockResolvedValueOnce([server]);
@@ -173,7 +201,7 @@ describe("Playit page refresh lifecycle", () => {
 
     oldStatus.resolve(connectedStatus("old"));
     oldAccount.resolve(verifiedAccount);
-    oldTunnels.resolve([]);
+    oldTunnels.resolve({ ...emptyCatalog });
     oldServers.resolve([server]);
 
     await waitFor(() => expect(apiMock.playitStatus).toHaveBeenCalledTimes(3));
@@ -183,6 +211,7 @@ describe("Playit page refresh lifecycle", () => {
 
   it("renders every server as its own row with a connect action", async () => {
     renderPlayit();
+    openTab("Servers");
     await waitFor(() =>
       expect(
         screen.getByRole("button", { name: "Connect server: Survival" }),
@@ -194,6 +223,7 @@ describe("Playit page refresh lifecycle", () => {
   it("shows an empty state instead of rows when no servers exist", async () => {
     apiMock.servers.mockResolvedValue([]);
     renderPlayit();
+    openTab("Servers");
     await waitFor(() =>
       expect(
         screen.getByText("No servers yet. Create one from the dashboard, then connect it here."),
@@ -218,6 +248,7 @@ describe("Playit page refresh lifecycle", () => {
     });
 
     renderPlayit();
+    openTab("Servers");
     const button = await screen.findByRole("button", { name: "Connect server: Survival" });
     fireEvent.click(button);
 
@@ -262,6 +293,7 @@ describe("Playit page refresh lifecycle", () => {
     });
 
     renderPlayit();
+    openTab("Servers");
     const repair = await screen.findByRole("button", { name: "Repair tunnel: Survival" });
     expect(
       screen.getByRole("button", { name: "Reconcile: Survival" }),
@@ -294,6 +326,7 @@ describe("Playit page refresh lifecycle", () => {
     });
 
     renderPlayit();
+    openTab("Servers");
     fireEvent.click(
       await screen.findByRole("button", { name: "Reconcile: Survival" }),
     );
@@ -338,6 +371,7 @@ describe("Playit page refresh lifecycle", () => {
     });
 
     renderPlayit();
+    openTab("Servers");
     await waitFor(() =>
       expect(screen.getByText("example.playit.gg:1234")).toBeInTheDocument(),
     );
@@ -351,7 +385,7 @@ describe("Playit page refresh lifecycle", () => {
     );
   });
 
-  it("explains tunnel load failures as a claim step while the agent needs setup", async () => {
+  it("shows an unavailable catalog as a setup step instead of an error", async () => {
     apiMock.playitStatus.mockResolvedValue({
       status: "needs_claim",
       version: "1.0.10",
@@ -363,20 +397,16 @@ describe("Playit page refresh lifecycle", () => {
       login_link: null,
       claim_url: null,
     });
-    apiMock.playitTunnels.mockRejectedValue(
-      new Error("Playit is temporarily unavailable. Try again shortly."),
-    );
+    apiMock.playitTunnels.mockResolvedValue({ available: false, source: "none", tunnels: [] });
 
     renderPlayit();
+    openTab("Tunnels");
 
     await waitFor(() =>
       expect(
-        screen.getByText("Claim your Playit agent above to load tunnels."),
+        screen.getByText("Tunnel listing is unavailable while Playit is starting."),
       ).toBeInTheDocument(),
     );
-    expect(
-      screen.queryByText("Playit is temporarily unavailable. Try again shortly."),
-    ).toBeNull();
   });
 
   it("clears a local claim URL once the account is connected", async () => {
@@ -406,6 +436,7 @@ describe("Playit page refresh lifecycle", () => {
 describe("Playit account card", () => {
   it("opens the sign-in modal when logged out", async () => {
     renderPlayit();
+    openTab("Account");
     await waitFor(() => expect(apiMock.playitAuthSession).toHaveBeenCalled());
     // Minimalist card: no inline inputs, a single action opens the modal.
     expect(screen.queryByLabelText("Email")).toBeNull();
@@ -437,6 +468,7 @@ describe("Playit account card", () => {
     apiMock.playitAgents.mockResolvedValue([{ id: "agent-1", name: "one" }]);
 
     renderPlayit();
+    openTab("Account");
     await waitFor(() => expect(apiMock.playitAuthSession).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     await waitFor(() => expect(screen.getByLabelText("Email")).toBeInTheDocument());
@@ -484,6 +516,7 @@ describe("Playit account card", () => {
     });
 
     renderPlayit();
+    openTab("Account");
     await waitFor(() => expect(apiMock.playitAuthSession).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
     await waitFor(() => expect(screen.getByLabelText("Email")).toBeInTheDocument());
@@ -508,6 +541,7 @@ describe("Playit account card", () => {
     apiMock.playitAgents.mockResolvedValue([]);
 
     renderPlayit();
+    openTab("Account");
     await waitFor(() =>
       expect(
         screen.getByText("No agents are registered on this account yet."),
@@ -545,6 +579,7 @@ describe("Playit account card", () => {
 describe("Playit tunnel creation", () => {
   it("creates a standalone tunnel from the modal form", async () => {
     renderPlayit();
+    openTab("Tunnels");
     fireEvent.click(await screen.findByRole("button", { name: "Create tunnel" }));
     fireEvent.input(await screen.findByLabelText("Name (optional)"), {
       target: { value: "lobby" },
@@ -577,6 +612,7 @@ describe("Playit tunnel creation", () => {
 
   it("rejects an invalid port without calling the API", async () => {
     renderPlayit();
+    openTab("Tunnels");
     fireEvent.click(await screen.findByRole("button", { name: "Create tunnel" }));
     fireEvent.input(await screen.findByPlaceholderText("25565"), {
       target: { value: "70000" },
@@ -599,12 +635,144 @@ describe("Playit tunnel creation", () => {
     });
 
     renderPlayit();
+    openTab("Tunnels");
     const button = await screen.findByRole("button", { name: "Create tunnel" });
     expect(button).toBeDisabled();
     await waitFor(() =>
       expect(
         screen.getByText("Connect Playit before creating a tunnel."),
       ).toBeInTheDocument(),
+    );
+  });
+});
+
+describe("Playit tabs and ownership", () => {
+  it("renders four tabs with overview selected by default", async () => {
+    renderPlayit();
+    for (const name of ["Overview", "Servers", "Tunnels", "Account"]) {
+      expect(screen.getByRole("tab", { name })).toBeInTheDocument();
+    }
+    expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await waitFor(() => expect(screen.getByText("Playit agent")).toBeInTheDocument());
+  });
+
+  it("keeps agent controls available while logged out", async () => {
+    renderPlayit();
+    await waitFor(() => expect(apiMock.playitAuthSession).toHaveBeenCalled());
+    expect(
+      screen.getByRole("button", { name: "Disconnect agent" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Reconnect agent" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Change account" }),
+    ).toBeInTheDocument();
+  });
+
+  it("warns when the connected agent belongs to another account", async () => {
+    apiMock.playitOwnership.mockResolvedValue({
+      ownership: "different_account",
+      agent_id: "agent-9",
+    });
+    renderPlayit();
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "Connected Playit agent belongs to another account. Sign out or change account before managing tunnels.",
+        ),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("shows the tunnel source on the tunnels tab", async () => {
+    apiMock.playitTunnels.mockResolvedValue({ available: true, source: "agent", tunnels: [] });
+    renderPlayit();
+    openTab("Tunnels");
+    await waitFor(() =>
+      expect(screen.getByText("Local agent", { exact: false })).toBeInTheDocument(),
+    );
+  });
+
+  it("disables global deletes while logged out", async () => {
+    apiMock.playitTunnels.mockResolvedValue({
+      available: true,
+      source: "agent",
+      tunnels: [
+        {
+          id: "tunnel-1",
+          name: null,
+          display_address: "example.playit.gg:1",
+          destination: "127.0.0.1:25565",
+          protocol: "tcp",
+          tunnel_type: "minecraft-java",
+          agent_id: "agent-1",
+          local_address: "127.0.0.1",
+          local_port: 25565,
+          disabled: false,
+          disabled_reason: null,
+        },
+      ],
+    });
+    renderPlayit();
+    openTab("Tunnels");
+    const button = await screen.findByRole("button", { name: "Delete" });
+    expect(button).toBeDisabled();
+  });
+
+  it("changes account through the modal", async () => {
+    renderPlayit();
+    await waitFor(() => expect(apiMock.playitAuthSession).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Change account" }));
+    fireEvent.input(await screen.findByLabelText("Email"), {
+      target: { value: "new@example.com" },
+    });
+    fireEvent.input(screen.getByLabelText("Password"), {
+      target: { value: "secret" },
+    });
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Change account" }),
+    );
+
+    await waitFor(() =>
+      expect(apiMock.playitAuthChange).toHaveBeenCalledWith("new@example.com", "secret", {}),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Playit account changed.")).toBeInTheDocument(),
+    );
+  });
+
+  it("asks for acknowledgement when the old account owns the agent", async () => {
+    const conflict = Object.assign(
+      new Error("the current account owns this agent; acknowledge the switch"),
+      { status: 409 },
+    );
+    apiMock.playitAuthChange.mockRejectedValueOnce(conflict);
+    renderPlayit();
+    await waitFor(() => expect(apiMock.playitAuthSession).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Change account" }));
+    fireEvent.input(await screen.findByLabelText("Email"), {
+      target: { value: "new@example.com" },
+    });
+    fireEvent.input(screen.getByLabelText("Password"), {
+      target: { value: "secret" },
+    });
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Change account" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("Switching abandons its tunnels. Switch anyway?", { exact: false }),
+      ).toBeInTheDocument(),
+    );
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Change account" }));
+    await waitFor(() =>
+      expect(apiMock.playitAuthChange).toHaveBeenLastCalledWith("new@example.com", "secret", {
+        acknowledge_managed_agent: true,
+      }),
     );
   });
 });

@@ -3,7 +3,7 @@ import { Banner, Button, Card, Empty, Field, Input, Select } from "../ui";
 import * as Icon from "../icons";
 import { Modal } from "../Modal";
 import { useT } from "../../i18n";
-import type { PlayitTunnel, Server } from "../../types";
+import type { PlayitTunnel, Server, TunnelCatalog, TunnelSource } from "../../types";
 
 export type CreateTunnelInput = {
   port: number;
@@ -13,9 +13,9 @@ export type CreateTunnelInput = {
 };
 
 export function TunnelsCard({
-  tunnels,
+  catalog,
   tunnelError,
-  needsClaim,
+  authenticated,
   servers,
   busy,
   canCreate,
@@ -23,9 +23,9 @@ export function TunnelsCard({
   onRemove,
   onCopyAddress,
 }: {
-  tunnels: PlayitTunnel[];
+  catalog: TunnelCatalog;
   tunnelError: string | null;
-  needsClaim: boolean;
+  authenticated: boolean;
   servers: Server[];
   busy: boolean;
   canCreate: boolean;
@@ -35,6 +35,9 @@ export function TunnelsCard({
 }) {
   const t = useT();
   const [createOpen, setCreateOpen] = useState(false);
+  // Global deletes go through the account session, so they need a login
+  // even when the agent itself lists tunnels.
+  const canDelete = authenticated && !busy;
 
   return (
     <Card
@@ -52,17 +55,20 @@ export function TunnelsCard({
         </Button>
       }
     >
-      {tunnelError &&
-        (needsClaim ? (
-          <Banner kind="info">{t("playit.tunnelsNeedClaim")}</Banner>
-        ) : (
-          <Banner kind="error">{tunnelError}</Banner>
-        ))}
-      {tunnels.length === 0 ? (
+      <p class="mb-3 text-xs text-fg-muted">
+        {t("playit.tunnelSource")}: {sourceLabel(catalog.source, t)}
+        {!authenticated && ` · ${t("playit.signInToManage")}`}
+      </p>
+      {!catalog.available ? (
+        <Banner kind="info">{t("playit.tunnelsUnavailable")}</Banner>
+      ) : (
+        tunnelError && <Banner kind="error">{tunnelError}</Banner>
+      )}
+      {catalog.tunnels.length === 0 ? (
         <Empty>{t("playit.noTunnels")}</Empty>
       ) : (
         <ul class="divide-y divide-ink-700">
-          {tunnels.map((tunnel) => {
+          {catalog.tunnels.map((tunnel) => {
             const server = servers.find(
               (candidate) => candidate.playit?.tunnel_id === tunnel.id,
             );
@@ -72,6 +78,8 @@ export function TunnelsCard({
                 tunnel={tunnel}
                 serverName={server?.name ?? null}
                 busy={busy}
+                canDelete={canDelete}
+                deleteHint={!authenticated ? t("playit.signInToManage") : undefined}
                 onRemove={() => onRemove(tunnel)}
                 onCopyAddress={onCopyAddress}
               />
@@ -97,16 +105,26 @@ export function TunnelsCard({
   );
 }
 
+function sourceLabel(source: TunnelSource, t: ReturnType<typeof useT>): string {
+  if (source === "account") return t("playit.sourceAccount");
+  if (source === "agent") return t("playit.sourceAgent");
+  return t("playit.sourceUnavailable");
+}
+
 function TunnelRow({
   tunnel,
   serverName,
   busy,
+  canDelete,
+  deleteHint,
   onRemove,
   onCopyAddress,
 }: {
   tunnel: PlayitTunnel;
   serverName: string | null;
   busy: boolean;
+  canDelete: boolean;
+  deleteHint?: string;
   onRemove: () => void;
   onCopyAddress: (address: string) => void;
 }) {
@@ -156,9 +174,9 @@ function TunnelRow({
           square
           icon={<Icon.Trash size={16} />}
           aria-label={t("common.delete")}
-          title={t("common.delete")}
+          title={deleteHint ?? t("common.delete")}
           class="size-9 hover:!text-red-300"
-          disabled={busy}
+          disabled={!canDelete || busy}
           onClick={onRemove}
         />
       </div>

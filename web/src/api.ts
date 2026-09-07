@@ -1,6 +1,8 @@
 import type {
+  AgentOwnershipInfo,
   Backup,
   BackupStorageSettings,
+  ChangeAccountResult,
   ConsoleLine,
   FileEntry,
   Installed,
@@ -13,11 +15,11 @@ import type {
   PlayitDirectSetup,
   PlayitDomain,
   PlayitStatus,
-  PlayitTunnel,
   Project,
   Server,
   ServerPlayitView,
   SystemStats,
+  TunnelCatalog,
   User,
 } from "./types";
 
@@ -161,6 +163,23 @@ export const api = {
   playitAuthLogout: () =>
     request<{ ok: boolean }>("/playit/auth/session", { method: "DELETE" }),
 
+  playitAuthChange: (
+    email: string,
+    password: string,
+    options?: { name?: string; acknowledge_managed_agent?: boolean },
+  ) =>
+    request<ChangeAccountResult>("/playit/auth/change", {
+      method: "POST",
+      body: json({
+        email,
+        password,
+        ...(options?.name ? { name: options.name } : {}),
+        ...(options?.acknowledge_managed_agent
+          ? { acknowledge_managed_agent: true }
+          : {}),
+      }),
+    }),
+
   playitSetupDirect: (name?: string) =>
     request<PlayitDirectSetup>("/playit/setup/direct", {
       method: "POST",
@@ -198,7 +217,9 @@ export const api = {
   playitAgentReconnect: () =>
     request<PlayitStatus>("/playit/agent/reconnect", { method: "POST" }),
 
-  playitTunnels: () => request<PlayitTunnel[]>("/playit/tunnels"),
+  playitOwnership: () => request<AgentOwnershipInfo>("/playit/agent/ownership"),
+
+  playitTunnels: () => request<TunnelCatalog>("/playit/tunnels"),
 
   createPlayitTunnel: (body: {
     local_port: number;

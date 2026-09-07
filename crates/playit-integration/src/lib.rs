@@ -19,11 +19,13 @@ pub use client::{IpcPlayitService, PlayitService};
 pub use embedded::EmbeddedPlayitService;
 pub use error::{AccountError, PlayitError};
 pub use manager::{
-    EnsureTunnelDisposition, EnsuredServerTunnel, PlayitManager, PlayitOptions, SetupDirectOptions,
+    ChangeAccountOptions, ChangeAccountResult, EnsureTunnelDisposition, EnsuredServerTunnel,
+    PlayitManager, PlayitOptions, SetupDirectOptions,
 };
 pub use model::{
-    AccountSessionState, AgentInfo, ClaimDetailsInfo, ClaimInfo, DeleteAgentOptions,
-    DirectSetupResult, DomainInfo, PlayitAccount, PlayitAccountStatus, PlayitConnectionState,
-    PlayitProtocol, PlayitStatus, PlayitTunnel, TunnelCreateInfo,
+    AccountSessionState, AgentInfo, AgentOwnership, AgentOwnershipInfo, ClaimDetailsInfo,
+    ClaimInfo, DeleteAgentOptions, DirectSetupResult, DomainInfo, PlayitAccount,
+    PlayitAccountStatus, PlayitConnectionState, PlayitProtocol, PlayitStatus, PlayitTunnel,
+    TunnelCatalog, TunnelCreateInfo, TunnelSource,
 };
 pub use playit_ipc::model::ServiceErrorCode;

@@ -97,6 +97,35 @@ export interface PlayitTunnel {
   disabled_reason: string | null;
 }
 
+/** Which authority a tunnel listing was read from. */
+export type TunnelSource = "agent" | "account" | "none";
+
+/** A tunnel listing together with its source authority. */
+export interface TunnelCatalog {
+  available: boolean;
+  source: TunnelSource;
+  tunnels: PlayitTunnel[];
+}
+
+/** Whether the runtime agent is owned by the logged-in account. */
+export type AgentOwnership = "matched" | "different_account" | "no_agent" | "unknown";
+
+/** The verified relationship between the runtime agent and the account. */
+export interface AgentOwnershipInfo {
+  ownership: AgentOwnership;
+  agent_id: string | null;
+}
+
+/** The outcome of switching to a different Playit account. */
+export interface ChangeAccountResult {
+  session: PlayitAuthSession;
+  /** Null while a TOTP code is still pending for the new account. */
+  setup: PlayitDirectSetup | null;
+  ownership_before: AgentOwnership;
+  servers_recovered: number;
+  servers_total: number;
+}
+
 export interface PlayitBinding {
   tunnel_id: string;
   protocol: PlayitProtocol;

@@ -14,26 +14,16 @@ export function AccountCard({
   authFailure,
   authSession,
   authBusy,
-  busy,
-  needsClaim,
   onLogin,
   onTotp,
   onLogout,
-  onConnectDirect,
-  onReconnectAgent,
-  onDisconnectAgent,
 }: {
   authFailure: string | null;
   authSession: PlayitAuthSession | null;
   authBusy: boolean;
-  busy: boolean;
-  needsClaim: boolean;
   onLogin: (email: string, password: string) => void;
   onTotp: (code: string) => void;
   onLogout: () => void;
-  onConnectDirect: () => void;
-  onReconnectAgent: () => void;
-  onDisconnectAgent: () => void;
 }) {
   const t = useT();
   const [signInOpen, setSignInOpen] = useState(false);
@@ -110,19 +100,7 @@ export function AccountCard({
             })}
             {authSession?.read_only ? ` · ${t("playit.readOnly")}` : ""}
           </p>
-          <div class="flex flex-wrap items-center gap-2">
-            {needsClaim && (
-              <Button variant="primary" disabled={busy} onClick={onConnectDirect}>
-                {busy ? t("playit.startingClaim") : t("playit.connectAccount")}
-              </Button>
-            )}
-            <Button variant="ghost" disabled={busy} onClick={onReconnectAgent}>
-              {t("playit.reconnectAgent")}
-            </Button>
-            <Button variant="ghost" disabled={busy} onClick={onDisconnectAgent}>
-              {t("playit.disconnectAgent")}
-            </Button>
-          </div>
+          <p class="text-xs text-fg-muted">{t("playit.signOutExplain")}</p>
         </div>
       )}
 

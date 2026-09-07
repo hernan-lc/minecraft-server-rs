@@ -25,11 +25,12 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::account::{session_path_for_secret, AccountController, DEFAULT_API_BASE};
 use crate::client::{IpcPlayitService, PlayitService};
-use crate::error::PlayitError;
+use crate::error::{AccountError, PlayitError};
 use crate::model::{
-    AccountSessionState, AgentInfo, ClaimDetailsInfo, ClaimInfo, DeleteAgentOptions,
-    DirectSetupResult, DomainInfo, PlayitAccount, PlayitAccountStatus, PlayitConnectionState,
-    PlayitProtocol, PlayitStatus, PlayitTunnel, TunnelCreateInfo,
+    AccountSessionState, AgentInfo, AgentOwnership, AgentOwnershipInfo, ClaimDetailsInfo,
+    ClaimInfo, DeleteAgentOptions, DirectSetupResult, DomainInfo, PlayitAccount,
+    PlayitAccountStatus, PlayitConnectionState, PlayitProtocol, PlayitStatus, PlayitTunnel,
+    TunnelCatalog, TunnelCreateInfo, TunnelSource,
 };
 
 /// Options for the account side of [`PlayitManager`].
@@ -124,6 +125,29 @@ pub struct EnsuredServerTunnel {
     pub tunnel: TunnelCreateInfo,
     /// How the tunnel was obtained.
     pub disposition: EnsureTunnelDisposition,
+}
+
+/// Options for [`PlayitManager::change_account`].
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ChangeAccountOptions {
+    /// Agent name used for the fresh claim under the new account.
+    pub agent_name: Option<String>,
+    /// Required when the old account owns the current agent: switching
+    /// abandons that agent's tunnels, so the operator must acknowledge it.
+    #[serde(default)]
+    pub acknowledge_managed_agent: bool,
+}
+
+/// The outcome of [`PlayitManager::change_account`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ChangeAccountResult {
+    /// The new account session state.
+    pub session: AccountSessionState,
+    /// The browserless setup outcome. `None` while a TOTP code is still
+    /// pending: the caller must complete TOTP, then run setup directly.
+    pub setup: Option<DirectSetupResult>,
+    /// The account/agent ownership observed before the switch.
+    pub ownership_before: AgentOwnership,
 }
 
 impl Default for PlayitManager {
@@ -330,30 +354,21 @@ impl PlayitManager {
         })
     }
 
-    /// List currently materialized tunnels.
+    /// List currently materialized tunnels on this agent.
+    ///
+    /// Agent-secret authority. This is the raw runtime view scoped to the
+    /// current agent; it carries no account-wide metadata.
     pub async fn tunnels(&self) -> Result<Vec<PlayitTunnel>, PlayitError> {
         let response = self.agent_service().await.list_tunnels().await?;
         Ok(response.tunnels.into_iter().map(tunnel_view).collect())
     }
 
-    /// List every tunnel owned by the authenticated Playit account.
+    /// List every tunnel visible through the local agent.
     ///
-    /// When a direct account session exists, the Bearer account API is the
-    /// source; otherwise the runtime/IPC view is used. This removes the old
-    /// "account list denied" limitation for logged-in installations while
-    /// keeping the runtime fallback for secret-only setups.
-    pub async fn account_tunnels(&self) -> Result<Vec<PlayitTunnel>, PlayitError> {
-        if let Some(result) = self.account.account_tunnels_if_logged_in().await {
-            match result {
-                Ok(tunnels) => return Ok(tunnels),
-                Err(error) => {
-                    tracing::warn!(
-                        error = ?error,
-                        "direct Playit account tunnel list failed; falling back to the agent view"
-                    );
-                }
-            }
-        }
+    /// Agent-secret authority: used for server attach, server detach,
+    /// reconciliation, and managed Minecraft tunnels. Never requires — or
+    /// uses — an account session.
+    pub async fn agent_tunnels(&self) -> Result<Vec<PlayitTunnel>, PlayitError> {
         let response = self.agent_service().await.list_account_tunnels().await?;
         Ok(response
             .tunnels
@@ -362,30 +377,107 @@ impl PlayitManager {
             .collect())
     }
 
-    /// List the tunnels visible to the panel, preferring the account-wide
-    /// list but falling back to the current-agent materialized list when the
-    /// account endpoint is denied.
+    /// List every tunnel owned by the authenticated Playit account.
     ///
-    /// A Playit account-wide permission restriction must not turn into a
-    /// completely broken Playit page or a failed attach when the current
-    /// agent still has valid local tunnel information.
-    pub async fn visible_tunnels(&self) -> Result<Vec<PlayitTunnel>, PlayitError> {
-        use playit_ipc::model::ServiceErrorCode;
+    /// Pure account authority: used for the account dashboard and global
+    /// tunnel management. There is deliberately no agent fallback -
+    /// without a session this reports not-logged-in - so a tunnel is
+    /// never managed by two different authorities.
+    pub async fn account_tunnels(&self) -> Result<Vec<PlayitTunnel>, PlayitError> {
+        match self.account.account_tunnels_if_logged_in().await {
+            Some(result) => result,
+            None => Err(PlayitError::Account(AccountError::NotLoggedIn)),
+        }
+    }
 
-        match self.account_tunnels().await {
-            Ok(tunnels) => Ok(tunnels),
-            Err(error)
-                if matches!(
-                    error.service_code(),
-                    Some(ServiceErrorCode::PermissionDenied)
-                ) =>
-            {
-                tracing::warn!(
-                    "Playit account tunnel list denied; falling back to current-agent tunnel list"
-                );
-                self.tunnels().await
+    /// List tunnels together with the authority they were read from.
+    ///
+    /// The account side wins while a session exists; otherwise the agent
+    /// side is used. Startup states (secret provisioning, waiting claim,
+    /// disconnected agent, no session) report an unavailable catalog
+    /// instead of failing, so the tunnel endpoint never returns a false
+    /// 503. Only broken IPC, a runtime crash, an unexpected internal
+    /// failure, or a playit.gg API outage is an error.
+    pub async fn tunnel_catalog(&self) -> Result<TunnelCatalog, PlayitError> {
+        if self.account.is_logged_in().await {
+            match self.account.account_tunnels_if_logged_in().await {
+                Some(Ok(tunnels)) => {
+                    return Ok(TunnelCatalog {
+                        available: true,
+                        source: TunnelSource::Account,
+                        tunnels,
+                    });
+                }
+                // An expired session is already cleared locally; fall
+                // through to the agent side instead of failing.
+                Some(Err(PlayitError::Account(AccountError::SessionExpired))) => {}
+                Some(Err(error)) => return Err(error),
+                None => {}
             }
+        }
+        match self.agent_tunnels().await {
+            Ok(tunnels) => Ok(TunnelCatalog {
+                available: true,
+                source: TunnelSource::Agent,
+                tunnels,
+            }),
+            Err(error) if error.is_unavailable() => Ok(TunnelCatalog {
+                available: false,
+                source: TunnelSource::None,
+                tunnels: Vec::new(),
+            }),
             Err(error) => Err(error),
+        }
+    }
+
+    /// Verify the runtime agent against the logged-in account's agent list.
+    ///
+    /// [`AgentOwnership::Matched`] allows reconcile, repair, delete, and
+    /// migrate; [`AgentOwnership::DifferentAccount`] blocks automatic
+    /// repair, tunnel creation, and reconciliation so one account can never
+    /// corrupt another account's tunnel state.
+    pub async fn agent_ownership(&self) -> Result<AgentOwnershipInfo, PlayitError> {
+        let agent_id = self
+            .account()
+            .await?
+            .agent_id
+            .filter(|agent_id| !agent_id.trim().is_empty());
+        let Some(agent_id) = agent_id else {
+            return Ok(AgentOwnershipInfo {
+                ownership: AgentOwnership::NoAgent,
+                agent_id: None,
+            });
+        };
+        if !self.account.is_logged_in().await {
+            return Ok(AgentOwnershipInfo {
+                ownership: AgentOwnership::Unknown,
+                agent_id: Some(agent_id),
+            });
+        }
+        let agents = self.account.list_agents().await?;
+        let ownership = if agents.iter().any(|agent| ids_match(&agent.id, &agent_id)) {
+            AgentOwnership::Matched
+        } else {
+            AgentOwnership::DifferentAccount
+        };
+        Ok(AgentOwnershipInfo {
+            ownership,
+            agent_id: Some(agent_id),
+        })
+    }
+
+    /// Refuse server tunnel mutation when the connected agent belongs to a
+    /// different account than the login. Verification failures fail open:
+    /// the underlying operation reports the real problem instead.
+    async fn require_same_account(&self) -> Result<(), PlayitError> {
+        match self.agent_ownership().await {
+            Ok(info) if info.ownership == AgentOwnership::DifferentAccount => {
+                Err(PlayitError::Conflict(
+                    "the connected Playit agent belongs to another account; sign out or change account before managing tunnels"
+                        .into(),
+                ))
+            }
+            _ => Ok(()),
         }
     }
 
@@ -487,10 +579,11 @@ impl PlayitManager {
         port: u16,
         custom_name: Option<String>,
     ) -> Result<EnsuredServerTunnel, PlayitError> {
-        // Prefer the account-wide list, but reuse what is visible on the
-        // current agent when the broader list is forbidden. The fallback may
-        // not expose tunnels on other agents; that is acceptable.
-        let tunnels = self.visible_tunnels().await?;
+        // Agent authority: server tunnels are matched through the local
+        // agent only. A DifferentAccount ownership blocks creation so one
+        // account can never corrupt another account's tunnel state.
+        self.require_same_account().await?;
+        let tunnels = self.agent_tunnels().await?;
         let current_agent_id = self.current_agent_id().await?;
         self.ensure_by_name(
             &tunnels,
@@ -524,7 +617,10 @@ impl PlayitManager {
         local_address: &str,
         custom_name: Option<String>,
     ) -> Result<EnsuredServerTunnel, PlayitError> {
-        let tunnels = self.visible_tunnels().await?;
+        // Agent authority, like ensure: reconciliation under a foreign
+        // account is blocked instead of healing the wrong account's tunnel.
+        self.require_same_account().await?;
+        let tunnels = self.agent_tunnels().await?;
         let current_agent_id = self.current_agent_id().await?;
 
         if let Some(stored) = stored_tunnel_id
@@ -567,29 +663,6 @@ impl PlayitManager {
     /// and an incompatible tunnel (disabled, wrong type) is a `Conflict`.
     /// This backs the server-tunnel picker modal so an orphaned account
     /// tunnel can be reassigned instead of accumulating duplicates.
-    /*     pub async fn adopt_specific_tunnel(
-        &self,
-        tunnel_id: &str,
-        port: u16,
-        local_address: &str,
-    ) -> Result<EnsuredServerTunnel, PlayitError> {
-        let tunnel_id = tunnel_id.trim();
-        if tunnel_id.is_empty() {
-            return Err(PlayitError::Unavailable(
-                "the selected Playit tunnel id is not available".into(),
-            ));
-        }
-        let tunnels = self.visible_tunnels().await?;
-        let current_agent_id = self.current_agent_id().await?;
-        let Some(existing) = tunnels.iter().find(|tunnel| tunnel.id == tunnel_id) else {
-            return Err(PlayitError::NotFound(format!(
-                "Playit tunnel {tunnel_id} is not visible on this account"
-            )));
-        };
-        self.adopt_tunnel(existing, &current_agent_id, port, local_address)
-            .await
-    } */
-
     /// The current agent id backing tunnel operations. Agent-scoped commands
     /// always target this agent implicitly, so a missing id fails before any
     /// remote call instead of acting on an unknown agent.
@@ -691,7 +764,7 @@ impl PlayitManager {
     ) -> Result<(), PlayitError> {
         match &ensured.disposition {
             EnsureTunnelDisposition::Created => {
-                let result = self.delete_tunnel(&ensured.tunnel.tunnel_id).await;
+                let result = self.delete_agent_tunnel(&ensured.tunnel.tunnel_id).await;
                 if let Err(error) = result {
                     if !error.is_not_found() {
                         tracing::warn!(
@@ -722,8 +795,13 @@ impl PlayitManager {
         Ok(())
     }
 
-    /// Delete a tunnel by its stable Playit id.
-    pub async fn delete_tunnel(&self, tunnel_id: &str) -> Result<(), PlayitError> {
+    /// Delete a tunnel by its stable Playit id through the local agent.
+    ///
+    /// Agent-secret authority: this backs server detach, cleanup retries,
+    /// and attach compensation. Global tunnel management uses
+    /// [`Self::delete_account_tunnel`] instead; the two never fall back to
+    /// each other.
+    pub async fn delete_agent_tunnel(&self, tunnel_id: &str) -> Result<(), PlayitError> {
         let response = self.agent_service().await.delete_tunnel(tunnel_id).await?;
         if !response.accepted {
             return Err(PlayitError::Rejected(
@@ -733,6 +811,23 @@ impl PlayitManager {
             ));
         }
         Ok(())
+    }
+
+    /// Delete a tunnel by its stable Playit id through the local agent.
+    ///
+    /// Kept for compatibility; new code should call the explicit
+    /// [`Self::delete_agent_tunnel`] or [`Self::delete_account_tunnel`].
+    pub async fn delete_tunnel(&self, tunnel_id: &str) -> Result<(), PlayitError> {
+        self.delete_agent_tunnel(tunnel_id).await
+    }
+
+    /// Delete a tunnel through the playit.gg account session.
+    ///
+    /// Account authority: this backs the account dashboard and global
+    /// tunnel management. Server detach uses [`Self::delete_agent_tunnel`]
+    /// instead; the two never silently fall back to each other.
+    pub async fn delete_account_tunnel(&self, tunnel_id: &str) -> Result<(), PlayitError> {
+        self.account.delete_tunnel(tunnel_id).await
     }
 
     /// Sign in to playit.gg directly with email + password.
@@ -757,6 +852,58 @@ impl PlayitManager {
     /// tunnels are untouched.
     pub async fn auth_logout(&self) -> Result<(), PlayitError> {
         self.account.logout().await
+    }
+
+    /// Switch to a different playit.gg account safely.
+    ///
+    /// The flow verifies the current ownership, disconnects the local agent
+    /// (its secret is removed, never reused), revokes the old session (never
+    /// reused), logs into the new account, and claims a fresh agent for it
+    /// with no browser redirect. Old tunnel ids are never carried over:
+    /// callers re-attach or reconcile servers against the new agent.
+    ///
+    /// When the old account owns the current agent, switching abandons that
+    /// agent's tunnels, so the call fails with a conflict unless
+    /// [`ChangeAccountOptions::acknowledge_managed_agent`] is set. When the
+    /// new account requires TOTP, the pending login is held and `setup` is
+    /// `None`: the caller completes TOTP, then runs setup directly.
+    pub async fn change_account(
+        &self,
+        email: &str,
+        password: &str,
+        options: ChangeAccountOptions,
+    ) -> Result<ChangeAccountResult, PlayitError> {
+        let ownership_before = self
+            .agent_ownership()
+            .await
+            .map(|info| info.ownership)
+            .unwrap_or(AgentOwnership::Unknown);
+        if self.account.is_logged_in().await
+            && ownership_before == AgentOwnership::Matched
+            && !options.acknowledge_managed_agent
+        {
+            return Err(PlayitError::Conflict(
+                "the current account owns this agent; acknowledge the switch to abandon its tunnels and claim a fresh agent"
+                    .into(),
+            ));
+        }
+        self.disconnect_agent().await?;
+        self.auth_logout().await?;
+        let session = self.auth_login(email, password).await?;
+        if session.requires_totp {
+            return Ok(ChangeAccountResult {
+                session,
+                setup: None,
+                ownership_before,
+            });
+        }
+        let setup = self.setup_direct(options.agent_name).await?;
+        let session = self.auth_status().await;
+        Ok(ChangeAccountResult {
+            session,
+            setup: Some(setup),
+            ownership_before,
+        })
     }
 
     /// Report the locally known account session state without network access.
@@ -2112,64 +2259,99 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn visible_tunnels_falls_back_when_account_list_is_denied() {
-        use playit_ipc::model::TunnelState;
-
+    async fn agent_tunnels_are_used_without_any_account_session() {
         let service = running_service();
-        *service.account_tunnels_failure.lock().unwrap() =
-            Some(AccountListFailure::PermissionDenied);
-        service.tunnels.lock().unwrap().tunnels.push(TunnelState {
-            id: "agent-tunnel".into(),
-            name: Some("mcpanel:server-1".into()),
-            display_address: "example.playit.gg:1".into(),
-            destination: "127.0.0.1:25565".into(),
-            protocol: TunnelProtocol::Tcp,
-            local_address: Some("127.0.0.1".into()),
-            local_port: Some(25565),
-            ..TunnelState::default()
-        });
+        service
+            .account_tunnels
+            .lock()
+            .unwrap()
+            .tunnels
+            .push(managed_tunnel(
+                "mcpanel:server-1",
+                "agent-tunnel",
+                Some("agent-1"),
+            ));
         let manager = PlayitManager::with_service(service);
+        assert!(!manager.auth_status().await.authenticated);
 
-        let tunnels = manager.visible_tunnels().await.unwrap();
+        let tunnels = manager.agent_tunnels().await.unwrap();
         assert_eq!(tunnels.len(), 1);
         assert_eq!(tunnels[0].id, "agent-tunnel");
+
+        // The account authority has no session to use.
+        assert!(matches!(
+            manager.account_tunnels().await,
+            Err(PlayitError::Account(
+                crate::error::AccountError::NotLoggedIn
+            ))
+        ));
     }
 
     #[tokio::test]
-    async fn visible_tunnels_propagates_non_permission_errors() {
+    async fn catalog_reports_agent_source_without_login() {
+        let service = running_service();
+        service
+            .account_tunnels
+            .lock()
+            .unwrap()
+            .tunnels
+            .push(managed_tunnel(
+                "mcpanel:server-1",
+                "agent-tunnel",
+                Some("agent-1"),
+            ));
+        let manager = PlayitManager::with_service(service);
+
+        let catalog = manager.tunnel_catalog().await.unwrap();
+        assert!(catalog.available);
+        assert_eq!(catalog.source, TunnelSource::Agent);
+        assert_eq!(catalog.tunnels.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn catalog_reports_unavailable_instead_of_failing_at_startup() {
         let service = running_service();
         *service.account_tunnels_failure.lock().unwrap() = Some(AccountListFailure::Unavailable);
         let manager = PlayitManager::with_service(service);
 
-        assert!(manager.visible_tunnels().await.is_err());
+        // No secret yet / disconnected agent is a normal state, not a 503.
+        let catalog = manager.tunnel_catalog().await.unwrap();
+        assert!(!catalog.available);
+        assert_eq!(catalog.source, TunnelSource::None);
+        assert!(catalog.tunnels.is_empty());
     }
 
     #[tokio::test]
-    async fn ensure_reuses_current_agent_tunnel_when_account_list_is_denied() {
-        use playit_ipc::model::TunnelState;
-
+    async fn catalog_propagates_non_unavailable_errors() {
         let service = running_service();
-        service.account.lock().unwrap().agent_id = Some("agent-1".into());
         *service.account_tunnels_failure.lock().unwrap() =
             Some(AccountListFailure::PermissionDenied);
-        service.tunnels.lock().unwrap().tunnels.push(TunnelState {
-            id: "agent-tunnel".into(),
-            name: Some("mcpanel:server-1".into()),
-            display_address: "example.playit.gg:1".into(),
-            destination: "127.0.0.1:25565".into(),
-            protocol: TunnelProtocol::Tcp,
-            local_address: Some("127.0.0.1".into()),
-            local_port: Some(25565),
-            ..TunnelState::default()
-        });
+        let manager = PlayitManager::with_service(service);
+
+        assert!(manager.tunnel_catalog().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn ensure_uses_agent_tunnels_for_server_matching() {
+        let service = running_service();
+        service.account.lock().unwrap().agent_id = Some("agent-1".into());
+        service
+            .account_tunnels
+            .lock()
+            .unwrap()
+            .tunnels
+            .push(managed_tunnel(
+                "mcpanel:server-1",
+                "agent-tunnel",
+                Some("agent-1"),
+            ));
         let manager = PlayitManager::with_service(service);
 
         let ensured = manager
             .ensure_server_tunnel("server-1", "Survival SMP", 25565)
             .await
             .unwrap();
-        // The same visible tunnel id is reused (possibly via an in-place
-        // update normalizing unknown fallback metadata), never duplicated.
+        // The same agent-authority tunnel id is reused, never duplicated.
         assert_eq!(ensured.tunnel.tunnel_id, "agent-tunnel");
     }
 
@@ -2706,6 +2888,256 @@ mod tests {
             .unwrap();
         // The runtime list would fail; the Bearer list succeeds instead.
         assert!(manager.account_tunnels().await.unwrap().is_empty());
+        task.abort();
+    }
+
+    const MOCK_AGENTS_ONE: &str = concat!(
+        r#"{"status":"success","data":{"agents":[{"id":"#,
+        r#""00000000-0000-0000-0000-000000000002","name":"fixture-agent","#,
+        r#""created_at":"2026-01-01T00:00:00Z","self_managed":true,"#,
+        r#""status":{"state":"offline"},"routing":{"type":"Automatic"}}]}}"#,
+    );
+    const MOCK_TUNNEL_NOT_FOUND: &str = r#"{"status":"fail","data":"TunnelNotFound"}"#;
+    const MATCHED_AGENT_ID: &str = "00000000-0000-0000-0000-000000000002";
+    const FOREIGN_AGENT_ID: &str = "11111111-1111-1111-1111-111111111111";
+
+    fn manager_with_api(service: MockService, base: String, name: &str) -> PlayitManager {
+        PlayitManager::with_service_and_options(
+            service,
+            PlayitOptions {
+                api_base: base,
+                session_path: mock_session_path(name),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn ownership_is_unknown_for_agent_only_operation() {
+        let service = running_service();
+        service.account.lock().unwrap().agent_id = Some("agent-1".into());
+        let manager = PlayitManager::with_service(service);
+
+        // Connected agent, no account login: verifiable by nobody, but the
+        // agent itself keeps working.
+        let info = manager.agent_ownership().await.unwrap();
+        assert_eq!(info.ownership, AgentOwnership::Unknown);
+        assert_eq!(info.agent_id.as_deref(), Some("agent-1"));
+    }
+
+    #[tokio::test]
+    async fn ownership_is_no_agent_before_claim() {
+        let manager = PlayitManager::with_service(running_service());
+
+        let info = manager.agent_ownership().await.unwrap();
+        assert_eq!(info.ownership, AgentOwnership::NoAgent);
+        assert_eq!(info.agent_id, None);
+    }
+
+    #[tokio::test]
+    async fn ownership_matches_the_logged_in_account_agent() {
+        let (base, task) =
+            mock_api(vec![MOCK_SIGNIN_OK.to_owned(), MOCK_AGENTS_ONE.to_owned()]).await;
+        let service = running_service();
+        service.account.lock().unwrap().agent_id = Some(MATCHED_AGENT_ID.into());
+        let manager = manager_with_api(service, base, "ownership-matched");
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+
+        let info = manager.agent_ownership().await.unwrap();
+        assert_eq!(info.ownership, AgentOwnership::Matched);
+        assert_eq!(info.agent_id.as_deref(), Some(MATCHED_AGENT_ID));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn ownership_detects_an_agent_from_another_account() {
+        let (base, task) =
+            mock_api(vec![MOCK_SIGNIN_OK.to_owned(), MOCK_AGENTS_ONE.to_owned()]).await;
+        let service = running_service();
+        service.account.lock().unwrap().agent_id = Some(FOREIGN_AGENT_ID.into());
+        let manager = manager_with_api(service, base, "ownership-foreign");
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+
+        let info = manager.agent_ownership().await.unwrap();
+        assert_eq!(info.ownership, AgentOwnership::DifferentAccount);
+        assert_eq!(info.agent_id.as_deref(), Some(FOREIGN_AGENT_ID));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn ensure_and_reconcile_are_blocked_for_a_foreign_account() {
+        // One agents response per guarded call: ensure verifies ownership,
+        // then reconcile verifies it again.
+        let (base, task) = mock_api(vec![
+            MOCK_SIGNIN_OK.to_owned(),
+            MOCK_AGENTS_ONE.to_owned(),
+            MOCK_AGENTS_ONE.to_owned(),
+        ])
+        .await;
+        let service = running_service();
+        service.account.lock().unwrap().agent_id = Some(FOREIGN_AGENT_ID.into());
+        let created = Arc::clone(&service.created);
+        let manager = manager_with_api(service, base, "ownership-blocked");
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+
+        // No reconciliation, no repair, no creation under the wrong account.
+        // The ownership check runs before any tunnel read, so one agents
+        // response covers both calls.
+        assert!(matches!(
+            manager
+                .ensure_server_tunnel("server-1", "Survival SMP", 25565)
+                .await,
+            Err(PlayitError::Conflict(_))
+        ));
+        assert!(matches!(
+            manager
+                .reconcile_server_tunnel(
+                    "server-1",
+                    "Survival SMP",
+                    25565,
+                    Some("stored-tunnel"),
+                    "127.0.0.1",
+                    None,
+                )
+                .await,
+            Err(PlayitError::Conflict(_))
+        ));
+        assert!(created.lock().unwrap().is_empty());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn delete_account_tunnel_uses_the_bearer_session_only() {
+        let (base, task) =
+            mock_api(vec![MOCK_SIGNIN_OK.to_owned(), MOCK_DELETE_OK.to_owned()]).await;
+        let service = running_service();
+        let deleted = Arc::clone(&service.deleted);
+        let manager = manager_with_api(service, base, "delete-account");
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+
+        manager
+            .delete_account_tunnel("00000000-0000-0000-0000-000000000010")
+            .await
+            .unwrap();
+        // The agent API is never touched: no silent fallback.
+        assert!(deleted.lock().unwrap().is_empty());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn delete_account_tunnel_maps_missing_to_not_found() {
+        let (base, task) = mock_api(vec![
+            MOCK_SIGNIN_OK.to_owned(),
+            MOCK_TUNNEL_NOT_FOUND.to_owned(),
+        ])
+        .await;
+        let manager = manager_with_api(running_service(), base, "delete-missing");
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+
+        let error = manager
+            .delete_account_tunnel("00000000-0000-0000-0000-000000000099")
+            .await
+            .unwrap_err();
+        assert!(error.is_not_found());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn delete_account_tunnel_requires_a_login() {
+        let manager = PlayitManager::with_service(running_service());
+
+        assert!(matches!(
+            manager
+                .delete_account_tunnel("00000000-0000-0000-0000-000000000010")
+                .await,
+            Err(PlayitError::Account(
+                crate::error::AccountError::NotLoggedIn
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_agent_tunnel_uses_the_agent_service_only() {
+        let service = running_service();
+        let deleted = Arc::clone(&service.deleted);
+        let manager = PlayitManager::with_service(service);
+        assert!(!manager.auth_status().await.authenticated);
+
+        manager.delete_agent_tunnel("tunnel-1").await.unwrap();
+        assert_eq!(*deleted.lock().unwrap(), vec!["tunnel-1".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn disconnect_works_without_any_account_login() {
+        let service = running_service();
+        let resets = Arc::clone(&service.reset_calls);
+        let manager = PlayitManager::with_service(service);
+        assert!(!manager.auth_status().await.authenticated);
+
+        let status = manager.disconnect_agent().await.unwrap();
+        assert_eq!(*resets.lock().unwrap(), 1);
+        assert_eq!(status.status, PlayitConnectionState::Connected);
+    }
+
+    #[tokio::test]
+    async fn change_account_requires_acknowledgement_for_a_managed_agent() {
+        let (base, task) =
+            mock_api(vec![MOCK_SIGNIN_OK.to_owned(), MOCK_AGENTS_ONE.to_owned()]).await;
+        let service = running_service();
+        service.account.lock().unwrap().agent_id = Some(MATCHED_AGENT_ID.into());
+        let resets = Arc::clone(&service.reset_calls);
+        let manager = manager_with_api(service, base, "change-ack");
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+
+        let error = manager
+            .change_account("new@example.com", "secret", ChangeAccountOptions::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PlayitError::Conflict(_)));
+        // Nothing was torn down: the old agent and session are intact.
+        assert_eq!(*resets.lock().unwrap(), 0);
+        assert!(manager.account.is_logged_in().await);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn catalog_prefers_the_account_source_when_logged_in() {
+        let (base, task) = mock_api(vec![
+            MOCK_SIGNIN_OK.to_owned(),
+            MOCK_TUNNELS_EMPTY.to_owned(),
+        ])
+        .await;
+        let service = MockService {
+            account_tunnels_failure: Arc::new(Mutex::new(Some(AccountListFailure::Unavailable))),
+            ..MockService::default()
+        };
+        let manager = manager_with_api(service, base, "catalog-account");
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+
+        let catalog = manager.tunnel_catalog().await.unwrap();
+        assert!(catalog.available);
+        assert_eq!(catalog.source, TunnelSource::Account);
+        assert!(catalog.tunnels.is_empty());
         task.abort();
     }
 }

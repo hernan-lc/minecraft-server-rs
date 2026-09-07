@@ -83,7 +83,7 @@ pub enum PlayitProtocol {
 }
 
 /// A tunnel known to the Playit service.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayitTunnel {
     /// Stable Playit tunnel identifier.
     pub id: String,
@@ -116,6 +116,72 @@ pub struct TunnelCreateInfo {
     pub tunnel_id: String,
     /// Optional Playit service message.
     pub message: Option<String>,
+}
+
+/// Which authority a tunnel list was read from.
+///
+/// Agent and account operations are deliberately separate: server attach,
+/// detach, reconciliation, and managed Minecraft tunnels use the agent
+/// secret, while the account dashboard and global tunnel management use the
+/// Bearer web-session. Mixing the two made the same tunnel manageable
+/// by two different authorities.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelSource {
+    /// Tunnels read through the local agent (agent-secret authority).
+    Agent,
+    /// Tunnels read through the playit.gg account session (Bearer authority).
+    Account,
+    /// No tunnel source is currently usable (setup pending, logged out with
+    /// a stopped agent, ...). This is a normal state, not an error.
+    #[default]
+    None,
+}
+
+/// An explicit tunnel listing together with the authority it came from.
+///
+/// Startup states (secret provisioning, waiting claim, disconnected agent,
+/// no account session) report `available: false` with an empty list instead
+/// of failing: only broken IPC, a runtime crash, an unexpected internal
+/// failure, or a playit.gg API outage is an error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelCatalog {
+    /// Whether the listing reflects a live tunnel source.
+    pub available: bool,
+    /// The authority the tunnels were read from.
+    pub source: TunnelSource,
+    /// The tunnels visible through that authority (empty when unavailable).
+    pub tunnels: Vec<PlayitTunnel>,
+}
+
+/// Whether the runtime agent is owned by the logged-in playit.gg account.
+///
+/// Automatic repair, tunnel creation, and reconciliation are only safe when
+/// the agent is [`AgentOwnership::Matched`]: acting on another account's
+/// agent would corrupt tunnel state that belongs elsewhere.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentOwnership {
+    /// The runtime agent id is owned by the logged-in account.
+    Matched,
+    /// The runtime agent belongs to a different account than the login.
+    /// Automatic repair, tunnel creation, and reconciliation are blocked.
+    DifferentAccount,
+    /// The runtime has no agent id yet (missing secret / waiting claim).
+    NoAgent,
+    /// Ownership cannot be verified (not logged in, or the account agent
+    /// list could not be read). Agent-only operation remains allowed.
+    #[default]
+    Unknown,
+}
+
+/// The verified relationship between the runtime agent and the account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentOwnershipInfo {
+    /// The verified relationship.
+    pub ownership: AgentOwnership,
+    /// The runtime agent id, when one is known.
+    pub agent_id: Option<String>,
 }
 
 /// The safe account-session state returned by the direct-login endpoints.

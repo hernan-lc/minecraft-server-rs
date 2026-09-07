@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 
 use playit_api_client::api::{
     AccountStatus, AccountTunnel, AccountTunnelAllocation, ApiErrorNoFail, ApiResponseError,
-    ApiResult, AuthError, PortType, ReqTunnelsList, TunnelOfflineReason, TunnelOrigin, TunnelType,
+    ApiResult, AuthError, DeleteError, PortType, ReqTunnelsList, TunnelOfflineReason, TunnelOrigin,
+    TunnelType,
 };
 use playit_api_client::auth::{complete_totp, sign_in, AccountSession, SigninError, TotpError};
 use playit_api_client::session::{FileSessionStore, PersistedSession, SessionStore};
@@ -356,6 +357,29 @@ impl AccountController {
             Ok(tunnels) => Ok(tunnels.tunnels.iter().map(bearer_tunnel_view).collect()),
             Err(error) => Err(self.map_session_error(error).await),
         })
+    }
+
+    /// Delete a tunnel as the account (`POST /tunnels/delete` with the
+    /// Bearer web-session). This is the authority for the account
+    /// dashboard and global tunnel management; server attach/detach uses the
+    /// agent API instead. Never retried: this is destructive. A tunnel
+    /// Playit no longer knows is reported as a "not found" rejection so
+    /// callers can treat deletion as idempotent via
+    /// [`PlayitError::is_not_found`].
+    pub async fn delete_tunnel(&self, tunnel_id: &str) -> Result<(), PlayitError> {
+        let live = self.require_live().await?;
+        let tunnel_id = tunnel_id.trim();
+        let id = uuid::Uuid::parse_str(tunnel_id).map_err(|_| {
+            PlayitError::Account(AccountError::Api("invalid tunnel id format".into()))
+        })?;
+        match playit_api_client::web_api::delete_tunnel(&live.client(), id).await {
+            Ok(ApiResult::Success(())) => Ok(()),
+            Ok(ApiResult::Fail(DeleteError::TunnelNotFound)) => Err(PlayitError::Rejected(
+                format!("Playit tunnel {tunnel_id} not found"),
+            )),
+            Ok(ApiResult::Error(error)) => Err(self.map_response_error(&error).await),
+            Err(error) => Err(self.map_web_error(error).await),
+        }
     }
 
     /// Look up a pending claim as the account.

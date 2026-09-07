@@ -6,6 +6,7 @@ import { useDialogs } from "../components/Modal";
 import { useToast } from "../components/Toast";
 import { useT } from "../i18n";
 import type {
+  AgentOwnershipInfo,
   PlayitAccount,
   PlayitAgent,
   PlayitAuthSession,
@@ -13,8 +14,10 @@ import type {
   PlayitTunnel,
   Server,
   ServerPlayitView,
+  TunnelCatalog,
 } from "../types";
 import { ConnectionCard } from "../components/playit/ConnectionCard";
+import { OwnershipCard, type ChangeAccountInput } from "../components/playit/OwnershipCard";
 import { AccountCard } from "../components/playit/AccountCard";
 import { AgentsCard } from "../components/playit/AgentsCard";
 import { ServerTunnelsCard } from "../components/playit/ServerTunnelsCard";
@@ -25,14 +28,21 @@ import {
   type AgentDraft,
 } from "../components/playit/helpers";
 
+type PlayitTab = "overview" | "servers" | "tunnels" | "account";
+
+const TABS: PlayitTab[] = ["overview", "servers", "tunnels", "account"];
+
+const EMPTY_CATALOG: TunnelCatalog = { available: false, source: "none", tunnels: [] };
+
 export function Playit() {
   const t = useT();
   const toast = useToast();
   const dialogs = useDialogs();
 
+  const [tab, setTab] = useState<PlayitTab>("overview");
   const [status, setStatus] = useState<PlayitStatus | null>(null);
   const [account, setAccount] = useState<PlayitAccount | null>(null);
-  const [tunnels, setTunnels] = useState<PlayitTunnel[]>([]);
+  const [catalog, setCatalog] = useState<TunnelCatalog>(EMPTY_CATALOG);
   const [servers, setServers] = useState<Server[]>([]);
   const [serverViews, setServerViews] = useState<Record<string, ServerPlayitView>>({});
   const [serverViewErrors, setServerViewErrors] = useState<Record<string, string>>({});
@@ -46,8 +56,9 @@ export function Playit() {
   const [authFailure, setAuthFailure] = useState<string | null>(null);
   const [agents, setAgents] = useState<PlayitAgent[]>([]);
   const [agentsFailure, setAgentsFailure] = useState<string | null>(null);
+  const [ownership, setOwnership] = useState<AgentOwnershipInfo | null>(null);
+  const [ownershipError, setOwnershipError] = useState<string | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
-  const authGeneration = useRef(0);
   const refreshGeneration = useRef(0);
   const refreshInFlight = useRef<Promise<void> | null>(null);
 
@@ -63,16 +74,15 @@ export function Playit() {
 
     setLoading(true);
     const operation = (async () => {
-      const results = await Promise.allSettled([
+      // Stage 1: status and account session first. Everything else depends
+      // on the lifecycle they report, so tunnel loading never runs before
+      // the Playit state is known.
+      const [statusResult, sessionResult] = await Promise.allSettled([
         api.playitStatus(),
-        api.playitAccount(),
-        api.playitTunnels(),
-        api.servers(),
+        api.playitAuthSession(),
       ]);
 
       if (generation !== refreshGeneration.current) return;
-
-      const [statusResult, accountResult, tunnelResult, serverResult] = results;
 
       if (statusResult.status === "fulfilled") {
         setStatus(statusResult.value);
@@ -82,6 +92,31 @@ export function Playit() {
         setFailed(errorText(statusResult.reason, t("errors.loadPlayit")));
       }
 
+      const authenticated =
+        sessionResult.status === "fulfilled" && sessionResult.value.authenticated;
+      if (sessionResult.status === "fulfilled") {
+        setAuthSession(sessionResult.value);
+        setAuthFailure(null);
+      } else {
+        setAuthFailure(errorText(sessionResult.reason, t("errors.playitAction")));
+      }
+
+      // Stage 2: state that depends on stage 1. The catalog reports an
+      // unavailable (but successful) listing while Playit starts, so a
+      // missing secret or claim never surfaces as a tunnel error.
+      const [accountResult, catalogResult, serverResult, ownershipResult, agentsResult] =
+        await Promise.allSettled([
+          api.playitAccount(),
+          api.playitTunnels(),
+          api.servers(),
+          api.playitOwnership(),
+          authenticated
+            ? api.playitAgents()
+            : Promise.resolve([] as PlayitAgent[]),
+        ]);
+
+      if (generation !== refreshGeneration.current) return;
+
       if (accountResult.status === "fulfilled") {
         setAccount(accountResult.value);
         setAccountError(null);
@@ -90,11 +125,25 @@ export function Playit() {
         setAccountError(errorText(accountResult.reason, t("errors.loadPlayitAccount")));
       }
 
-      if (tunnelResult.status === "fulfilled") {
-        setTunnels(tunnelResult.value);
+      if (catalogResult.status === "fulfilled") {
+        setCatalog(catalogResult.value);
         setTunnelError(null);
       } else {
-        setTunnelError(errorText(tunnelResult.reason, t("errors.loadPlayitTunnels")));
+        setTunnelError(errorText(catalogResult.reason, t("errors.loadPlayitTunnels")));
+      }
+
+      if (ownershipResult.status === "fulfilled") {
+        setOwnership(ownershipResult.value);
+        setOwnershipError(null);
+      } else {
+        setOwnershipError(errorText(ownershipResult.reason, t("errors.playitAction")));
+      }
+
+      if (agentsResult.status === "fulfilled") {
+        setAgents(authenticated ? agentsResult.value : []);
+        setAgentsFailure(null);
+      } else {
+        setAgentsFailure(errorText(agentsResult.reason, t("errors.playitAction")));
       }
 
       const serverList =
@@ -140,7 +189,6 @@ export function Playit() {
 
   useEffect(() => {
     void refresh();
-    void loadAuth();
     const timer = setInterval(refresh, 5000);
     return () => {
       refreshGeneration.current += 1;
@@ -149,40 +197,14 @@ export function Playit() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function loadAuth() {
-    const generation = ++authGeneration.current;
-    try {
-      const session = await api.playitAuthSession();
-      if (generation !== authGeneration.current) return;
-      setAuthSession(session);
-      setAuthFailure(null);
-      if (session.authenticated) {
-        try {
-          const list = await api.playitAgents();
-          if (generation !== authGeneration.current) return;
-          setAgents(list);
-          setAgentsFailure(null);
-        } catch (error) {
-          setAgentsFailure(errorText(error, t("errors.playitAction")));
-        }
-      } else {
-        setAgents([]);
-      }
-    } catch (error) {
-      setAuthFailure(errorText(error, t("errors.playitAction")));
-    }
-  }
-
   async function login(email: string, password: string) {
     setAuthBusy(true);
     setAuthFailure(null);
     try {
       const session = await api.playitAuthLogin(email, password);
-      authGeneration.current += 1;
       setAuthSession(session);
       if (!session.requires_totp) {
         toast.success(t("playit.signedIn"));
-        await loadAuth();
         await refresh();
       }
     } catch (error) {
@@ -197,10 +219,8 @@ export function Playit() {
     setAuthFailure(null);
     try {
       const session = await api.playitAuthTotp(code);
-      authGeneration.current += 1;
       setAuthSession(session);
       toast.success(t("playit.signedIn"));
-      await loadAuth();
       await refresh();
     } catch (error) {
       setAuthFailure(errorText(error, t("playit.signInFailed")));
@@ -213,15 +233,44 @@ export function Playit() {
     setAuthBusy(true);
     try {
       await api.playitAuthLogout();
-      authGeneration.current += 1;
       setAuthSession(null);
       setAgents([]);
+      setOwnership(null);
       toast.success(t("playit.signedOut"));
+      await refresh();
     } catch (error) {
       setAuthFailure(errorText(error, t("errors.playitAction")));
     } finally {
       setAuthBusy(false);
     }
+  }
+
+  async function changeAccount(input: ChangeAccountInput) {
+    const result = await api.playitAuthChange(input.email, input.password, {
+      ...(input.name ? { name: input.name } : {}),
+      ...(input.acknowledge ? { acknowledge_managed_agent: true } : {}),
+    });
+    setAuthSession(result.session);
+    if (result.setup === null) {
+      // The new account needs a TOTP code: land on the account tab where
+      // the verification dialog opens automatically.
+      toast.info(t("playit.totpPendingAfterChange"));
+      setTab("account");
+    } else if (result.setup.connected) {
+      toast.success(t("playit.setupDone"));
+    } else {
+      toast.success(result.setup.message ?? t("playit.setupPending"));
+    }
+    toast.success(t("playit.accountChanged"));
+    if (result.servers_total > 0) {
+      toast.info(
+        t("playit.serversRecovered", {
+          recovered: result.servers_recovered,
+          total: result.servers_total,
+        }),
+      );
+    }
+    await refresh();
   }
 
   async function connectDirect() {
@@ -289,7 +338,6 @@ export function Playit() {
     try {
       await api.playitDeleteAgent(agent.id, draft.moveTo || null, draft.disable);
       toast.success(t("playit.agentDeleted"));
-      await loadAuth();
       // Deleting an agent reassigns or unassigns its tunnels remotely, so
       // the tunnel and server views must reload to show the new reality.
       await refresh();
@@ -441,6 +489,7 @@ export function Playit() {
   }
 
   const playitConnected = status?.status === "connected";
+  const authenticated = authSession?.authenticated === true;
 
   return (
     <div class="mx-auto flex w-full max-w-6xl flex-col gap-3 px-3 py-3 sm:gap-6 sm:px-6 sm:py-8">
@@ -465,64 +514,110 @@ export function Playit() {
 
       {failed && <Banner kind="error">{failed}</Banner>}
 
-      <ConnectionCard
-        status={status}
-        account={account}
-        accountError={accountError}
-        claimUrl={claimUrl}
-        busy={busy}
-        onClaim={() => void claim()}
-      />
+      <div
+        role="tablist"
+        aria-label={t("playit.title")}
+        class="flex gap-1 overflow-x-auto rounded-xl border border-ink-700 bg-ink-850 p-1"
+      >
+        {TABS.map((name) => {
+          const selected = tab === name;
+          return (
+            <button
+              key={name}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              onClick={() => setTab(name)}
+              class={`shrink-0 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors sm:px-4 sm:py-2 ${
+                selected
+                  ? "bg-ink-600 text-fg"
+                  : "text-fg-muted hover:bg-ink-700 hover:text-fg"
+              }`}
+            >
+              {t(`playit.tabs.${name}` as "playit.tabs.overview")}
+            </button>
+          );
+        })}
+      </div>
 
-      <AccountCard
-        authFailure={authFailure}
-        authSession={authSession}
-        authBusy={authBusy}
-        busy={busy}
-        needsClaim={status?.status === "needs_claim"}
-        onLogin={(email, password) => void login(email, password)}
-        onTotp={(code) => void submitTotp(code)}
-        onLogout={() => void logout()}
-        onConnectDirect={() => void connectDirect()}
-        onReconnectAgent={() => void reconnectAgent()}
-        onDisconnectAgent={() => void disconnectAgent()}
-      />
+      {tab === "overview" && (
+        <div class="flex flex-col gap-3 sm:gap-6">
+          <ConnectionCard
+            status={status}
+            account={account}
+            accountError={accountError}
+            claimUrl={claimUrl}
+            busy={busy}
+            onClaim={() => void claim()}
+          />
 
-      {authSession?.authenticated && (
-        <AgentsCard
-          agents={agents}
-          agentsFailure={agentsFailure}
-          currentAgentId={account?.agent_id ?? null}
+          <OwnershipCard
+            agentId={account?.agent_id ?? null}
+            needsClaim={status?.status === "needs_claim"}
+            authSession={authSession}
+            ownership={ownership}
+            ownershipError={ownershipError}
+            busy={busy}
+            onConnectDirect={() => void connectDirect()}
+            onReconnectAgent={() => void reconnectAgent()}
+            onDisconnectAgent={() => void disconnectAgent()}
+            onChangeAccount={(input) => changeAccount(input)}
+          />
+        </div>
+      )}
+
+      {tab === "servers" && (
+        <ServerTunnelsCard
+          servers={servers}
+          serverViews={serverViews}
+          serverViewErrors={serverViewErrors}
+          canConnect={playitConnected}
           busy={busy}
-          onDeleteAgent={(agent, draft) => void deleteAgent(agent, draft)}
+          onConnect={(id) => void connectServer(id)}
+          onDisconnect={(server) => void disconnectServer(server)}
+          onRepair={(id) => void connectServer(id)}
+          onReconcile={(id) => void reconcileServer(id)}
+          onForget={(server) => void forgetServer(server)}
+          onCopyAddress={(address) => void copyAddress(address)}
         />
       )}
 
-      <ServerTunnelsCard
-        servers={servers}
-        serverViews={serverViews}
-        serverViewErrors={serverViewErrors}
-        canConnect={playitConnected}
-        busy={busy}
-        onConnect={(id) => void connectServer(id)}
-        onDisconnect={(server) => void disconnectServer(server)}
-        onRepair={(id) => void connectServer(id)}
-        onReconcile={(id) => void reconcileServer(id)}
-        onForget={(server) => void forgetServer(server)}
-        onCopyAddress={(address) => void copyAddress(address)}
-      />
+      {tab === "tunnels" && (
+        <TunnelsCard
+          catalog={catalog}
+          tunnelError={tunnelError}
+          authenticated={authenticated}
+          servers={servers}
+          busy={busy}
+          canCreate={playitConnected}
+          onCreate={(input) => void createTunnel(input)}
+          onRemove={(tunnel) => void remove(tunnel)}
+          onCopyAddress={(address) => void copyAddress(address)}
+        />
+      )}
 
-      <TunnelsCard
-        tunnels={tunnels}
-        tunnelError={tunnelError}
-        needsClaim={status?.status === "needs_claim"}
-        servers={servers}
-        busy={busy}
-        canCreate={playitConnected}
-        onCreate={(input) => void createTunnel(input)}
-        onRemove={(tunnel) => void remove(tunnel)}
-        onCopyAddress={(address) => void copyAddress(address)}
-      />
+      {tab === "account" && (
+        <div class="flex flex-col gap-3 sm:gap-6">
+          <AccountCard
+            authFailure={authFailure}
+            authSession={authSession}
+            authBusy={authBusy}
+            onLogin={(email, password) => void login(email, password)}
+            onTotp={(code) => void submitTotp(code)}
+            onLogout={() => void logout()}
+          />
+
+          {authenticated && (
+            <AgentsCard
+              agents={agents}
+              agentsFailure={agentsFailure}
+              currentAgentId={account?.agent_id ?? null}
+              busy={busy}
+              onDeleteAgent={(agent, draft) => void deleteAgent(agent, draft)}
+            />
+          )}
+        </div>
+      )}
     </div>
   );
 }

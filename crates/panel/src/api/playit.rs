@@ -4,9 +4,10 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use playit_integration::{
-    AccountSessionState, AgentInfo, ClaimDetailsInfo, ClaimInfo, DeleteAgentOptions,
-    DirectSetupResult, DomainInfo, EnsureTunnelDisposition, EnsuredServerTunnel, PlayitAccount,
-    PlayitConnectionState, PlayitProtocol, PlayitStatus, PlayitTunnel, TunnelCreateInfo,
+    AccountSessionState, AgentInfo, AgentOwnershipInfo, ChangeAccountOptions, ChangeAccountResult,
+    ClaimDetailsInfo, ClaimInfo, DeleteAgentOptions, DirectSetupResult, DomainInfo,
+    EnsureTunnelDisposition, EnsuredServerTunnel, PlayitAccount, PlayitConnectionState,
+    PlayitProtocol, PlayitStatus, PlayitTunnel, TunnelCatalog, TunnelCreateInfo,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -147,15 +148,15 @@ struct CreateTunnelRequest {
 
 /// GET `/api/playit/tunnels`.
 ///
-/// The account-level list is preferred so tunnels assigned to another Playit
-/// agent are visible and can be identified before an operator creates another
-/// one. When the account endpoint is denied, the current-agent materialized
-/// list is returned instead of failing the whole Playit page with 403.
+/// Returns the tunnel catalog together with the authority it was read from
+/// (`account` or `agent`). Startup states — secret provisioning, waiting
+/// claim, disconnected agent, no session — report `available: false` with an
+/// empty list and HTTP 200: only a broken backend fails this endpoint.
 async fn list_tunnels(
     State(state): State<Arc<AppState>>,
     AdminIdentity(_admin): AdminIdentity,
-) -> ApiResult<Json<Vec<PlayitTunnel>>> {
-    Ok(Json(state.playit.visible_tunnels().await?))
+) -> ApiResult<Json<TunnelCatalog>> {
+    Ok(Json(state.playit.tunnel_catalog().await?))
 }
 
 /// POST `/api/playit/tunnels`.
@@ -182,6 +183,10 @@ async fn create_tunnel(
 }
 
 /// DELETE `/api/playit/tunnels/:id`.
+///
+/// Deletes through the account session: this is the global tunnel
+/// management endpoint, so account authority applies. Server detach uses the
+/// agent API instead; the two never silently fall back to each other.
 async fn delete_tunnel(
     State(state): State<Arc<AppState>>,
     AdminIdentity(_admin): AdminIdentity,
@@ -214,7 +219,7 @@ async fn delete_tunnel(
         })
         .await??;
 
-    let remote_result = state.playit.delete_tunnel(&tunnel_id).await;
+    let remote_result = state.playit.delete_account_tunnel(&tunnel_id).await;
     let remote_pending = match remote_result {
         Ok(()) => {
             for server_id in &affected_servers {
@@ -487,7 +492,7 @@ async fn detach_server_playit(
         ));
     }
 
-    match state.playit.delete_tunnel(&binding.tunnel_id).await {
+    match state.playit.delete_agent_tunnel(&binding.tunnel_id).await {
         Ok(()) => remove_cleanup(&state, &id, &binding.tunnel_id).await,
         Err(error) if error.is_not_found() => remove_cleanup(&state, &id, &binding.tunnel_id).await,
         Err(error) => {
@@ -558,24 +563,41 @@ async fn reconcile_server_playit(
     Path(id): Path<String>,
 ) -> ApiResult<Json<ServerPlayitView>> {
     let _server_lock = state.server_mutation_lock.lock().await;
-    let mut record = authorized_server(&state, &admin, &id).await?;
+    Ok(Json(heal_server_binding(&state, &admin, &id).await?))
+}
 
-    retry_server_cleanup(&state, &id).await;
+/// Reconcile one server's stored association in place, healing remote
+/// deletions.
+///
+/// A still-visible tunnel is adopted (reassigned to the current agent and
+/// destination when it drifted); a tunnel Playit no longer reports is
+/// recreated through the stable-name path. Reconcile never deletes a
+/// tunnel. An ownership conflict (agent belongs to another account) is
+/// surfaced so the operator sees the warning; other heal failures keep the
+/// current view instead of failing the whole row.
+async fn heal_server_binding(
+    state: &AppState,
+    identity: &Identity,
+    id: &str,
+) -> ApiResult<ServerPlayitView> {
+    let mut record = authorized_server(state, identity, id).await?;
+
+    retry_server_cleanup(state, id).await;
 
     let Some(binding) = record.playit.clone() else {
-        return Ok(Json(server_playit_view(&state, &record).await));
+        return Ok(server_playit_view(state, &record).await);
     };
-    let current_agent_id = required_current_agent_id(&state).await?;
+    let current_agent_id = required_current_agent_id(state).await?;
     // Only the loopback destination is trusted, exactly like an attach
     // repair: a non-loopback address from an older state file falls back to
     // loopback instead of being carried into Playit.
     let desired_address = (is_loopback_address(&binding.local_address))
         .then(|| binding.local_address.clone())
         .unwrap_or_else(|| "127.0.0.1".into());
-    let Ok(healed) = state
+    let healed = match state
         .playit
         .reconcile_server_tunnel(
-            &id,
+            id,
             &record.name,
             record.config.port,
             Some(binding.tunnel_id.as_str()),
@@ -583,8 +605,12 @@ async fn reconcile_server_playit(
             None,
         )
         .await
-    else {
-        return Ok(Json(server_playit_view(&state, &record).await));
+    {
+        Ok(healed) => healed,
+        Err(error @ playit_integration::PlayitError::Conflict(_)) => {
+            return Err(ApiError::Playit(error));
+        }
+        Err(_) => return Ok(server_playit_view(state, &record).await),
     };
 
     let mut next = binding.clone();
@@ -595,7 +621,7 @@ async fn reconcile_server_playit(
     if next.tunnel_id != binding.tunnel_id {
         next.created_at = Some(now_unix_seconds());
     }
-    let server_id = id.clone();
+    let server_id = id.to_owned();
     let expected_id = binding.tunnel_id.clone();
     state
         .store
@@ -623,11 +649,11 @@ async fn reconcile_server_playit(
         .await??;
     record.playit = state
         .store
-        .server(&id)
+        .server(id)
         .await
         .and_then(|server| server.playit);
 
-    Ok(Json(server_playit_view(&state, &record).await))
+    Ok(server_playit_view(state, &record).await)
 }
 
 async fn authorized_server(
@@ -765,9 +791,11 @@ async fn server_playit_view(state: &AppState, record: &ServerRecord) -> ServerPl
         };
     }
 
-    // The resilient tunnel source keeps per-server views working when the
-    // account-wide list is denied but the current agent still sees tunnels.
-    let tunnels = match state.playit.visible_tunnels().await {
+    // Agent authority: per-server views match the stored binding against
+    // the tunnels visible through the local agent. Account-wide tunnels on
+    // other agents surface as mismatches, never as silent cross-account
+    // adoption.
+    let tunnels = match state.playit.agent_tunnels().await {
         Ok(tunnels) => tunnels,
         Err(error) => {
             tracing::warn!(error = ?error, "Playit status unavailable for server view");
@@ -946,7 +974,7 @@ async fn retry_server_cleanup(state: &AppState, server_id: &str) {
         .filter(|cleanup| cleanup.server_id == server_id)
         .collect();
     for cleanup in pending {
-        let result = state.playit.delete_tunnel(&cleanup.tunnel_id).await;
+        let result = state.playit.delete_agent_tunnel(&cleanup.tunnel_id).await;
         if result.is_ok() || result.as_ref().is_err_and(|error| error.is_not_found()) {
             remove_cleanup(state, server_id, &cleanup.tunnel_id).await;
         } else if let Err(error) = result {
@@ -1147,12 +1175,82 @@ async fn disconnect_agent(
 ///
 /// Restarts a stopped embedded runtime without touching the account session.
 /// A running runtime is left alone. External mode verifies the daemon is
-/// reachable.
+/// reachable. Unlike the account-gated controls, this works while logged
+/// out: the agent lifecycle is independent of the account session.
 async fn reconnect_agent(
     State(state): State<Arc<AppState>>,
     AdminIdentity(_admin): AdminIdentity,
 ) -> ApiResult<Json<PlayitStatus>> {
     Ok(Json(safe_status(state.playit.reconnect_agent().await?)))
+}
+
+/// GET `/api/playit/agent/ownership`.
+///
+/// Verifies the runtime agent against the logged-in account's agent list.
+/// `matched` allows reconcile/repair/delete/migrate; `different_account`
+/// blocks automatic repair, tunnel creation, and reconciliation.
+async fn agent_ownership(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_admin): AdminIdentity,
+) -> ApiResult<Json<AgentOwnershipInfo>> {
+    Ok(Json(state.playit.agent_ownership().await?))
+}
+
+/// POST `/api/playit/auth/change`.
+///
+/// Switches to a different playit.gg account: verifies ownership,
+/// disconnects the local agent (its secret is never reused), revokes the
+/// old session (never reused), logs into the new account, and claims a
+/// fresh agent for it. Bound servers are then reconciled best-effort
+/// against the new agent; per-server failures are counted, not fatal.
+///
+/// When the old account owns the current agent, the switch abandons that
+/// agent's tunnels and requires `acknowledge_managed_agent`. When the new
+/// account requires TOTP, the pending login is held and `setup` is null:
+/// complete TOTP, then run setup directly.
+async fn change_account(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(admin): AdminIdentity,
+    Json(body): Json<ChangeAccountRequest>,
+) -> ApiResult<Json<ChangeAccountResponse>> {
+    let _server_lock = state.server_mutation_lock.lock().await;
+    let email = valid_email(&body.email)?;
+    let password = valid_password(&body.password)?;
+    let name = valid_agent_name(body.name)?;
+    let result = state
+        .playit
+        .change_account(
+            &email,
+            &password,
+            ChangeAccountOptions {
+                agent_name: name,
+                acknowledge_managed_agent: body.acknowledge_managed_agent,
+            },
+        )
+        .await?;
+
+    let bound: Vec<String> = state
+        .store
+        .read()
+        .await
+        .servers
+        .iter()
+        .filter(|server| server.playit.is_some() && admin.may_access(&server.id))
+        .map(|server| server.id.clone())
+        .collect();
+    let servers_total = bound.len();
+    let mut servers_recovered = 0;
+    for id in &bound {
+        if heal_server_binding(&state, &admin, id).await.is_ok() {
+            servers_recovered += 1;
+        }
+    }
+
+    Ok(Json(ChangeAccountResponse {
+        result,
+        servers_recovered,
+        servers_total,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1195,6 +1293,24 @@ struct DeleteAgentRequest {
     move_to_agent: Option<String>,
     #[serde(default)]
     disable_tunnels: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChangeAccountRequest {
+    email: String,
+    password: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    acknowledge_managed_agent: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ChangeAccountResponse {
+    #[serde(flatten)]
+    result: ChangeAccountResult,
+    servers_recovered: usize,
+    servers_total: usize,
 }
 
 fn valid_email(email: &str) -> ApiResult<String> {
@@ -1268,6 +1384,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/playit/domains", get(list_domains))
         .route("/playit/agent/disconnect", post(disconnect_agent))
         .route("/playit/agent/reconnect", post(reconnect_agent))
+        .route("/playit/agent/ownership", get(agent_ownership))
+        .route("/playit/auth/change", post(change_account))
         .route("/playit/tunnels", get(list_tunnels).post(create_tunnel))
         .route("/playit/tunnels/{tunnel_id}", delete(delete_tunnel))
         .route(
@@ -1479,6 +1597,27 @@ mod tests {
     }
 
     #[test]
+    fn tunnel_catalog_serializes_the_status_contract() {
+        let catalog = TunnelCatalog {
+            available: false,
+            source: playit_integration::TunnelSource::None,
+            tunnels: Vec::new(),
+        };
+        let body = serde_json::to_value(&catalog).unwrap();
+        assert_eq!(body["available"], false);
+        assert_eq!(body["source"], "none");
+        assert_eq!(body["tunnels"].as_array().unwrap().len(), 0);
+
+        let ownership = playit_integration::AgentOwnershipInfo {
+            ownership: playit_integration::AgentOwnership::DifferentAccount,
+            agent_id: Some("agent-1".into()),
+        };
+        let body = serde_json::to_value(&ownership).unwrap();
+        assert_eq!(body["ownership"], "different_account");
+        assert_eq!(body["agent_id"], "agent-1");
+    }
+
+    #[test]
     fn agent_delete_requests_default_to_unassign_without_disabling() {
         let body: DeleteAgentRequest = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(body.move_to_agent, None);
@@ -1529,6 +1668,8 @@ mod tests {
             ("GET", "/api/playit/domains"),
             ("POST", "/api/playit/agent/disconnect"),
             ("POST", "/api/playit/agent/reconnect"),
+            ("GET", "/api/playit/agent/ownership"),
+            ("POST", "/api/playit/auth/change"),
             ("GET", "/api/playit/status"),
         ] {
             let request = Request::builder()
