@@ -512,7 +512,13 @@ describe("Playit account card", () => {
     });
     apiMock.playitAuthTotp.mockImplementation(() => {
       current = { ...verified };
-      return Promise.resolve({ ...verified });
+      return Promise.resolve({
+        session: { ...verified },
+        setup: null,
+        servers_recovered: 0,
+        servers_total: 0,
+        setup_error: null,
+      });
     });
 
     renderPlayit();
@@ -570,7 +576,7 @@ describe("Playit account card", () => {
     });
 
     renderPlayit();
-    const button = await screen.findByRole("button", { name: "Connect account" });
+    const button = await screen.findByRole("button", { name: "Connect this device" });
     fireEvent.click(button);
     await waitFor(() => expect(apiMock.playitSetupDirect).toHaveBeenCalledOnce());
   });
@@ -656,7 +662,7 @@ describe("Playit tabs and ownership", () => {
       "aria-selected",
       "true",
     );
-    await waitFor(() => expect(screen.getByText("Playit agent")).toBeInTheDocument());
+    expect(screen.getByText("Playit overview")).toBeInTheDocument();
   });
 
   it("keeps agent controls available while logged out", async () => {
@@ -665,11 +671,12 @@ describe("Playit tabs and ownership", () => {
     expect(
       screen.getByRole("button", { name: "Disconnect agent" }),
     ).toBeInTheDocument();
+    // Reconnect is hidden while already connected; Change stays available.
     expect(
-      screen.getByRole("button", { name: "Reconnect agent" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: "Reconnect agent" }),
+    ).toBeNull();
     expect(
-      screen.getByRole("button", { name: "Change account" }),
+      await screen.findByRole("button", { name: "Change account" }),
     ).toBeInTheDocument();
   });
 
@@ -682,7 +689,7 @@ describe("Playit tabs and ownership", () => {
     await waitFor(() =>
       expect(
         screen.getByText(
-          "Connected Playit agent belongs to another account. Sign out or change account before managing tunnels.",
+          "This agent belongs to another Playit account.",
         ),
       ).toBeInTheDocument(),
     );
@@ -726,7 +733,7 @@ describe("Playit tabs and ownership", () => {
   it("changes account through the modal", async () => {
     renderPlayit();
     await waitFor(() => expect(apiMock.playitAuthSession).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole("button", { name: "Change account" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Change account" }));
     fireEvent.input(await screen.findByLabelText("Email"), {
       target: { value: "new@example.com" },
     });
@@ -753,7 +760,7 @@ describe("Playit tabs and ownership", () => {
     apiMock.playitAuthChange.mockRejectedValueOnce(conflict);
     renderPlayit();
     await waitFor(() => expect(apiMock.playitAuthSession).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole("button", { name: "Change account" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Change account" }));
     fireEvent.input(await screen.findByLabelText("Email"), {
       target: { value: "new@example.com" },
     });
@@ -773,6 +780,135 @@ describe("Playit tabs and ownership", () => {
       expect(apiMock.playitAuthChange).toHaveBeenLastCalledWith("new@example.com", "secret", {
         acknowledge_managed_agent: true,
       }),
+    );
+  });
+});
+
+describe("Playit overview states", () => {
+  it("shows the agent ID exactly once on the overview", async () => {
+    renderPlayit();
+    expect(await screen.findAllByText("agent-1")).toHaveLength(1);
+  });
+
+  it("labels runtime and login account states separately while signed out", async () => {
+    renderPlayit();
+    await screen.findByText("Agent account");
+    await screen.findByText("Verified");
+    expect(screen.getByText("Signed out")).toBeInTheDocument();
+    expect(screen.getByText("Not verified", { exact: false })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Disconnect agent" }),
+    ).toBeInTheDocument();
+  });
+
+  it("confirms a matched agent ownership", async () => {
+    apiMock.playitAuthSession.mockResolvedValue({
+      authenticated: true,
+      requires_totp: false,
+      account_id: 7,
+      account_status: "verified",
+      read_only: false,
+    });
+    apiMock.playitOwnership.mockResolvedValue({ ownership: "matched", agent_id: "agent-1" });
+    renderPlayit();
+    await waitFor(() =>
+      expect(
+        screen.getByText("This agent belongs to the signed-in account."),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("disables management actions for a foreign account", async () => {
+    apiMock.playitAuthSession.mockResolvedValue({
+      authenticated: true,
+      requires_totp: false,
+      account_id: 7,
+      account_status: "verified",
+      read_only: false,
+    });
+    apiMock.playitOwnership.mockResolvedValue({
+      ownership: "different_account",
+      agent_id: "agent-9",
+    });
+    renderPlayit();
+    openTab("Servers");
+    const connect = await screen.findByRole("button", { name: "Connect server: Survival" });
+    expect(connect).toBeDisabled();
+    expect(connect.title).toBe(
+      "The connected agent belongs to another Playit account. Change account before managing server tunnels.",
+    );
+    openTab("Tunnels");
+    expect(await screen.findByRole("button", { name: "Create tunnel" })).toBeDisabled();
+    openTab("Overview");
+    expect(
+      await screen.findByText("This agent belongs to another Playit account."),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Change account" }),
+    ).toBeInTheDocument();
+  });
+
+  it("supports arrow-key tab navigation", async () => {
+    renderPlayit();
+    screen.getByRole("tab", { name: "Overview" }).focus();
+    fireEvent.keyDown(screen.getByRole("tablist"), { key: "ArrowRight" });
+    expect(screen.getByRole("tab", { name: "Servers" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Servers" }));
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("id", "playit-panel-servers");
+  });
+
+  it("continues an account change automatically after TOTP", async () => {
+    apiMock.playitAuthChange.mockResolvedValue({
+      session: {
+        authenticated: false,
+        requires_totp: true,
+        account_id: null,
+        account_status: null,
+        read_only: false,
+      },
+      setup: null,
+      ownership_before: "unknown",
+      servers_recovered: 0,
+      servers_total: 1,
+    });
+    apiMock.playitAuthTotp.mockResolvedValue({
+      session: {
+        authenticated: true,
+        requires_totp: false,
+        account_id: 9,
+        account_status: "verified",
+        read_only: false,
+      },
+      setup: { agent_id: "agent-9", already_configured: false, connected: true, message: null },
+      servers_recovered: 1,
+      servers_total: 1,
+      setup_error: null,
+    });
+    renderPlayit();
+    fireEvent.click(await screen.findByRole("button", { name: "Change account" }));
+    fireEvent.input(await screen.findByLabelText("Email"), {
+      target: { value: "new@example.com" },
+    });
+    fireEvent.input(screen.getByLabelText("Password"), {
+      target: { value: "secret" },
+    });
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Change account" }),
+    );
+
+    // TOTP pending lands on the account tab with the code dialog open.
+    const code = await screen.findByLabelText("Authenticator code", { exact: false });
+    fireEvent.input(code, { target: { value: "123456" } });
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Verify" }));
+
+    await waitFor(() =>
+      expect(screen.getByText("Playit agent connected.")).toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Recovered 1 of 1 server tunnels.")).toBeInTheDocument(),
     );
   });
 });

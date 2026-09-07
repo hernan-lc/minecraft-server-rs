@@ -16,8 +16,8 @@ import type {
   ServerPlayitView,
   TunnelCatalog,
 } from "../types";
-import { ConnectionCard } from "../components/playit/ConnectionCard";
-import { OwnershipCard, type ChangeAccountInput } from "../components/playit/OwnershipCard";
+import { PlayitOverviewCard } from "../components/playit/PlayitOverviewCard";
+import type { ChangeAccountInput } from "../components/playit/ChangeAccountModal";
 import { AccountCard } from "../components/playit/AccountCard";
 import { AgentsCard } from "../components/playit/AgentsCard";
 import { ServerTunnelsCard } from "../components/playit/ServerTunnelsCard";
@@ -218,9 +218,29 @@ export function Playit() {
     setAuthBusy(true);
     setAuthFailure(null);
     try {
-      const session = await api.playitAuthTotp(code);
-      setAuthSession(session);
-      toast.success(t("playit.signedIn"));
+      const result = await api.playitAuthTotp(code);
+      setAuthSession(result.session);
+      if (result.setup) {
+        // A TOTP-pending account change continued automatically: its
+        // setup already ran and its servers were reconciled.
+        if (result.setup.connected) {
+          toast.success(t("playit.setupDone"));
+        } else {
+          toast.success(result.setup.message ?? t("playit.setupPending"));
+        }
+        if (result.servers_total > 0) {
+          toast.info(
+            t("playit.serversRecovered", {
+              recovered: result.servers_recovered,
+              total: result.servers_total,
+            }),
+          );
+        }
+      } else if (result.setup_error) {
+        toast.error(result.setup_error);
+      } else {
+        toast.success(t("playit.signedIn"));
+      }
       await refresh();
     } catch (error) {
       setAuthFailure(errorText(error, t("playit.signInFailed")));
@@ -490,6 +510,24 @@ export function Playit() {
 
   const playitConnected = status?.status === "connected";
   const authenticated = authSession?.authenticated === true;
+  const foreignAccount = ownership?.ownership === "different_account";
+  const canManageAgentTunnels = playitConnected && !foreignAccount;
+
+  function onTabKeyDown(event: KeyboardEvent) {
+    const current = TABS.indexOf(tab);
+    let next: number | null = null;
+    if (event.key === "ArrowRight") next = (current + 1) % TABS.length;
+    else if (event.key === "ArrowLeft") next = (current - 1 + TABS.length) % TABS.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = TABS.length - 1;
+    if (next === null) return;
+    event.preventDefault();
+    const name = TABS[next];
+    setTab(name);
+    (event.currentTarget as HTMLElement | null)
+      ?.querySelector<HTMLElement>(`#playit-tab-${name}`)
+      ?.focus();
+  }
 
   return (
     <div class="mx-auto flex w-full max-w-6xl flex-col gap-3 px-3 py-3 sm:gap-6 sm:px-6 sm:py-8">
@@ -517,6 +555,7 @@ export function Playit() {
       <div
         role="tablist"
         aria-label={t("playit.title")}
+        onKeyDown={onTabKeyDown}
         class="flex gap-1 overflow-x-auto rounded-xl border border-ink-700 bg-ink-850 p-1"
       >
         {TABS.map((name) => {
@@ -526,7 +565,10 @@ export function Playit() {
               key={name}
               type="button"
               role="tab"
+              id={`playit-tab-${name}`}
               aria-selected={selected}
+              aria-controls={`playit-panel-${name}`}
+              tabIndex={selected ? 0 : -1}
               onClick={() => setTab(name)}
               class={`shrink-0 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors sm:px-4 sm:py-2 ${
                 selected
@@ -541,63 +583,84 @@ export function Playit() {
       </div>
 
       {tab === "overview" && (
-        <div class="flex flex-col gap-3 sm:gap-6">
-          <ConnectionCard
+        <div
+          role="tabpanel"
+          id="playit-panel-overview"
+          aria-labelledby="playit-tab-overview"
+          class="flex flex-col gap-3 sm:gap-6"
+        >
+          <PlayitOverviewCard
             status={status}
             account={account}
+            authSession={authSession}
+            ownership={ownership}
             accountError={accountError}
+            ownershipError={ownershipError}
             claimUrl={claimUrl}
             busy={busy}
             onClaim={() => void claim()}
-          />
-
-          <OwnershipCard
-            agentId={account?.agent_id ?? null}
-            needsClaim={status?.status === "needs_claim"}
-            authSession={authSession}
-            ownership={ownership}
-            ownershipError={ownershipError}
-            busy={busy}
             onConnectDirect={() => void connectDirect()}
-            onReconnectAgent={() => void reconnectAgent()}
             onDisconnectAgent={() => void disconnectAgent()}
+            onReconnectAgent={() => void reconnectAgent()}
             onChangeAccount={(input) => changeAccount(input)}
+            onOpenAccount={() => setTab("account")}
+            onCopyAddress={(address) => void copyAddress(address)}
           />
         </div>
       )}
 
       {tab === "servers" && (
-        <ServerTunnelsCard
-          servers={servers}
-          serverViews={serverViews}
-          serverViewErrors={serverViewErrors}
-          canConnect={playitConnected}
-          busy={busy}
-          onConnect={(id) => void connectServer(id)}
-          onDisconnect={(server) => void disconnectServer(server)}
-          onRepair={(id) => void connectServer(id)}
-          onReconcile={(id) => void reconcileServer(id)}
-          onForget={(server) => void forgetServer(server)}
-          onCopyAddress={(address) => void copyAddress(address)}
-        />
+        <div
+          role="tabpanel"
+          id="playit-panel-servers"
+          aria-labelledby="playit-tab-servers"
+        >
+          <ServerTunnelsCard
+            servers={servers}
+            serverViews={serverViews}
+            serverViewErrors={serverViewErrors}
+            canConnect={playitConnected}
+            canManage={canManageAgentTunnels}
+            busy={busy}
+            onConnect={(id) => void connectServer(id)}
+            onDisconnect={(server) => void disconnectServer(server)}
+            onRepair={(id) => void connectServer(id)}
+            onReconcile={(id) => void reconcileServer(id)}
+            onForget={(server) => void forgetServer(server)}
+            onCopyAddress={(address) => void copyAddress(address)}
+          />
+        </div>
       )}
 
       {tab === "tunnels" && (
-        <TunnelsCard
-          catalog={catalog}
-          tunnelError={tunnelError}
-          authenticated={authenticated}
-          servers={servers}
-          busy={busy}
-          canCreate={playitConnected}
-          onCreate={(input) => void createTunnel(input)}
-          onRemove={(tunnel) => void remove(tunnel)}
-          onCopyAddress={(address) => void copyAddress(address)}
-        />
+        <div
+          role="tabpanel"
+          id="playit-panel-tunnels"
+          aria-labelledby="playit-tab-tunnels"
+        >
+          <TunnelsCard
+            catalog={catalog}
+            tunnelError={tunnelError}
+            authenticated={authenticated}
+            foreignAccount={foreignAccount}
+            servers={servers}
+            busy={busy}
+            canCreate={canManageAgentTunnels}
+            onCreate={(input) => void createTunnel(input)}
+            onRemove={(tunnel) => void remove(tunnel)}
+            onDisconnectServer={(server) => void disconnectServer(server)}
+            onCopyAddress={(address) => void copyAddress(address)}
+          />
+        </div>
       )}
 
       {tab === "account" && (
-        <div class="flex flex-col gap-3 sm:gap-6">
+        <div
+          role="tabpanel"
+          id="playit-panel-account"
+          aria-labelledby="playit-tab-account"
+          class="flex flex-col gap-3 sm:gap-6"
+        >
           <AccountCard
             authFailure={authFailure}
             authSession={authSession}

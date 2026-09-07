@@ -140,10 +140,10 @@ pub enum TunnelSource {
 
 /// An explicit tunnel listing together with the authority it came from.
 ///
-/// Startup states (secret provisioning, waiting claim, disconnected agent,
-/// no account session) report `available: false` with an empty list instead
-/// of failing: only broken IPC, a runtime crash, an unexpected internal
-/// failure, or a playit.gg API outage is an error.
+/// Normal pre-running states (secret provisioning, waiting claim,
+/// starting, stopping) report `available: false` with an empty list
+/// instead of failing: only broken IPC, a runtime crash, an unexpected
+/// internal failure, or a playit.gg API outage is an error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TunnelCatalog {
     /// Whether the listing reflects a live tunnel source.
@@ -152,6 +152,19 @@ pub struct TunnelCatalog {
     pub source: TunnelSource,
     /// The tunnels visible through that authority (empty when unavailable).
     pub tunnels: Vec<PlayitTunnel>,
+}
+
+impl TunnelCatalog {
+    /// The normal pre-running catalog: no live source, no tunnels, no
+    /// error. Only the pre-running lifecycles may use this; real failures
+    /// must propagate instead of hiding behind it.
+    pub fn unavailable() -> Self {
+        Self {
+            available: false,
+            source: TunnelSource::None,
+            tunnels: Vec::new(),
+        }
+    }
 }
 
 /// Whether the runtime agent is owned by the logged-in playit.gg account.

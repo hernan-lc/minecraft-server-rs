@@ -19,6 +19,7 @@ import type {
   Server,
   ServerPlayitView,
   SystemStats,
+  TotpResponse,
   TunnelCatalog,
   User,
 } from "./types";
@@ -150,7 +151,7 @@ export const api = {
     }),
 
   playitAuthTotp: (code: string) =>
-    request<PlayitAuthSession>("/playit/auth/totp", {
+    request<TotpResponse>("/playit/auth/totp", {
       method: "POST",
       body: json({ code }),
     }),

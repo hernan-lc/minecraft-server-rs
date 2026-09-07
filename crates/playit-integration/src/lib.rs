@@ -20,7 +20,7 @@ pub use embedded::EmbeddedPlayitService;
 pub use error::{AccountError, PlayitError};
 pub use manager::{
     ChangeAccountOptions, ChangeAccountResult, EnsureTunnelDisposition, EnsuredServerTunnel,
-    PlayitManager, PlayitOptions, SetupDirectOptions,
+    PendingChangeResult, PlayitManager, PlayitOptions, SetupDirectOptions,
 };
 pub use model::{
     AccountSessionState, AgentInfo, AgentOwnership, AgentOwnershipInfo, ClaimDetailsInfo,

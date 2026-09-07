@@ -126,6 +126,17 @@ export interface ChangeAccountResult {
   servers_total: number;
 }
 
+/** The TOTP result: the verified session plus any automatic account-change continuation. */
+export interface TotpResponse {
+  session: PlayitAuthSession;
+  /** The automatic setup after a TOTP-pending account change; null for plain logins. */
+  setup: PlayitDirectSetup | null;
+  servers_recovered: number;
+  servers_total: number;
+  /** Set when verification succeeded but the automatic setup failed (session stays live). */
+  setup_error: string | null;
+}
+
 export interface PlayitBinding {
   tunnel_id: string;
   protocol: PlayitProtocol;

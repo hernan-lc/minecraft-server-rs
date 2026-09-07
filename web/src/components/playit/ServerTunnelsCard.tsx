@@ -14,6 +14,7 @@ type RowAction = {
   icon: ComponentChildren;
   variant: "primary" | "ghost" | "danger" | "subtle";
   disabled: boolean;
+  title?: string;
   onClick: () => void;
 };
 
@@ -22,6 +23,7 @@ export function ServerTunnelsCard({
   serverViews,
   serverViewErrors,
   canConnect,
+  canManage,
   busy,
   onConnect,
   onDisconnect,
@@ -34,6 +36,8 @@ export function ServerTunnelsCard({
   serverViews: Record<string, ServerPlayitView>;
   serverViewErrors: Record<string, string>;
   canConnect: boolean;
+  /** False when a foreign account blocks agent-tunnel mutations. */
+  canManage: boolean;
   busy: boolean;
   onConnect: (id: string) => void;
   onDisconnect: (server: Server) => void;
@@ -63,7 +67,7 @@ export function ServerTunnelsCard({
               server={server}
               view={serverViews[server.id]}
               loadError={serverViewErrors[server.id] ?? null}
-              canConnect={canConnect}
+              canManage={canManage}
               busy={busy}
               onConnect={() => onConnect(server.id)}
               onDisconnect={() => onDisconnect(server)}
@@ -78,6 +82,9 @@ export function ServerTunnelsCard({
       {!canConnect && servers.length > 0 && (
         <p class="mt-3 text-xs text-fg-muted">{t("playit.connectBeforeTunnel")}</p>
       )}
+      {canConnect && !canManage && servers.length > 0 && (
+        <p class="mt-3 text-xs text-fg-muted">{t("playit.foreignTooltip")}</p>
+      )}
     </Card>
   );
 }
@@ -91,7 +98,7 @@ function ServerTunnelRow({
   server,
   view,
   loadError,
-  canConnect,
+  canManage,
   busy,
   onConnect,
   onDisconnect,
@@ -103,7 +110,7 @@ function ServerTunnelRow({
   server: Server;
   view: ServerPlayitView | undefined;
   loadError: string | null;
-  canConnect: boolean;
+  canManage: boolean;
   busy: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
@@ -117,13 +124,17 @@ function ServerTunnelRow({
   const actionName = (action: string) => `${action}: ${server.name}`;
 
   const actions: RowAction[] = [];
+  // A foreign account blocks agent-tunnel mutations; the tooltip says
+  // why instead of leaving a mysteriously disabled button.
+  const blockedHint = !canManage ? t("playit.foreignTooltip") : undefined;
   if (view) {
     const reconcile: RowAction = {
       key: "reconcile",
       label: t("playit.reconcileServer"),
       icon: <Icon.Refresh size={15} />,
       variant: "ghost",
-      disabled: busy,
+      disabled: busy || !canManage,
+      title: blockedHint,
       onClick: onReconcile,
     };
     switch (state) {
@@ -133,7 +144,8 @@ function ServerTunnelRow({
           label: t("playit.connectServer"),
           icon: <Icon.Plus size={15} />,
           variant: "primary",
-          disabled: busy || !canConnect,
+          disabled: busy || !canManage,
+          title: blockedHint,
           onClick: onConnect,
         });
         break;
@@ -156,7 +168,8 @@ function ServerTunnelRow({
             label: t("playit.repairServer"),
             icon: <Icon.Restart size={15} />,
             variant: "primary",
-            disabled: busy || !canConnect,
+            disabled: busy || !canManage,
+            title: blockedHint,
             onClick: onRepair,
           },
           reconcile,
@@ -251,7 +264,7 @@ function ServerTunnelRow({
             class="shrink-0 !px-3 !py-1.5 !text-xs"
             disabled={action.disabled}
             aria-label={actionName(action.label)}
-            title={actionName(action.label)}
+            title={action.title ?? actionName(action.label)}
             onClick={action.onClick}
           >
             {action.label}

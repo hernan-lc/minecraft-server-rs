@@ -96,6 +96,7 @@ pub struct PlayitManager {
     runtime: Option<Arc<Mutex<Option<PlayitRuntime>>>>,
     embedded: Option<EmbeddedParams>,
     account: AccountController,
+    pending_change: Arc<Mutex<Option<PendingAccountChange>>>,
 }
 
 /// The provenance of a tunnel returned by [`PlayitManager::ensure_server_tunnel`].
@@ -136,6 +137,34 @@ pub struct ChangeAccountOptions {
     /// abandons that agent's tunnels, so the operator must acknowledge it.
     #[serde(default)]
     pub acknowledge_managed_agent: bool,
+    /// Server ids bound before the switch. They are remembered while a
+    /// TOTP code is pending so the continuation can reconcile them after
+    /// the new agent connects.
+    #[serde(default)]
+    pub server_ids: Vec<String>,
+}
+
+/// A change-account flow paused while its new account waits for TOTP.
+///
+/// Held only in memory, like the pending TOTP login itself. It contains
+/// no password and no TOTP code: only what the continuation needs to
+/// finish claiming and healing without further operator steps.
+#[derive(Debug, Clone)]
+struct PendingAccountChange {
+    agent_name: Option<String>,
+    server_ids: Vec<String>,
+}
+
+/// The outcome of finishing a TOTP-pending account change.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PendingChangeResult {
+    /// The browserless setup outcome, unless setup itself failed.
+    pub setup: Option<DirectSetupResult>,
+    /// A safe, actionable note when the post-TOTP setup failed. The
+    /// session itself is live, so the operator can retry manually.
+    pub setup_error: Option<String>,
+    /// The server ids captured before the switch, for reconciliation.
+    pub server_ids: Vec<String>,
 }
 
 /// The outcome of [`PlayitManager::change_account`].
@@ -200,6 +229,7 @@ impl PlayitManager {
                 api_base: options.api_base.clone(),
             }),
             account: AccountController::new(options.api_base, options.session_path),
+            pending_change: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -222,6 +252,7 @@ impl PlayitManager {
             runtime: None,
             embedded: None,
             account: AccountController::new(options.api_base, options.session_path),
+            pending_change: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -271,6 +302,7 @@ impl PlayitManager {
             runtime: None,
             embedded: None,
             account: AccountController::new(options.api_base, options.session_path),
+            pending_change: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -393,11 +425,13 @@ impl PlayitManager {
     /// List tunnels together with the authority they were read from.
     ///
     /// The account side wins while a session exists; otherwise the agent
-    /// side is used. Startup states (secret provisioning, waiting claim,
-    /// disconnected agent, no session) report an unavailable catalog
-    /// instead of failing, so the tunnel endpoint never returns a false
-    /// 503. Only broken IPC, a runtime crash, an unexpected internal
-    /// failure, or a playit.gg API outage is an error.
+    /// side is used. Only the normal pre-running lifecycles
+    /// (`NeedsClaim`, `Starting`, `Stopping`) report an unavailable catalog
+    /// instead of failing, so startup never returns a false 503. Real
+    /// failures — a stopped or unreachable runtime, a broken daemon, an
+    /// error state, or a playit.gg API outage while the agent should be
+    /// running — propagate as errors. The lifecycle, not a broad
+    /// availability check, decides which case applies.
     pub async fn tunnel_catalog(&self) -> Result<TunnelCatalog, PlayitError> {
         if self.account.is_logged_in().await {
             match self.account.account_tunnels_if_logged_in().await {
@@ -415,18 +449,24 @@ impl PlayitManager {
                 None => {}
             }
         }
-        match self.agent_tunnels().await {
-            Ok(tunnels) => Ok(TunnelCatalog {
-                available: true,
-                source: TunnelSource::Agent,
-                tunnels,
-            }),
-            Err(error) if error.is_unavailable() => Ok(TunnelCatalog {
-                available: false,
-                source: TunnelSource::None,
-                tunnels: Vec::new(),
-            }),
-            Err(error) => Err(error),
+        // A broken backend must surface here: only an explicitly
+        // pre-running lifecycle may degrade to an unavailable catalog.
+        let status = self.status().await?;
+        match status.status {
+            PlayitConnectionState::NeedsClaim
+            | PlayitConnectionState::Starting
+            | PlayitConnectionState::Stopping => Ok(TunnelCatalog::unavailable()),
+            PlayitConnectionState::Connected | PlayitConnectionState::Reconnecting => {
+                let tunnels = self.agent_tunnels().await?;
+                Ok(TunnelCatalog {
+                    available: true,
+                    source: TunnelSource::Agent,
+                    tunnels,
+                })
+            }
+            PlayitConnectionState::Unavailable
+            | PlayitConnectionState::Unsupported
+            | PlayitConnectionState::Error => Err(status_error(status)),
         }
     }
 
@@ -482,6 +522,10 @@ impl PlayitManager {
     }
 
     /// Create a tunnel and return its immediate identifier.
+    ///
+    /// Agent-secret authority, blocked under a foreign account login so a
+    /// generic tunnel can never be created through another account's agent.
+    /// Agent-only operation without any session stays allowed.
     pub async fn create_tunnel(
         &self,
         local_port: u16,
@@ -489,6 +533,7 @@ impl PlayitManager {
         local_address: Option<String>,
         name: Option<String>,
     ) -> Result<TunnelCreateInfo, PlayitError> {
+        self.require_same_account().await?;
         let response = self
             .agent_service()
             .await
@@ -508,12 +553,15 @@ impl PlayitManager {
     }
 
     /// Create a semantic Minecraft Java tunnel for a local server.
+    ///
+    /// Same foreign-account block as [`Self::create_tunnel`].
     pub async fn create_minecraft_java_tunnel(
         &self,
         local_port: u16,
         local_address: Option<String>,
         name: Option<String>,
     ) -> Result<TunnelCreateInfo, PlayitError> {
+        self.require_same_account().await?;
         let response = self
             .agent_service()
             .await
@@ -533,12 +581,16 @@ impl PlayitManager {
     }
 
     /// Reassign a tunnel to this panel's current Playit agent.
+    ///
+    /// Same foreign-account block as [`Self::create_tunnel`]: adoption must
+    /// never steal another account's tunnel.
     pub async fn reassign_tunnel(
         &self,
         tunnel_id: &str,
         local_port: u16,
         local_address: Option<String>,
     ) -> Result<(), PlayitError> {
+        self.require_same_account().await?;
         let response = self
             .agent_service()
             .await
@@ -813,14 +865,6 @@ impl PlayitManager {
         Ok(())
     }
 
-    /// Delete a tunnel by its stable Playit id through the local agent.
-    ///
-    /// Kept for compatibility; new code should call the explicit
-    /// [`Self::delete_agent_tunnel`] or [`Self::delete_account_tunnel`].
-    pub async fn delete_tunnel(&self, tunnel_id: &str) -> Result<(), PlayitError> {
-        self.delete_agent_tunnel(tunnel_id).await
-    }
-
     /// Delete a tunnel through the playit.gg account session.
     ///
     /// Account authority: this backs the account dashboard and global
@@ -851,6 +895,8 @@ impl PlayitManager {
     /// Delete the Bearer account session only. The agent remains running;
     /// tunnels are untouched.
     pub async fn auth_logout(&self) -> Result<(), PlayitError> {
+        // An explicit logout also abandons any paused account change.
+        *self.pending_change.lock().await = None;
         self.account.logout().await
     }
 
@@ -873,6 +919,8 @@ impl PlayitManager {
         password: &str,
         options: ChangeAccountOptions,
     ) -> Result<ChangeAccountResult, PlayitError> {
+        // A fresh change supersedes any paused one.
+        *self.pending_change.lock().await = None;
         let ownership_before = self
             .agent_ownership()
             .await
@@ -891,6 +939,12 @@ impl PlayitManager {
         self.auth_logout().await?;
         let session = self.auth_login(email, password).await?;
         if session.requires_totp {
+            // Pause the flow with no credentials retained: the TOTP
+            // continuation finishes the claim and the server recovery.
+            *self.pending_change.lock().await = Some(PendingAccountChange {
+                agent_name: options.agent_name,
+                server_ids: options.server_ids,
+            });
             return Ok(ChangeAccountResult {
                 session,
                 setup: None,
@@ -904,6 +958,41 @@ impl PlayitManager {
             setup: Some(setup),
             ownership_before,
         })
+    }
+
+    /// Finish a TOTP-paused account change after its code was accepted.
+    ///
+    /// Runs the browserless setup for the new account and reports which
+    /// servers the caller should reconcile. Without a paused change this
+    /// is a no-op success, so plain TOTP logins share the same call path.
+    /// A setup failure is reported inside the result (never silently
+    /// dropped): the session itself is live, so the operator can retry
+    /// with a direct setup instead of losing the login.
+    pub async fn finish_pending_change(&self) -> Result<PendingChangeResult, PlayitError> {
+        let Some(pending) = self.pending_change.lock().await.take() else {
+            return Ok(PendingChangeResult::default());
+        };
+        match self.setup_direct(pending.agent_name).await {
+            Ok(setup) => Ok(PendingChangeResult {
+                setup: Some(setup),
+                setup_error: None,
+                server_ids: pending.server_ids,
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    "account change continued after TOTP but the agent setup failed"
+                );
+                Ok(PendingChangeResult {
+                    setup: None,
+                    setup_error: Some(
+                        "verification succeeded but the agent setup failed; retry with Connect account"
+                            .into(),
+                    ),
+                    server_ids: pending.server_ids,
+                })
+            }
+        }
     }
 
     /// Report the locally known account session state without network access.
@@ -1445,6 +1534,18 @@ fn lifecycle_state(
             ServicePhase::Running => (PlayitConnectionState::Connected, None),
         },
     }
+}
+
+/// Convert a terminal lifecycle status into the error the tunnel catalog
+/// reports for it. The catalog already established that the backend
+/// answered, so these states are real failures, not startup noise.
+fn status_error(status: PlayitStatus) -> PlayitError {
+    let message = status.message.unwrap_or_else(|| match status.status {
+        PlayitConnectionState::Unavailable => "Playit service unavailable".into(),
+        PlayitConnectionState::Unsupported => "Playit service protocol unsupported".into(),
+        _ => "Playit service error".into(),
+    });
+    PlayitError::Unavailable(message)
 }
 
 fn phase_error_message(phase: &ServicePhase) -> Option<String> {
@@ -2309,12 +2410,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalog_reports_unavailable_instead_of_failing_at_startup() {
-        let service = running_service();
+    async fn catalog_reports_unavailable_while_waiting_for_claim() {
+        let service = waiting_service();
+        // Even a broken tunnel list must not turn startup into a 503: the
+        // WaitingForSecret lifecycle alone decides.
         *service.account_tunnels_failure.lock().unwrap() = Some(AccountListFailure::Unavailable);
         let manager = PlayitManager::with_service(service);
 
-        // No secret yet / disconnected agent is a normal state, not a 503.
         let catalog = manager.tunnel_catalog().await.unwrap();
         assert!(!catalog.available);
         assert_eq!(catalog.source, TunnelSource::None);
@@ -2322,11 +2424,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalog_propagates_non_unavailable_errors() {
+    async fn catalog_reports_unavailable_while_starting() {
+        let service = MockService {
+            status: Arc::new(Mutex::new(ServiceStatus {
+                phase: ServicePhase::Starting,
+                has_secret: false,
+                ..ServiceStatus::default()
+            })),
+            lifecycle: Arc::new(Mutex::new(AgentLifecycle::Starting)),
+            ..MockService::default()
+        };
+        let manager = PlayitManager::with_service(service);
+
+        let catalog = manager.tunnel_catalog().await.unwrap();
+        assert!(!catalog.available);
+        assert_eq!(catalog.source, TunnelSource::None);
+    }
+
+    #[tokio::test]
+    async fn catalog_propagates_a_stopped_runtime_as_error() {
+        let manager = PlayitManager::unavailable("the runtime is gone");
+
+        // A dead backend is a real failure, never a fake normal state.
+        assert!(manager.tunnel_catalog().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn catalog_propagates_agent_failures_while_connected() {
+        let service = running_service();
+        *service.account_tunnels_failure.lock().unwrap() = Some(AccountListFailure::Unavailable);
+        let manager = PlayitManager::with_service(service);
+
+        // The agent claims to run, so its tunnel failure must surface.
+        assert!(manager.tunnel_catalog().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn catalog_propagates_denied_agent_lists_while_connected() {
         let service = running_service();
         *service.account_tunnels_failure.lock().unwrap() =
             Some(AccountListFailure::PermissionDenied);
         let manager = PlayitManager::with_service(service);
+
+        assert!(manager.tunnel_catalog().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn catalog_propagates_account_outages_while_logged_in() {
+        let (base, task) = mock_api(vec![MOCK_SIGNIN_OK.to_owned()]).await;
+        let manager = manager_with_api(running_service(), base, "catalog-outage");
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+        // The Bearer session exists but playit.gg is gone: a real outage,
+        // not a startup state.
+        task.abort();
 
         assert!(manager.tunnel_catalog().await.is_err());
     }
@@ -2897,6 +3050,18 @@ mod tests {
         r#""created_at":"2026-01-01T00:00:00Z","self_managed":true,"#,
         r#""status":{"state":"offline"},"routing":{"type":"Automatic"}}]}}"#,
     );
+    const MOCK_SIGNIN_TOTP: &str = concat!(
+        r#"{"status":"success","data":{"session_key":"pending-key","auth":{"#,
+        r#""update_version":1,"account_id":9,"timestamp":456,"#,
+        r#""account_status":"verified","totp_status":{"status":"required"},"#,
+        r#""admin_id":null,"admin_review_id":null,"read_only":false,"show_admin":false}}}"#,
+    );
+    const MOCK_TOTP_OK: &str = concat!(
+        r#"{"status":"success","data":{"session_key":"live-key-2","auth":{"#,
+        r#""update_version":1,"account_id":9,"timestamp":456,"#,
+        r#""account_status":"verified","totp_status":{"status":"signed","epoch_sec":789},"#,
+        r#""admin_id":null,"admin_review_id":null,"read_only":false,"show_admin":false}}}"#,
+    );
     const MOCK_TUNNEL_NOT_FOUND: &str = r#"{"status":"fail","data":"TunnelNotFound"}"#;
     const MATCHED_AGENT_ID: &str = "00000000-0000-0000-0000-000000000002";
     const FOREIGN_AGENT_ID: &str = "11111111-1111-1111-1111-111111111111";
@@ -3139,5 +3304,149 @@ mod tests {
         assert_eq!(catalog.source, TunnelSource::Account);
         assert!(catalog.tunnels.is_empty());
         task.abort();
+    }
+    #[tokio::test]
+    async fn create_tunnel_is_blocked_for_a_foreign_account() {
+        // One agents response per guarded mutation below.
+        let (base, task) = mock_api(vec![
+            MOCK_SIGNIN_OK.to_owned(),
+            MOCK_AGENTS_ONE.to_owned(),
+            MOCK_AGENTS_ONE.to_owned(),
+        ])
+        .await;
+        let service = running_service();
+        service.account.lock().unwrap().agent_id = Some(FOREIGN_AGENT_ID.into());
+        let created = Arc::clone(&service.created);
+        let reassigned = Arc::clone(&service.reassigned);
+        let manager = manager_with_api(service, base, "create-blocked");
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            manager
+                .create_tunnel(25565, PlayitProtocol::Tcp, Some("127.0.0.1".into()), None)
+                .await,
+            Err(PlayitError::Conflict(_))
+        ));
+        assert!(matches!(
+            manager
+                .reassign_tunnel("tunnel-1", 25565, Some("127.0.0.1".into()))
+                .await,
+            Err(PlayitError::Conflict(_))
+        ));
+        // Neither mutation reached the agent API.
+        assert!(created.lock().unwrap().is_empty());
+        assert!(reassigned.lock().unwrap().is_empty());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn create_tunnel_is_allowed_without_any_session() {
+        let service = running_service();
+        let created = Arc::clone(&service.created);
+        let manager = PlayitManager::with_service(service);
+        assert!(!manager.auth_status().await.authenticated);
+
+        let created_info = manager
+            .create_tunnel(25565, PlayitProtocol::Tcp, Some("127.0.0.1".into()), None)
+            .await
+            .unwrap();
+        assert!(!created_info.tunnel_id.is_empty());
+        assert_eq!(created.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_tunnel_is_allowed_for_a_matched_account() {
+        let (base, task) =
+            mock_api(vec![MOCK_SIGNIN_OK.to_owned(), MOCK_AGENTS_ONE.to_owned()]).await;
+        let service = running_service();
+        service.account.lock().unwrap().agent_id = Some(MATCHED_AGENT_ID.into());
+        let created = Arc::clone(&service.created);
+        let manager = manager_with_api(service, base, "create-matched");
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+
+        manager
+            .create_tunnel(25565, PlayitProtocol::Tcp, Some("127.0.0.1".into()), None)
+            .await
+            .unwrap();
+        assert_eq!(created.lock().unwrap().len(), 1);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn change_account_pauses_for_totp_and_continues_setup() {
+        let (base, task) =
+            mock_api(vec![MOCK_SIGNIN_TOTP.to_owned(), MOCK_TOTP_OK.to_owned()]).await;
+        let manager = manager_with_api(running_service(), base, "change-totp");
+        let result = manager
+            .change_account(
+                "new@example.com",
+                "secret",
+                ChangeAccountOptions {
+                    agent_name: Some("fresh".into()),
+                    server_ids: vec!["srv-1".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(result.session.requires_totp);
+        assert!(result.setup.is_none());
+        // The old session is gone and the new one is still pending.
+        assert!(!manager.account.is_logged_in().await);
+
+        let session = manager.complete_totp("123456").await.unwrap();
+        assert!(session.authenticated);
+
+        // The continuation claims without further operator steps and
+        // remembers which servers to reconcile.
+        let finished = manager.finish_pending_change().await.unwrap();
+        assert!(finished.setup.is_some());
+        assert!(finished.setup_error.is_none());
+        assert_eq!(finished.server_ids, vec!["srv-1".to_owned()]);
+
+        // The pending state is single-use.
+        let again = manager.finish_pending_change().await.unwrap();
+        assert!(again.setup.is_none());
+        assert!(again.server_ids.is_empty());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn logout_abandons_a_paused_account_change() {
+        let (base, task) = mock_api(vec![MOCK_SIGNIN_TOTP.to_owned()]).await;
+        let manager = manager_with_api(running_service(), base, "change-abandon");
+        manager
+            .change_account(
+                "new@example.com",
+                "secret",
+                ChangeAccountOptions {
+                    server_ids: vec!["srv-1".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        manager.auth_logout().await.unwrap();
+        let finished = manager.finish_pending_change().await.unwrap();
+        assert!(finished.setup.is_none());
+        assert!(finished.server_ids.is_empty());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn finish_without_a_paused_change_is_a_no_op() {
+        let manager = PlayitManager::with_service(running_service());
+
+        let finished = manager.finish_pending_change().await.unwrap();
+        assert!(finished.setup.is_none());
+        assert!(finished.setup_error.is_none());
+        assert!(finished.server_ids.is_empty());
     }
 }

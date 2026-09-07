@@ -10,7 +10,9 @@ No separate Playit installation is required. The panel ships an embedded Playit 
 
 Once connected, choose a server and create its tunnel. The panel uses TCP to `127.0.0.1:<server-port>`, stores the Playit tunnel id in `panel.json`, and polls the service so provisioning, disabled, drifted, and connected states are visible. The server settings page also exposes the same attach/detach controls. The **Create a tunnel** form on the **Tunnels** tab creates standalone tunnels (custom port, protocol, and loopback address) without attaching them to a server. Deleting a server or tunnel removes a panel-managed tunnel first when the service is available.
 
-The Playit page is tabbed: **Overview** (connection, agent lifecycle, and account/agent ownership), **Servers** (per-server tunnels), **Tunnels** (the tunnel catalog with its source authority), and **Account** (login, TOTP, owned agents).
+The Playit page is tabbed: **Overview** (one unified card: status, agent identity, runtime vs login account states, ownership, and lifecycle-appropriate actions), **Servers** (per-server tunnels), **Tunnels** (the tunnel catalog with its source authority), and **Account** (login, TOTP, owned agents).
+
+The Overview labels the two account concepts separately: **Agent account** is the runtime/agent-side state, **Web account** is the direct playit.gg login. `Agent account: Verified` with `Ownership: Not verified` simply means the agent runs fine but no web login has verified which account owns it.
 
 ## Tunnel authorities
 
@@ -19,7 +21,9 @@ Tunnel operations use exactly one authority each — they never fall back to the
 - **Agent** (agent secret): server attach, server detach, reconciliation, and managed Minecraft tunnels. The agent works without any account login.
 - **Account** (playit.gg session): the tunnel catalog while logged in, and global tunnel deletion on the **Tunnels** tab.
 
-`GET /playit/tunnels` returns a catalog (`available`, `source`, `tunnels`). Startup states — secret provisioning, waiting claim, disconnected agent, no session — report `available: false` with HTTP 200 instead of a false 503. Only a broken backend fails the endpoint.
+`GET /playit/tunnels` returns a catalog (`available`, `source`, `tunnels`). Only the normal pre-running lifecycles (`NeedsClaim`, `Starting`, `Stopping`) report `available: false` with HTTP 200. A stopped or unreachable runtime, a broken daemon, an error state, or a playit.gg API outage while the agent should be running propagates as a real error instead of hiding behind a fake normal state.
+
+Global deletion (`DELETE /playit/tunnels/{id}`) uses the account session only and refuses server-bound tunnels with `409`: disconnect those from the Servers tab, where agent authority applies. The server cleanup queue never converts an account deletion into an agent deletion.
 
 ## Repair and reconcile
 
@@ -37,9 +41,9 @@ These are independent on purpose:
 - **Disconnecting the agent** (`POST /playit/agent/disconnect`) removes the local agent secret and stops the agent. The account login stays. It works while signed out.
 - **Deleting an agent** (`DELETE /playit/agents/{id}`) destroys the remote playit.gg agent and needs an explicit tunnel strategy: move its tunnels to another agent (`move_to_agent`) or unassign them, optionally disabled. Deleting the agent the panel runs on is refused — disconnect it first.
 - **Forgetting a server** (`POST /servers/{id}/playit/forget`) removes the local association only; the remote tunnel is left untouched.
-- **Changing account** (`POST /playit/auth/change`) disconnects the agent, revokes the old session, logs into the new account, and claims a fresh agent for it, then reconciles bound servers best-effort. Old agent ids, tunnel ids, and sessions are never reused. When the old account owns the current agent, the switch abandons its tunnels and requires `acknowledge_managed_agent`.
+- **Changing account** (`POST /playit/auth/change`) disconnects the agent, revokes the old session, logs into the new account, and claims a fresh agent for it, then reconciles bound servers best-effort. Old agent ids, tunnel ids, and sessions are never reused. When the old account owns the current agent, the switch abandons its tunnels and requires `acknowledge_managed_agent`. When the new account needs TOTP, the flow pauses with no credentials retained; completing `POST /playit/auth/totp` automatically claims the new agent and reconciles its servers.
 
-`GET /playit/agent/ownership` reports whether the runtime agent belongs to the logged-in account (`matched`, `different_account`, `no_agent`, `unknown`). Under `different_account`, automatic repair, tunnel creation, and reconciliation are blocked so one account can never corrupt another account's tunnels.
+`GET /playit/agent/ownership` reports whether the runtime agent belongs to the logged-in account (`matched`, `different_account`, `no_agent`, `unknown`). Under `different_account`, generic tunnel creation, Minecraft tunnel creation, server attach, repair, reconciliation, and tunnel reassignment are blocked with `409` so one account can never corrupt another account's tunnels. Agent-only operation without any login stays allowed.
 
 ## External mode (legacy IPC)
 

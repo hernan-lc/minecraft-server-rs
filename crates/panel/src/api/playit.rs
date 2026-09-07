@@ -187,67 +187,57 @@ async fn create_tunnel(
 /// Deletes through the account session: this is the global tunnel
 /// management endpoint, so account authority applies. Server detach uses the
 /// agent API instead; the two never silently fall back to each other.
-async fn delete_tunnel(
+async fn delete_account_tunnel(
     State(state): State<Arc<AppState>>,
-    AdminIdentity(_admin): AdminIdentity,
+    AdminIdentity(admin): AdminIdentity,
     Path(tunnel_id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let _server_lock = state.server_mutation_lock.lock().await;
-    // Record the local desired state before the remote operation. If the
-    // store write fails, no remote deletion is attempted; if Playit is down,
-    // the queued cleanup can be retried later without leaving a stale server
-    // association behind.
-    let tunnel_id_for_store = tunnel_id.clone();
-    let affected_servers = state
-        .store
-        .try_update(move |data| -> ApiResult<Vec<String>> {
-            let mut affected = Vec::new();
-            for server in &mut data.servers {
-                if server
-                    .playit
-                    .as_ref()
-                    .is_some_and(|binding| binding.tunnel_id == tunnel_id_for_store)
-                {
-                    server.playit = None;
-                    affected.push(server.id.clone());
-                }
-            }
-            for server_id in &affected {
-                queue_playit_cleanup(data, server_id, &tunnel_id_for_store);
-            }
-            Ok(affected)
-        })
-        .await??;
+    // A server-bound tunnel is managed by that server under agent
+    // authority. Deleting it here through the account session would split
+    // the tunnel across two authorities (and the server cleanup queue
+    // would later retry it as an agent delete), so refuse instead of
+    // touching the binding or enqueueing anything.
+    if let Some((server_id, server_name)) = bound_server_for_tunnel(&state, &tunnel_id).await {
+        if !admin.may_access(&server_id) {
+            return Err(ApiError::NotFound("tunnel".into()));
+        }
+        return Err(ApiError::Conflict(format!(
+            "this tunnel is managed by server \"{server_name}\"; disconnect the tunnel from the Servers tab instead"
+        )));
+    }
 
-    let remote_result = state.playit.delete_account_tunnel(&tunnel_id).await;
-    let remote_pending = match remote_result {
-        Ok(()) => {
-            for server_id in &affected_servers {
-                remove_cleanup(&state, server_id, &tunnel_id).await;
-            }
-            false
-        }
-        Err(error) if error.is_not_found() => {
-            for server_id in &affected_servers {
-                remove_cleanup(&state, server_id, &tunnel_id).await;
-            }
-            false
-        }
-        Err(error) if affected_servers.is_empty() => return Err(ApiError::Playit(error)),
-        Err(error) => {
-            tracing::warn!(
-                tunnel = %tunnel_id,
-                error = ?error,
-                "direct Playit tunnel deletion is pending"
-            );
-            true
-        }
-    };
+    // Bearer session only. A missing tunnel is idempotent success; any
+    // other failure surfaces without ever falling back to the agent API.
+    match state.playit.delete_account_tunnel(&tunnel_id).await {
+        Ok(()) => {}
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(ApiError::Playit(error)),
+    }
 
     Ok(Json(serde_json::json!({
         "ok": true,
-        "cleanup_pending": remote_pending,
+        "cleanup_pending": false,
     })))
+}
+
+/// The server (id, name) whose stored Playit binding uses `tunnel_id`, if
+/// any. Used to keep server-managed tunnels out of the global
+/// account-authority delete path.
+async fn bound_server_for_tunnel(state: &AppState, tunnel_id: &str) -> Option<(String, String)> {
+    state
+        .store
+        .read()
+        .await
+        .servers
+        .iter()
+        .find(|server| {
+            server
+                .playit
+                .as_ref()
+                .is_some_and(|binding| binding.tunnel_id == tunnel_id)
+        })
+        .map(|server| (server.id.clone(), server.name.clone()))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1033,13 +1023,49 @@ async fn auth_login(
 }
 
 /// POST `/api/playit/auth/totp`.
+///
+/// Completes a pending login, then automatically continues a paused
+/// account change: the new agent is claimed and its bound servers are
+/// reconciled without further operator steps. A plain TOTP login
+/// reports no setup and no recovery.
 async fn auth_totp(
     State(state): State<Arc<AppState>>,
-    AdminIdentity(_admin): AdminIdentity,
+    AdminIdentity(admin): AdminIdentity,
     Json(body): Json<TotpRequest>,
-) -> ApiResult<Json<AccountSessionState>> {
+) -> ApiResult<Json<TotpResponse>> {
+    let _server_lock = state.server_mutation_lock.lock().await;
     let code = valid_totp_code(&body.code)?;
-    Ok(Json(state.playit.complete_totp(&code).await?))
+    let session = state.playit.complete_totp(&code).await?;
+    let continued = state.playit.finish_pending_change().await?;
+
+    let servers_total = continued.server_ids.len();
+    let mut servers_recovered = 0;
+    if continued.setup.is_some() {
+        for id in &continued.server_ids {
+            if heal_server_binding(&state, &admin, id).await.is_ok() {
+                servers_recovered += 1;
+            }
+        }
+    }
+
+    Ok(Json(TotpResponse {
+        session,
+        setup: continued.setup,
+        servers_recovered,
+        servers_total,
+        setup_error: continued.setup_error,
+    }))
+}
+
+/// The TOTP result: the verified session plus, when the code completed a
+/// paused account change, its automatic setup and server recovery.
+#[derive(Debug, Serialize)]
+struct TotpResponse {
+    session: AccountSessionState,
+    setup: Option<DirectSetupResult>,
+    servers_recovered: usize,
+    servers_total: usize,
+    setup_error: Option<String>,
 }
 
 /// GET `/api/playit/auth/session`.
@@ -1217,19 +1243,9 @@ async fn change_account(
     let email = valid_email(&body.email)?;
     let password = valid_password(&body.password)?;
     let name = valid_agent_name(body.name)?;
-    let result = state
-        .playit
-        .change_account(
-            &email,
-            &password,
-            ChangeAccountOptions {
-                agent_name: name,
-                acknowledge_managed_agent: body.acknowledge_managed_agent,
-            },
-        )
-        .await?;
-
-    let bound: Vec<String> = state
+    // Bound servers are captured up front: the TOTP continuation heals
+    // them after the new agent connects, without another lookup.
+    let bound_ids: Vec<String> = state
         .store
         .read()
         .await
@@ -1238,11 +1254,28 @@ async fn change_account(
         .filter(|server| server.playit.is_some() && admin.may_access(&server.id))
         .map(|server| server.id.clone())
         .collect();
-    let servers_total = bound.len();
+    let result = state
+        .playit
+        .change_account(
+            &email,
+            &password,
+            ChangeAccountOptions {
+                agent_name: name,
+                acknowledge_managed_agent: body.acknowledge_managed_agent,
+                server_ids: bound_ids.clone(),
+            },
+        )
+        .await?;
+
+    // A TOTP-pending change heals later: its continuation reconciles
+    // after the new agent connects, so there is nothing to recover yet.
+    let servers_total = bound_ids.len();
     let mut servers_recovered = 0;
-    for id in &bound {
-        if heal_server_binding(&state, &admin, id).await.is_ok() {
-            servers_recovered += 1;
+    if result.setup.is_some() {
+        for id in &bound_ids {
+            if heal_server_binding(&state, &admin, id).await.is_ok() {
+                servers_recovered += 1;
+            }
         }
     }
 
@@ -1387,7 +1420,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/playit/agent/ownership", get(agent_ownership))
         .route("/playit/auth/change", post(change_account))
         .route("/playit/tunnels", get(list_tunnels).post(create_tunnel))
-        .route("/playit/tunnels/{tunnel_id}", delete(delete_tunnel))
+        .route("/playit/tunnels/{tunnel_id}", delete(delete_account_tunnel))
         .route(
             "/servers/{id}/playit",
             get(server_playit)
@@ -1615,6 +1648,54 @@ mod tests {
         let body = serde_json::to_value(&ownership).unwrap();
         assert_eq!(body["ownership"], "different_account");
         assert_eq!(body["agent_id"], "agent-1");
+    }
+
+    #[tokio::test]
+    async fn bound_server_lookup_finds_server_managed_tunnels() {
+        use crate::state::PlayitMode;
+        use guardian::{GuardianConfig, ServerConfig};
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(data_dir.path(), PlayitMode::External)
+            .await
+            .unwrap();
+        state
+            .store
+            .update(|data| {
+                data.users.push(crate::store::User {
+                    username: "admin".into(),
+                    password_hash: "$argon2id$fake".into(),
+                    admin: true,
+                    servers: vec![],
+                });
+                data.servers.push(ServerRecord {
+                    id: "server-1".into(),
+                    name: "Survival".into(),
+                    config: ServerConfig::paper(state.server_dir("server-1"), "1.21.8"),
+                    policy: GuardianConfig::default(),
+                    playit: Some(PlayitBinding {
+                        tunnel_id: "tunnel-9".into(),
+                        protocol: PlayitProtocol::Tcp,
+                        local_address: "127.0.0.1".into(),
+                        local_port: 25565,
+                        agent_id: Some("agent-1".into()),
+                        created_at: None,
+                    }),
+                    created_at: "2026-08-28T00:00:00Z".into(),
+                    backup_policy: None,
+                });
+            })
+            .await
+            .unwrap();
+
+        // A server-managed tunnel is found so the global account delete
+        // path can refuse it instead of splitting authorities.
+        assert_eq!(
+            bound_server_for_tunnel(&state, "tunnel-9").await,
+            Some(("server-1".into(), "Survival".into()))
+        );
+        assert_eq!(bound_server_for_tunnel(&state, "tunnel-other").await, None);
+        state.playit.shutdown().await.unwrap();
     }
 
     #[test]
