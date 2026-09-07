@@ -57,7 +57,7 @@ as a crash fallback; it should not be relied on as the normal shutdown path.
 
 ## Secrets handling
 
-Session credentials are held in memory and browser sessions use an `HttpOnly` cookie. Playit secrets are kept in `<data-dir>/playit/secret.toml` and are never returned by the panel API. Never include `Authorization` headers, cookies, tickets, passwords, or Playit secrets in bug reports or logs. Rotate credentials after any suspected exposure.
+Session credentials are held in memory and browser sessions use an `HttpOnly` cookie. Playit secrets are kept in `<data-dir>/playit/secret.toml` and the direct-login session in `<data-dir>/playit/account-session.json` (owner-only files on Unix); neither is ever returned by the panel API, and passwords and TOTP codes are never persisted at all. Never include `Authorization` headers, cookies, tickets, passwords, TOTP codes, or Playit secrets in bug reports or logs. Rotate credentials after any suspected exposure.
 
 ## Resource limits
 

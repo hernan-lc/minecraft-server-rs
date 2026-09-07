@@ -7,6 +7,11 @@ import type {
   JavaInstall,
   PanelUser,
   PlayitAccount,
+  PlayitAgent,
+  PlayitAuthSession,
+  PlayitClaimDetails,
+  PlayitDirectSetup,
+  PlayitDomain,
   PlayitStatus,
   PlayitTunnel,
   Project,
@@ -135,6 +140,63 @@ export const api = {
   playitAccount: () => request<PlayitAccount>("/playit/account"),
 
   playitClaim: () => request<{ claim_url: string }>("/playit/claim", { method: "POST" }),
+
+  playitAuthLogin: (email: string, password: string) =>
+    request<PlayitAuthSession>("/playit/auth/login", {
+      method: "POST",
+      body: json({ email, password }),
+    }),
+
+  playitAuthTotp: (code: string) =>
+    request<PlayitAuthSession>("/playit/auth/totp", {
+      method: "POST",
+      body: json({ code }),
+    }),
+
+  playitAuthSession: () => request<PlayitAuthSession>("/playit/auth/session"),
+
+  playitAuthValidate: () =>
+    request<PlayitAuthSession>("/playit/auth/validate", { method: "POST" }),
+
+  playitAuthLogout: () =>
+    request<{ ok: boolean }>("/playit/auth/session", { method: "DELETE" }),
+
+  playitSetupDirect: (name?: string) =>
+    request<PlayitDirectSetup>("/playit/setup/direct", {
+      method: "POST",
+      body: json(name ? { name } : {}),
+    }),
+
+  playitClaimDetails: (code: string) =>
+    request<PlayitClaimDetails>(`/playit/claim/details?code=${encodeURIComponent(code)}`),
+
+  playitClaimApprove: (code: string, name?: string) =>
+    request<{ ok: boolean; agent_id: string }>("/playit/claim/approve", {
+      method: "POST",
+      body: json(name ? { code, name } : { code }),
+    }),
+
+  playitClaimReject: (code: string) =>
+    request<{ ok: boolean }>("/playit/claim/reject", {
+      method: "POST",
+      body: json({ code }),
+    }),
+
+  playitAgents: () => request<PlayitAgent[]>("/playit/agents"),
+
+  playitDeleteAgent: (agentId: string, moveToAgent: string | null, disableTunnels: boolean) =>
+    request<{ ok: boolean }>(`/playit/agents/${encodeURIComponent(agentId)}`, {
+      method: "DELETE",
+      body: json({ move_to_agent: moveToAgent, disable_tunnels: disableTunnels }),
+    }),
+
+  playitDomains: () => request<PlayitDomain[]>("/playit/domains"),
+
+  playitAgentDisconnect: () =>
+    request<PlayitStatus>("/playit/agent/disconnect", { method: "POST" }),
+
+  playitAgentReconnect: () =>
+    request<PlayitStatus>("/playit/agent/reconnect", { method: "POST" }),
 
   playitTunnels: () => request<PlayitTunnel[]>("/playit/tunnels"),
 

@@ -493,7 +493,7 @@ dependencies = [
  "num-traits",
  "serde",
  "wasm-bindgen",
- "windows-link 0.2.1",
+ "windows-link",
 ]
 
 [[package]]
@@ -1576,7 +1576,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core",
 ]
 
 [[package]]
@@ -1788,7 +1788,7 @@ dependencies = [
  "simd_cesu8",
  "thiserror 2.0.20",
  "walkdir",
- "windows-link 0.2.1",
+ "windows-link",
 ]
 
 [[package]]
@@ -1932,7 +1932,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
 dependencies = [
  "cfg-if",
- "windows-link 0.2.1",
+ "windows-link",
 ]
 
 [[package]]
@@ -2561,6 +2561,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -2614,7 +2615,7 @@ dependencies = [
  "libc",
  "redox_syscall 0.5.18",
  "smallvec",
- "windows-link 0.2.1",
+ "windows-link",
 ]
 
 [[package]]
@@ -2685,7 +2686,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "playit-agent-core"
 version = "1.0.10"
-source = "git+https://github.com/nglmercer/playit-agent?rev=d20dc37da2cd54e72c8f9c83d69966bb2c9ae0a1#d20dc37da2cd54e72c8f9c83d69966bb2c9ae0a1"
+source = "git+https://github.com/nglmercer/playit-agent?rev=3ba5b703d04a09e2db2fad27f718977e58fd3144#3ba5b703d04a09e2db2fad27f718977e58fd3144"
 dependencies = [
  "byteorder",
  "chrono",
@@ -2711,7 +2712,7 @@ dependencies = [
 [[package]]
 name = "playit-agent-proto"
 version = "1.3.0"
-source = "git+https://github.com/nglmercer/playit-agent?rev=d20dc37da2cd54e72c8f9c83d69966bb2c9ae0a1#d20dc37da2cd54e72c8f9c83d69966bb2c9ae0a1"
+source = "git+https://github.com/nglmercer/playit-agent?rev=3ba5b703d04a09e2db2fad27f718977e58fd3144#3ba5b703d04a09e2db2fad27f718977e58fd3144"
 dependencies = [
  "byteorder",
  "hex",
@@ -2724,7 +2725,7 @@ dependencies = [
 [[package]]
 name = "playit-api-client"
 version = "0.2.0"
-source = "git+https://github.com/nglmercer/playit-agent?rev=d20dc37da2cd54e72c8f9c83d69966bb2c9ae0a1#d20dc37da2cd54e72c8f9c83d69966bb2c9ae0a1"
+source = "git+https://github.com/nglmercer/playit-agent?rev=3ba5b703d04a09e2db2fad27f718977e58fd3144#3ba5b703d04a09e2db2fad27f718977e58fd3144"
 dependencies = [
  "byteorder",
  "chrono",
@@ -2744,18 +2745,20 @@ name = "playit-integration"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "playit-api-client",
  "playit-ipc",
  "playit-runtime",
  "serde",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
 name = "playit-ipc"
 version = "1.0.10"
-source = "git+https://github.com/nglmercer/playit-agent?rev=d20dc37da2cd54e72c8f9c83d69966bb2c9ae0a1#d20dc37da2cd54e72c8f9c83d69966bb2c9ae0a1"
+source = "git+https://github.com/nglmercer/playit-agent?rev=3ba5b703d04a09e2db2fad27f718977e58fd3144#3ba5b703d04a09e2db2fad27f718977e58fd3144"
 dependencies = [
  "dirs",
  "futures-util",
@@ -2771,7 +2774,7 @@ dependencies = [
 [[package]]
 name = "playit-runtime"
 version = "1.0.10"
-source = "git+https://github.com/nglmercer/playit-agent?rev=d20dc37da2cd54e72c8f9c83d69966bb2c9ae0a1#d20dc37da2cd54e72c8f9c83d69966bb2c9ae0a1"
+source = "git+https://github.com/nglmercer/playit-agent?rev=3ba5b703d04a09e2db2fad27f718977e58fd3144#3ba5b703d04a09e2db2fad27f718977e58fd3144"
 dependencies = [
  "hex",
  "playit-agent-core",
@@ -4450,7 +4453,7 @@ version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12342cb4d8e3b046f3d80effd474a7a02447231330ef77d71daa6fbc40681143"
 dependencies = [
- "windows-core 0.57.0",
+ "windows-core",
  "windows-targets",
 ]
 
@@ -4460,23 +4463,10 @@ version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2ed2439a290666cd67ecce2b0ffaad89c2a56b976b736e6ece670297897832d"
 dependencies = [
- "windows-implement 0.57.0",
- "windows-interface 0.57.0",
- "windows-result 0.1.2",
+ "windows-implement",
+ "windows-interface",
+ "windows-result",
  "windows-targets",
-]
-
-[[package]]
-name = "windows-core"
-version = "0.61.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0fdd3ddb90610c7638aa2b3a3ab2904fb9e5cdbecc643ddb3647212781c4ae3"
-dependencies = [
- "windows-implement 0.60.2",
- "windows-interface 0.59.3",
- "windows-link 0.1.3",
- "windows-result 0.3.4",
- "windows-strings",
 ]
 
 [[package]]
@@ -4484,17 +4474,6 @@ name = "windows-implement"
 version = "0.57.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9107ddc059d5b6fbfbffdfa7a7fe3e22a226def0b2608f72e9d552763d3e1ad7"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "windows-implement"
-version = "0.60.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4513,23 +4492,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "windows-interface"
-version = "0.59.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "windows-link"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e6ad25900d524eaabdbbb96d20b4311e1e7ae1699af4fb28c17ae66c80d798a"
-
-[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4542,24 +4504,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e383302e8ec8515204254685643de10811af0ed97ea37210dc26fb0032647f8"
 dependencies = [
  "windows-targets",
-]
-
-[[package]]
-name = "windows-result"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56f42bd332cc6c8eac5af113fc0c1fd6a8fd2aa08a0119358686e5160d0586c6"
-dependencies = [
- "windows-link 0.1.3",
-]
-
-[[package]]
-name = "windows-strings"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56e6c93f3a0c3b36176cb1327a4958a0353d5d166c2a35cb268ace15e91d3b57"
-dependencies = [
- "windows-link 0.1.3",
 ]
 
 [[package]]
@@ -4586,7 +4530,7 @@ version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
- "windows-link 0.2.1",
+ "windows-link",
 ]
 
 [[package]]

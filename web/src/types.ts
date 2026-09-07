@@ -51,6 +51,38 @@ export interface PlayitAccount {
   claim_url: string | null;
 }
 
+export interface PlayitAuthSession {
+  authenticated: boolean;
+  requires_totp: boolean;
+  account_id: number | null;
+  account_status: string | null;
+  read_only: boolean;
+}
+
+export interface PlayitAgent {
+  id: string;
+  name: string;
+}
+
+export interface PlayitClaimDetails {
+  agent_type: string;
+  name: string;
+  remote_ip: string;
+  version: string;
+}
+
+export interface PlayitDirectSetup {
+  agent_id: string | null;
+  already_configured: boolean;
+  connected: boolean;
+  message: string | null;
+}
+
+export interface PlayitDomain {
+  id: string;
+  name: string;
+}
+
 export interface PlayitTunnel {
   id: string;
   name: string | null;

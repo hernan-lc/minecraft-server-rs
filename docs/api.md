@@ -13,6 +13,19 @@ Everything is under `/api`. Browser sessions use an `HttpOnly` session cookie an
 | `GET`               | `/playit/status`                       | Inspect Playit service state       |
 | `GET`               | `/playit/account`                      | Inspect Playit account state (admin) |
 | `POST`              | `/playit/claim`                       | Start the browser-based claim flow (admin) |
+| `POST`              | `/playit/auth/login`                  | Direct playit.gg login (admin)     |
+| `POST`              | `/playit/auth/totp`                   | Complete a TOTP-required login (admin) |
+| `GET` `DELETE`      | `/playit/auth/session`                | Inspect / revoke the account login (admin) |
+| `POST`              | `/playit/auth/validate`               | Validate the account login (admin) |
+| `POST`              | `/playit/setup/direct`                | Browserless agent setup (admin)    |
+| `GET`               | `/playit/claim/details`               | Inspect a pending claim (admin)    |
+| `POST`              | `/playit/claim/approve`               | Approve a claim (admin)            |
+| `POST`              | `/playit/claim/reject`                | Reject a claim (admin)             |
+| `GET`               | `/playit/agents`                      | List account agents (admin)        |
+| `DELETE`            | `/playit/agents/{id}`                 | Delete an agent with a tunnel strategy (admin) |
+| `GET`               | `/playit/domains`                     | List account domains (admin)       |
+| `POST`              | `/playit/agent/disconnect`            | Remove the agent secret (admin)    |
+| `POST`              | `/playit/agent/reconnect`             | Restart a stopped agent (admin)    |
 | `GET` `POST`        | `/playit/tunnels`                     | List / create tunnels (admin)      |
 | `DELETE`            | `/playit/tunnels/{id}`                | Delete a tunnel (admin)            |
 | `GET` `POST`        | `/servers`                             | List / create                      |

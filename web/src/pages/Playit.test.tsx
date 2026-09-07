@@ -6,6 +6,14 @@ import { ToastProvider } from "../components/Toast";
 import { Playit } from "./Playit";
 import type { Server } from "../types";
 
+const loggedOutSession = {
+  authenticated: false,
+  requires_totp: false,
+  account_id: null,
+  account_status: null,
+  read_only: false,
+};
+
 const apiMock = vi.hoisted(() => ({
   playitStatus: vi.fn(),
   playitAccount: vi.fn(),
@@ -18,6 +26,15 @@ const apiMock = vi.hoisted(() => ({
   reconcilePlayit: vi.fn(),
   forgetPlayit: vi.fn(),
   deletePlayitTunnel: vi.fn(),
+  playitAuthSession: vi.fn(),
+  playitAuthLogin: vi.fn(),
+  playitAuthTotp: vi.fn(),
+  playitAuthLogout: vi.fn(),
+  playitSetupDirect: vi.fn(),
+  playitAgents: vi.fn(),
+  playitDeleteAgent: vi.fn(),
+  playitAgentDisconnect: vi.fn(),
+  playitAgentReconnect: vi.fn(),
 }));
 
 vi.mock("../api", () => ({ api: apiMock }));
@@ -99,6 +116,8 @@ beforeEach(() => {
     cleanup_pending: false,
   });
   apiMock.deletePlayitTunnel.mockResolvedValue({ ok: true });
+  apiMock.playitAuthSession.mockResolvedValue({ ...loggedOutSession });
+  apiMock.playitAgents.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -379,5 +398,120 @@ describe("Playit page refresh lifecycle", () => {
     fireEvent.click(screen.getByRole("button", { name: "Connect Playit" }));
     await waitFor(() => expect(apiMock.playitClaim).toHaveBeenCalledOnce());
     await waitFor(() => expect(screen.queryByRole("link", { name: "Open Playit claim" })).toBeNull());
+  });
+});
+
+describe("Playit account card", () => {
+  it("shows the sign-in form when logged out", async () => {
+    renderPlayit();
+    await waitFor(() => expect(apiMock.playitAuthSession).toHaveBeenCalled());
+    expect(screen.getByLabelText("Email")).toBeInTheDocument();
+    expect(screen.getByLabelText("Password")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("signs in and loads the agents", async () => {
+    const session = {
+      authenticated: true,
+      requires_totp: false,
+      account_id: 7,
+      account_status: "verified",
+      read_only: false,
+    };
+    let current: {
+      authenticated: boolean;
+      requires_totp: boolean;
+      account_id: number | null;
+      account_status: string | null;
+      read_only: boolean;
+    } = { ...loggedOutSession };
+    apiMock.playitAuthSession.mockImplementation(() => Promise.resolve({ ...current }));
+    apiMock.playitAuthLogin.mockImplementation(() => {
+      current = { ...session };
+      return Promise.resolve({ ...session });
+    });
+    apiMock.playitAgents.mockResolvedValue([{ id: "agent-1", name: "one" }]);
+
+    renderPlayit();
+    await waitFor(() => expect(screen.getByLabelText("Email")).toBeInTheDocument());
+    fireEvent.input(screen.getByLabelText("Email"), { target: { value: "user@example.com" } });
+    fireEvent.input(screen.getByLabelText("Password"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await waitFor(() =>
+      expect(apiMock.playitAuthLogin).toHaveBeenCalledWith("user@example.com", "secret"),
+    );
+    await waitFor(() => expect(screen.getByText("Account agents")).toBeInTheDocument());
+    expect(screen.getByText("one")).toBeInTheDocument();
+  });
+
+  it("asks for a TOTP code when the login requires it", async () => {
+    const verified = {
+      authenticated: true,
+      requires_totp: false,
+      account_id: 7,
+      account_status: "verified",
+      read_only: false,
+    };
+    const pending = {
+      authenticated: false,
+      requires_totp: true,
+      account_id: 7,
+      account_status: "verified",
+      read_only: false,
+    };
+    let current: {
+      authenticated: boolean;
+      requires_totp: boolean;
+      account_id: number | null;
+      account_status: string | null;
+      read_only: boolean;
+    } = { ...loggedOutSession };
+    apiMock.playitAuthSession.mockImplementation(() => Promise.resolve({ ...current }));
+    apiMock.playitAuthLogin.mockImplementation(() => {
+      current = { ...pending };
+      return Promise.resolve({ ...pending });
+    });
+    apiMock.playitAuthTotp.mockImplementation(() => {
+      current = { ...verified };
+      return Promise.resolve({ ...verified });
+    });
+
+    renderPlayit();
+    await waitFor(() => expect(screen.getByLabelText("Email")).toBeInTheDocument());
+    fireEvent.input(screen.getByLabelText("Email"), { target: { value: "user@example.com" } });
+    fireEvent.input(screen.getByLabelText("Password"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    const code = await screen.findByLabelText("Authenticator code", { exact: false });
+    fireEvent.input(code, { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: "Verify" }));
+    await waitFor(() => expect(apiMock.playitAuthTotp).toHaveBeenCalledWith("123456"));
+  });
+
+  it("offers direct setup while the agent needs claiming", async () => {
+    apiMock.playitStatus.mockResolvedValue({
+      status: "needs_claim",
+      version: null,
+      message: null,
+    });
+    apiMock.playitAuthSession.mockResolvedValue({
+      authenticated: true,
+      requires_totp: false,
+      account_id: 7,
+      account_status: "verified",
+      read_only: false,
+    });
+    apiMock.playitSetupDirect.mockResolvedValue({
+      agent_id: "agent-9",
+      already_configured: false,
+      connected: true,
+      message: null,
+    });
+
+    renderPlayit();
+    const button = await screen.findByRole("button", { name: "Connect account" });
+    fireEvent.click(button);
+    await waitFor(() => expect(apiMock.playitSetupDirect).toHaveBeenCalledOnce());
   });
 });

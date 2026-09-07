@@ -66,6 +66,11 @@ pub trait PlayitService: Send + Sync {
         local_port: u16,
         local_address: Option<String>,
     ) -> Result<CommandResponse, PlayitError>;
+    /// Validate, persist, and activate an agent secret.
+    async fn set_secret(&self, secret: String) -> Result<CommandResponse, PlayitError>;
+    /// Remove the agent secret. Embedded runtimes stop; external daemons
+    /// handle their own restart.
+    async fn reset_secret(&self) -> Result<CommandResponse, PlayitError>;
 }
 
 /// The optional external backend backed by a fresh Playit IPC connection per
@@ -150,5 +155,15 @@ impl PlayitService for IpcPlayitService {
         Ok(client
             .reassign_tunnel(tunnel_id, local_port, local_address)
             .await?)
+    }
+
+    async fn set_secret(&self, secret: String) -> Result<CommandResponse, PlayitError> {
+        let mut client = IpcClient::connect().await?;
+        Ok(client.set_secret(&secret).await?)
+    }
+
+    async fn reset_secret(&self) -> Result<CommandResponse, PlayitError> {
+        let mut client = IpcClient::connect().await?;
+        Ok(client.reset_secret().await?)
     }
 }

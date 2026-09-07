@@ -26,7 +26,53 @@ pub enum PlayitError {
     /// existing account or tunnel association.
     #[error("Playit conflict: {0}")]
     Conflict(String),
+    /// A direct playit.gg account operation failed. The message is safe to
+    /// surface to an admin: it never contains passwords, TOTP codes, session
+    /// keys, or agent secrets.
+    #[error(transparent)]
+    Account(#[from] AccountError),
 }
+
+/// Why a direct playit.gg account operation failed.
+///
+/// Every variant renders without credentials. Account sessions and agent
+/// secrets have independent lifecycles: an expired or logged-out account
+/// session never implies the agent secret is invalid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountError {
+    /// No account session is available; sign in first.
+    NotLoggedIn,
+    /// The email/password combination was rejected.
+    InvalidCredentials,
+    /// A TOTP code was rejected. The pending login is retained until it
+    /// expires so the operator can retry.
+    InvalidTotp,
+    /// The account session (or the pending TOTP login) is no longer valid;
+    /// sign in again.
+    SessionExpired,
+    /// The account API answered with a structured or transport failure.
+    /// The detail is operator-safe: the client library redacts session keys
+    /// and never echoes passwords or TOTP codes.
+    Api(String),
+}
+
+impl std::fmt::Display for AccountError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotLoggedIn => {
+                write!(f, "no Playit account session; sign in first")
+            }
+            Self::InvalidCredentials => write!(f, "incorrect Playit email or password"),
+            Self::InvalidTotp => write!(f, "the Playit TOTP code was rejected"),
+            Self::SessionExpired => {
+                write!(f, "Playit account session expired; sign in again")
+            }
+            Self::Api(detail) => write!(f, "Playit account request failed: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for AccountError {}
 
 impl PlayitError {
     /// Return the structured service code, when the backend supplied one.
@@ -35,7 +81,11 @@ impl PlayitError {
             Self::Ipc(playit_ipc::ipc::IpcError::Service(error)) => Some(error.code.clone()),
             Self::Runtime(error) => Some(error.as_service_error().code),
             Self::Rejected(_) => Some(ServiceErrorCode::ApiRejected),
-            Self::Ipc(_) | Self::Unavailable(_) | Self::Protocol(_) | Self::Conflict(_) => None,
+            Self::Ipc(_)
+            | Self::Unavailable(_)
+            | Self::Protocol(_)
+            | Self::Conflict(_)
+            | Self::Account(_) => None,
         }
     }
 
@@ -48,7 +98,11 @@ impl PlayitError {
             | Self::Unavailable(_) => true,
             Self::Ipc(IpcError::Service(error)) => service_code_is_unavailable(&error.code),
             Self::Runtime(error) => runtime_error_is_unavailable(error),
-            Self::Rejected(_) | Self::Protocol(_) | Self::Conflict(_) | Self::Ipc(_) => false,
+            Self::Rejected(_)
+            | Self::Protocol(_)
+            | Self::Conflict(_)
+            | Self::Account(_)
+            | Self::Ipc(_) => false,
         }
     }
 

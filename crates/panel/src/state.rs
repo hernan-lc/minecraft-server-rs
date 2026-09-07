@@ -172,7 +172,10 @@ impl AppState {
         let playit = match playit_mode {
             PlayitMode::Embedded => {
                 let secret_path = data_dir.join("playit").join("secret.toml");
-                match PlayitManager::embedded(secret_path).await {
+                let options = playit_integration::PlayitOptions::new(
+                    data_dir.join("playit").join("account-session.json"),
+                );
+                match PlayitManager::embedded_with_options(secret_path, options).await {
                     Ok(manager) => manager,
                     Err(error) => {
                         tracing::error!(
@@ -185,24 +188,31 @@ impl AppState {
                     }
                 }
             }
-            PlayitMode::External => PlayitManager::external(),
+            PlayitMode::External => {
+                PlayitManager::external_with_options(playit_integration::PlayitOptions::new(
+                    data_dir.join("playit").join("account-session.json"),
+                ))
+            }
         };
-        if tokio::fs::symlink_metadata(data_dir.join("playit").join("secret.toml"))
-            .await
-            .is_ok()
-        {
-            let playit_dir = data_dir.join("playit");
-            let secret = playit_dir.join("secret.toml");
-            let secret_for_task = secret.clone();
-            tokio::task::spawn_blocking(move || -> Result<()> {
-                let fs = ScopedFs::open(&playit_dir)
-                    .with_context(|| format!("opening {}", playit_dir.display()))?;
-                fs.set_file_private("secret.toml")
-                    .with_context(|| format!("protecting {}", secret_for_task.display()))?;
-                Ok(())
-            })
-            .await
-            .with_context(|| format!("protecting {}", secret.display()))??;
+        for protected in ["secret.toml", "account-session.json"] {
+            if tokio::fs::symlink_metadata(data_dir.join("playit").join(protected))
+                .await
+                .is_ok()
+            {
+                let playit_dir = data_dir.join("playit");
+                let secret = playit_dir.join(protected);
+                let secret_for_task = secret.clone();
+                let protected = protected.to_owned();
+                tokio::task::spawn_blocking(move || -> Result<()> {
+                    let fs = ScopedFs::open(&playit_dir)
+                        .with_context(|| format!("opening {}", playit_dir.display()))?;
+                    fs.set_file_private(&protected)
+                        .with_context(|| format!("protecting {}", secret_for_task.display()))?;
+                    Ok(())
+                })
+                .await
+                .with_context(|| format!("protecting {}", secret.display()))??;
+            }
         }
 
         let mut guardians = HashMap::new();

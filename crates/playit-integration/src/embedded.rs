@@ -97,6 +97,14 @@ impl PlayitService for EmbeddedPlayitService {
             .reassign_tunnel(tunnel_id, local_port, local_address)
             .await?)
     }
+
+    async fn set_secret(&self, secret: String) -> Result<CommandResponse, PlayitError> {
+        Ok(self.handle.set_secret(secret).await?)
+    }
+
+    async fn reset_secret(&self) -> Result<CommandResponse, PlayitError> {
+        Ok(self.handle.reset_secret().await?)
+    }
 }
 
 #[cfg(test)]

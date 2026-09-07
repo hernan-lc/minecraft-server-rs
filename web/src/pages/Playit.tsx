@@ -7,7 +7,10 @@ import {
   Button,
   Card,
   Empty,
+  Field,
   IconButton,
+  Input,
+  Select,
 } from "../components/ui";
 import * as Icon from "../components/icons";
 import { useDialogs } from "../components/Modal";
@@ -16,7 +19,9 @@ import { useT } from "../i18n";
 import type {
   PlayitAccount,
   PlayitAccountStatus,
+  PlayitAgent,
   PlayitAttachDisposition,
+  PlayitAuthSession,
   PlayitConnectionState,
   PlayitStatus,
   PlayitTunnel,
@@ -42,6 +47,16 @@ export function Playit() {
   const [tunnelError, setTunnelError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [authSession, setAuthSession] = useState<PlayitAuthSession | null>(null);
+  const [authFailure, setAuthFailure] = useState<string | null>(null);
+  const [agents, setAgents] = useState<PlayitAgent[]>([]);
+  const [agentsFailure, setAgentsFailure] = useState<string | null>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [totp, setTotp] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [agentDrafts, setAgentDrafts] = useState<Record<string, { moveTo: string; disable: boolean }>>({});
+  const authGeneration = useRef(0);
   const refreshGeneration = useRef(0);
   const refreshInFlight = useRef<Promise<void> | null>(null);
 
@@ -134,12 +149,173 @@ export function Playit() {
 
   useEffect(() => {
     void refresh();
+    void loadAuth();
     const timer = setInterval(refresh, 5000);
     return () => {
       refreshGeneration.current += 1;
       clearInterval(timer);
     };
   }, []);
+
+  async function loadAuth() {
+    const generation = ++authGeneration.current;
+    try {
+      const session = await api.playitAuthSession();
+      if (generation !== authGeneration.current) return;
+      setAuthSession(session);
+      setAuthFailure(null);
+      if (session.authenticated) {
+        try {
+          const list = await api.playitAgents();
+          if (generation !== authGeneration.current) return;
+          setAgents(list);
+          setAgentsFailure(null);
+          setAgentDrafts((previous) => {
+            const next = { ...previous };
+            for (const agent of list) {
+              next[agent.id] ??= { moveTo: "", disable: false };
+            }
+            return next;
+          });
+        } catch (error) {
+          setAgentsFailure(errorText(error, t("errors.playitAction")));
+        }
+      } else {
+        setAgents([]);
+      }
+    } catch (error) {
+      setAuthFailure(errorText(error, t("errors.playitAction")));
+    }
+  }
+
+  async function login() {
+    setAuthBusy(true);
+    setAuthFailure(null);
+    try {
+      const session = await api.playitAuthLogin(email, password);
+      authGeneration.current += 1;
+      setPassword("");
+      setAuthSession(session);
+      if (!session.requires_totp) {
+        toast.success(t("playit.signedIn"));
+        await loadAuth();
+        await refresh();
+      }
+    } catch (error) {
+      setAuthFailure(errorText(error, t("playit.signInFailed")));
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function submitTotp() {
+    setAuthBusy(true);
+    setAuthFailure(null);
+    try {
+      const session = await api.playitAuthTotp(totp);
+      authGeneration.current += 1;
+      setTotp("");
+      setAuthSession(session);
+      toast.success(t("playit.signedIn"));
+      await loadAuth();
+      await refresh();
+    } catch (error) {
+      setAuthFailure(errorText(error, t("playit.signInFailed")));
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function logout() {
+    setAuthBusy(true);
+    try {
+      await api.playitAuthLogout();
+      authGeneration.current += 1;
+      setAuthSession(null);
+      setAgents([]);
+      setTotp("");
+      toast.success(t("playit.signedOut"));
+    } catch (error) {
+      setAuthFailure(errorText(error, t("errors.playitAction")));
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function connectDirect() {
+    setBusy(true);
+    try {
+      const result = await api.playitSetupDirect();
+      if (result.connected) {
+        toast.success(t("playit.setupDone"));
+      } else {
+        toast.success(result.message ?? t("playit.setupPending"));
+      }
+      await refresh();
+    } catch (error) {
+      toast.error(errorText(error, t("errors.playitAction")));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnectAgent() {
+    const confirmed = await dialogs.confirm({
+      title: t("playit.disconnectAgentTitle"),
+      body: t("playit.disconnectAgentBody"),
+      danger: true,
+    });
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      await api.playitAgentDisconnect();
+      toast.success(t("playit.agentDisconnected"));
+      await refresh();
+    } catch (error) {
+      toast.error(errorText(error, t("errors.playitAction")));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reconnectAgent() {
+    setBusy(true);
+    try {
+      await api.playitAgentReconnect();
+      toast.success(t("playit.agentReconnected"));
+      await refresh();
+    } catch (error) {
+      toast.error(errorText(error, t("errors.playitAction")));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteAgent(agent: PlayitAgent) {
+    const draft = agentDrafts[agent.id] ?? { moveTo: "", disable: false };
+    const confirmed = await dialogs.confirm({
+      title: t("playit.deleteAgentTitle", { name: agent.name }),
+      body: draft.moveTo
+        ? t("playit.deleteAgentMoveBody", { target: agentName(draft.moveTo) })
+        : t("playit.deleteAgentUnassignBody"),
+      danger: true,
+    });
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      await api.playitDeleteAgent(agent.id, draft.moveTo || null, draft.disable);
+      toast.success(t("playit.agentDeleted"));
+      await loadAuth();
+    } catch (error) {
+      toast.error(errorText(error, t("errors.playitAction")));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function agentName(id: string): string {
+    return agents.find((agent) => agent.id === id)?.name ?? id;
+  }
 
   async function claim() {
     setBusy(true);
@@ -359,6 +535,185 @@ export function Playit() {
                 t("playit.claimLinkUnavailable")
               )}
             </Banner>
+          </div>
+        )}
+      </Card>
+
+      <Card title={t("playit.accountSection")}>
+        {authFailure && (
+          <div class="mb-3">
+            <Banner kind="error">{authFailure}</Banner>
+          </div>
+        )}
+        {!authSession?.authenticated && !authSession?.requires_totp && (
+          <form
+            className="grid gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void login();
+            }}
+          >
+            <Field label={t("playit.email")}>
+              <Input
+                type="email"
+                autoComplete="username"
+                value={email}
+                onInput={(event) => setEmail(event.currentTarget.value)}
+              />
+            </Field>
+            <Field label={t("playit.password")}>
+              <Input
+                type="password"
+                autoComplete="current-password"
+                value={password}
+                onInput={(event) => setPassword(event.currentTarget.value)}
+              />
+            </Field>
+            <Button
+              type="button"
+              variant="primary"
+              disabled={authBusy}
+              onClick={() => void login()}
+            >
+              {authBusy ? t("playit.signingIn") : t("playit.signIn")}
+            </Button>
+          </form>
+        )}
+        {authSession?.requires_totp && (
+          <form
+            className="grid gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-end"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitTotp();
+            }}
+          >
+            <Field label={t("playit.totpCode")} hint={t("playit.totpPrompt")}>
+              <Input
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={totp}
+                onInput={(event) => setTotp(event.currentTarget.value)}
+              />
+            </Field>
+            <Button
+              type="button"
+              variant="primary"
+              disabled={authBusy}
+              onClick={() => void submitTotp()}
+            >
+              {t("playit.verify")}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={authBusy}
+              onClick={() => void logout()}
+            >
+              {t("common.cancel")}
+            </Button>
+          </form>
+        )}
+        {authSession?.authenticated && (
+          <div className="space-y-3">
+            <p className="text-sm text-fg-muted">
+              {t("playit.signedInAs", {
+                id: authSession.account_id ?? t("common.unknown"),
+                status: authSession.account_status ?? t("common.unknown"),
+              })}
+              {authSession.read_only ? ` · ${t("playit.readOnly")}` : ""}
+            </p>
+            <Actions>
+              {status?.status === "needs_claim" && (
+                <Button variant="primary" disabled={busy} onClick={() => void connectDirect()}>
+                  {busy ? t("playit.startingClaim") : t("playit.connectAccount")}
+                </Button>
+              )}
+              <Button variant="ghost" disabled={authBusy} onClick={() => void logout()}>
+                {t("playit.signOut")}
+              </Button>
+              <Button variant="ghost" disabled={busy} onClick={() => void reconnectAgent()}>
+                {t("playit.reconnectAgent")}
+              </Button>
+              <Button variant="ghost" disabled={busy} onClick={() => void disconnectAgent()}>
+                {t("playit.disconnectAgent")}
+              </Button>
+            </Actions>
+            {agentsFailure ? (
+              <Banner kind="error">{agentsFailure}</Banner>
+            ) : (
+              agents.length > 0 && (
+                <div className="space-y-2">
+                  <h3 className="text-sm font-medium">{t("playit.agentsSection")}</h3>
+                  {agents.map((agent) => {
+                    const draft = agentDrafts[agent.id] ?? { moveTo: "", disable: false };
+                    const isCurrent = agent.id === account?.agent_id;
+                    return (
+                      <div
+                        key={agent.id}
+                        className="flex flex-col gap-2 rounded-xl border border-ink-700 p-3 sm:flex-row sm:items-center"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate font-medium">{agent.name}</p>
+                          <p className="break-all font-mono text-xs text-fg-muted">{agent.id}</p>
+                          {isCurrent && (
+                            <p className="text-xs text-accent">{t("playit.currentAgent")}</p>
+                          )}
+                        </div>
+                        {!isCurrent && (
+                          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                            <Select
+                              aria-label={t("playit.moveTunnelsTo")}
+                              value={draft.moveTo}
+                              onChange={(event) =>
+                                setAgentDrafts((previous) => ({
+                                  ...previous,
+                                  [agent.id]: {
+                                    ...draft,
+                                    moveTo: event.currentTarget.value,
+                                  },
+                                }))
+                              }
+                            >
+                              <option value="">{t("playit.unassignTunnels")}</option>
+                              {agents
+                                .filter((other) => other.id !== agent.id)
+                                .map((other) => (
+                                  <option key={other.id} value={other.id}>
+                                    {other.name}
+                                  </option>
+                                ))}
+                            </Select>
+                            <label className="flex items-center gap-1 text-sm">
+                              <input
+                                type="checkbox"
+                                checked={draft.disable}
+                                onChange={(event) =>
+                                  setAgentDrafts((previous) => ({
+                                    ...previous,
+                                    [agent.id]: {
+                                      ...draft,
+                                      disable: event.currentTarget.checked,
+                                    },
+                                  }))
+                                }
+                              />
+                              {t("playit.disableTunnels")}
+                            </label>
+                            <Button
+                              variant="danger"
+                              disabled={busy}
+                              onClick={() => void deleteAgent(agent)}
+                            >
+                              {t("playit.deleteAgent")}
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )
+            )}
           </div>
         )}
       </Card>

@@ -3,7 +3,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use playit_integration::{PlayitError, ServiceErrorCode};
+use playit_integration::{AccountError, PlayitError, ServiceErrorCode};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -151,6 +151,15 @@ fn playit_status(error: &PlayitError) -> StatusCode {
     if matches!(error, PlayitError::Conflict(_)) {
         return StatusCode::CONFLICT;
     }
+    if let PlayitError::Account(account) = error {
+        return match account {
+            AccountError::NotLoggedIn
+            | AccountError::InvalidCredentials
+            | AccountError::SessionExpired => StatusCode::UNAUTHORIZED,
+            AccountError::InvalidTotp => StatusCode::BAD_REQUEST,
+            AccountError::Api(_) => StatusCode::BAD_GATEWAY,
+        };
+    }
     match error.service_code() {
         Some(ServiceErrorCode::InvalidTunnelRequest)
         | Some(ServiceErrorCode::InvalidRequest)
@@ -242,6 +251,44 @@ mod tests {
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("temporarily unavailable"));
+        assert!(!text.contains("backend detail"));
+    }
+
+    #[test]
+    fn playit_account_auth_failures_map_to_401_400_502() {
+        use playit_integration::AccountError;
+        let status = |error: PlayitError| ApiError::Playit(error).into_response().status();
+        assert_eq!(
+            status(PlayitError::Account(AccountError::NotLoggedIn)),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(PlayitError::Account(AccountError::InvalidCredentials)),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(PlayitError::Account(AccountError::SessionExpired)),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(PlayitError::Account(AccountError::InvalidTotp)),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(PlayitError::Account(AccountError::Api("detail".into()))),
+            StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[tokio::test]
+    async fn playit_account_api_failures_hide_backend_detail() {
+        let response = ApiError::Playit(PlayitError::Account(AccountError::Api(
+            "backend detail that must stay hidden".into(),
+        )))
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(!text.contains("backend detail"));
     }
 }

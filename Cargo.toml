@@ -21,11 +21,15 @@ tracing = "0.1"
 async-trait = "0.1"
 playit-ipc = {
     git = "https://github.com/nglmercer/playit-agent",
-    rev = "d20dc37da2cd54e72c8f9c83d69966bb2c9ae0a1"
+    rev = "3ba5b703d04a09e2db2fad27f718977e58fd3144"
 }
 playit-runtime = {
     git = "https://github.com/nglmercer/playit-agent",
-    rev = "d20dc37da2cd54e72c8f9c83d69966bb2c9ae0a1"
+    rev = "3ba5b703d04a09e2db2fad27f718977e58fd3144"
+}
+playit-api-client = {
+    git = "https://github.com/nglmercer/playit-agent",
+    rev = "3ba5b703d04a09e2db2fad27f718977e58fd3144"
 }
 
 # Keep the edit/check loop light on machines where full debug information is

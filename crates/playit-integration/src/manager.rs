@@ -1,31 +1,100 @@
 //! High-level Playit operations used by the panel.
+//!
+//! The manager has two logical sides sharing one owner:
+//!
+//! * the **agent side** talks to the embedded runtime (or an external daemon)
+//!   for status, lifecycle, claims, and tunnel runtime operations;
+//! * the **account side** ([`AccountController`]) talks to `api.playit.gg`
+//!   directly with a Bearer account session for login, claims, agents,
+//!   domains, and account-wide tunnels.
+//!
+//! The account session and the agent secret have independent lifecycles:
+//! expiring or logging out the account session never stops tunnels, and
+//! resetting the agent secret never needs an account session.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use playit_ipc::model::{
     AccountResponse, AccountStatus, AccountTunnelListResponse, AgentLifecycle, ServicePhase,
     SubscribeResponse, TunnelProtocol,
 };
 use playit_runtime::{PlayitRuntime, RuntimeOptions};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
+use crate::account::{session_path_for_secret, AccountController, DEFAULT_API_BASE};
 use crate::client::{IpcPlayitService, PlayitService};
 use crate::error::PlayitError;
 use crate::model::{
-    ClaimInfo, PlayitAccount, PlayitAccountStatus, PlayitConnectionState, PlayitProtocol,
-    PlayitStatus, PlayitTunnel, TunnelCreateInfo,
+    AccountSessionState, AgentInfo, ClaimDetailsInfo, ClaimInfo, DeleteAgentOptions,
+    DirectSetupResult, DomainInfo, PlayitAccount, PlayitAccountStatus, PlayitConnectionState,
+    PlayitProtocol, PlayitStatus, PlayitTunnel, TunnelCreateInfo,
 };
+
+/// Options for the account side of [`PlayitManager`].
+#[derive(Debug, Clone)]
+pub struct PlayitOptions {
+    /// playit.gg API base URL for direct account operations.
+    pub api_base: String,
+    /// File the Bearer account session is persisted to.
+    pub session_path: PathBuf,
+}
+
+impl PlayitOptions {
+    /// Options with the default API base and an explicit session path.
+    pub fn new(session_path: impl Into<PathBuf>) -> Self {
+        Self {
+            api_base: DEFAULT_API_BASE.into(),
+            session_path: session_path.into(),
+        }
+    }
+}
+
+/// Parameters the manager needs to restart its embedded runtime after a
+/// secret reset.
+#[derive(Debug, Clone)]
+struct EmbeddedParams {
+    secret_path: PathBuf,
+    api_base: String,
+}
+
+/// How long [`PlayitManager::setup_direct`] waits for the claim handshake
+/// and the agent lifecycle.
+#[derive(Debug, Clone, Copy)]
+pub struct SetupDirectOptions {
+    /// How long to wait for the account side to see the pending claim.
+    pub details_timeout: Duration,
+    /// How long to wait for the agent lifecycle to reach Running after the
+    /// claim was accepted.
+    pub running_timeout: Duration,
+    /// Poll interval for both waits.
+    pub poll_interval: Duration,
+}
+
+impl Default for SetupDirectOptions {
+    fn default() -> Self {
+        Self {
+            details_timeout: Duration::from_secs(15),
+            running_timeout: Duration::from_secs(90),
+            poll_interval: Duration::from_millis(500),
+        }
+    }
+}
 
 /// The panel-facing Playit service facade.
 ///
 /// External mode deliberately does not own a persistent IPC connection. A dead
 /// socket can therefore only fail one operation instead of poisoning the panel
-/// forever. Embedded mode owns one runtime shared by all manager clones.
+/// forever. Embedded mode owns one runtime shared by all manager clones; the
+/// service handle is swappable so a secret reset can restart the runtime
+/// into `WaitingForSecret` without rebuilding the panel state.
 #[derive(Clone)]
 pub struct PlayitManager {
-    service: Arc<dyn PlayitService>,
+    service: Arc<RwLock<Arc<dyn PlayitService>>>,
     runtime: Option<Arc<Mutex<Option<PlayitRuntime>>>>,
+    embedded: Option<EmbeddedParams>,
+    account: AccountController,
 }
 
 /// The provenance of a tunnel returned by [`PlayitManager::ensure_server_tunnel`].
@@ -74,24 +143,61 @@ impl PlayitManager {
     }
 
     /// Construct a manager using a direct, in-process Playit runtime.
+    ///
+    /// The account session is persisted next to the secret and restored
+    /// best-effort on later calls; the default playit.gg API base is used.
     pub async fn embedded(secret_path: impl Into<PathBuf>) -> Result<Self, PlayitError> {
-        let options = RuntimeOptions {
-            secret_path: secret_path.into(),
+        let secret_path = secret_path.into();
+        let session_path = session_path_for_secret(&secret_path);
+        Self::embedded_with_options(secret_path, PlayitOptions::new(session_path)).await
+    }
+
+    /// Construct an embedded manager with explicit account options.
+    pub async fn embedded_with_options(
+        secret_path: impl Into<PathBuf>,
+        options: PlayitOptions,
+    ) -> Result<Self, PlayitError> {
+        let secret_path = secret_path.into();
+        let runtime_options = RuntimeOptions {
+            secret_path: secret_path.clone(),
+            api_base: options.api_base.clone(),
             ..RuntimeOptions::default()
         };
-        let (runtime, handle) = PlayitRuntime::start(options).await?;
+        let (runtime, handle) = PlayitRuntime::start(runtime_options).await?;
 
         Ok(Self {
-            service: Arc::new(crate::embedded::EmbeddedPlayitService::new(handle)),
+            service: Arc::new(RwLock::new(
+                Arc::new(crate::embedded::EmbeddedPlayitService::new(handle))
+                    as Arc<dyn PlayitService>,
+            )),
             runtime: Some(Arc::new(Mutex::new(Some(runtime)))),
+            embedded: Some(EmbeddedParams {
+                secret_path,
+                api_base: options.api_base.clone(),
+            }),
+            account: AccountController::new(options.api_base, options.session_path),
         })
     }
 
     /// Construct a manager using the separately managed external daemon.
     pub fn external() -> Self {
+        let session_path =
+            std::env::temp_dir().join("mcpanel-playit-external-account-session.json");
+        Self::external_with_options(PlayitOptions::new(session_path))
+    }
+
+    /// Construct an external-daemon manager with explicit account options.
+    ///
+    /// The panel passes its `data/playit` session path here so direct logins
+    /// survive restarts in external mode too.
+    pub fn external_with_options(options: PlayitOptions) -> Self {
         Self {
-            service: Arc::new(IpcPlayitService),
+            service: Arc::new(RwLock::new(
+                Arc::new(IpcPlayitService) as Arc<dyn PlayitService>
+            )),
             runtime: None,
+            embedded: None,
+            account: AccountController::new(options.api_base, options.session_path),
         }
     }
 
@@ -105,14 +211,50 @@ impl PlayitManager {
     /// Construct a manager around an injected service implementation.
     ///
     /// This is primarily useful for tests and for future alternate transports.
+    /// Account operations use the default API base and an isolated scratch
+    /// session file; use [`Self::with_service_and_options`] when tests need
+    /// a controlled API base or a shared session path.
     pub fn with_service<S>(service: S) -> Self
     where
         S: PlayitService + 'static,
     {
+        let session_path = std::env::temp_dir().join(format!(
+            "mcpanel-playit-test-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        Self::with_service_and_options(
+            service,
+            PlayitOptions {
+                api_base: DEFAULT_API_BASE.into(),
+                session_path,
+            },
+        )
+    }
+
+    /// Construct a manager around an injected service with explicit account
+    /// options. Used by tests that drive the account side against a mock
+    /// HTTPS server.
+    pub fn with_service_and_options<S>(service: S, options: PlayitOptions) -> Self
+    where
+        S: PlayitService + 'static,
+    {
         Self {
-            service: Arc::new(service),
+            service: Arc::new(RwLock::new(Arc::new(service) as Arc<dyn PlayitService>)),
             runtime: None,
+            embedded: None,
+            account: AccountController::new(options.api_base, options.session_path),
         }
+    }
+
+    /// The currently active agent backend. Embedded disconnect/reconnect
+    /// swaps this when the runtime restarts, so every operation resolves it
+    /// fresh instead of holding a stale handle.
+    async fn agent_service(&self) -> Arc<dyn PlayitService> {
+        self.service.read().await.clone()
     }
 
     /// Stop the embedded runtime owned by this manager, if any.
@@ -134,7 +276,7 @@ impl PlayitManager {
 
     /// Read and normalize the Playit service's status and lifecycle.
     pub async fn status(&self) -> Result<PlayitStatus, PlayitError> {
-        let snapshot: SubscribeResponse = self.service.snapshot().await?;
+        let snapshot: SubscribeResponse = self.agent_service().await.snapshot().await?;
         let service_status = snapshot.snapshot.status;
         let lifecycle = snapshot.snapshot.lifecycle;
 
@@ -171,13 +313,13 @@ impl PlayitManager {
 
     /// Read account information without exposing its secret.
     pub async fn account(&self) -> Result<PlayitAccount, PlayitError> {
-        let account = self.service.account().await?;
+        let account = self.agent_service().await.account().await?;
         Ok(account_view(account))
     }
 
     /// Start the browser-based Playit claim flow.
     pub async fn start_claim(&self) -> Result<ClaimInfo, PlayitError> {
-        let claim = self.service.start_claim().await?;
+        let claim = self.agent_service().await.start_claim().await?;
         if claim.claim_url.trim().is_empty() {
             return Err(PlayitError::Protocol(
                 "claim response did not contain a URL".into(),
@@ -190,13 +332,29 @@ impl PlayitManager {
 
     /// List currently materialized tunnels.
     pub async fn tunnels(&self) -> Result<Vec<PlayitTunnel>, PlayitError> {
-        let response = self.service.list_tunnels().await?;
+        let response = self.agent_service().await.list_tunnels().await?;
         Ok(response.tunnels.into_iter().map(tunnel_view).collect())
     }
 
     /// List every tunnel owned by the authenticated Playit account.
+    ///
+    /// When a direct account session exists, the Bearer account API is the
+    /// source; otherwise the runtime/IPC view is used. This removes the old
+    /// "account list denied" limitation for logged-in installations while
+    /// keeping the runtime fallback for secret-only setups.
     pub async fn account_tunnels(&self) -> Result<Vec<PlayitTunnel>, PlayitError> {
-        let response = self.service.list_account_tunnels().await?;
+        if let Some(result) = self.account.account_tunnels_if_logged_in().await {
+            match result {
+                Ok(tunnels) => return Ok(tunnels),
+                Err(error) => {
+                    tracing::warn!(
+                        error = ?error,
+                        "direct Playit account tunnel list failed; falling back to the agent view"
+                    );
+                }
+            }
+        }
+        let response = self.agent_service().await.list_account_tunnels().await?;
         Ok(response
             .tunnels
             .into_iter()
@@ -240,7 +398,8 @@ impl PlayitManager {
         name: Option<String>,
     ) -> Result<TunnelCreateInfo, PlayitError> {
         let response = self
-            .service
+            .agent_service()
+            .await
             .create_tunnel(local_port, protocol.into(), local_address, name)
             .await?;
 
@@ -264,7 +423,8 @@ impl PlayitManager {
         name: Option<String>,
     ) -> Result<TunnelCreateInfo, PlayitError> {
         let response = self
-            .service
+            .agent_service()
+            .await
             .create_minecraft_java_tunnel(local_port, local_address, name)
             .await?;
 
@@ -288,7 +448,8 @@ impl PlayitManager {
         local_address: Option<String>,
     ) -> Result<(), PlayitError> {
         let response = self
-            .service
+            .agent_service()
+            .await
             .reassign_tunnel(tunnel_id, local_port, local_address)
             .await?;
         if !response.accepted {
@@ -435,7 +596,7 @@ impl PlayitManager {
 
     /// Delete a tunnel by its stable Playit id.
     pub async fn delete_tunnel(&self, tunnel_id: &str) -> Result<(), PlayitError> {
-        let response = self.service.delete_tunnel(tunnel_id).await?;
+        let response = self.agent_service().await.delete_tunnel(tunnel_id).await?;
         if !response.accepted {
             return Err(PlayitError::Rejected(
                 response
@@ -444,6 +605,336 @@ impl PlayitManager {
             ));
         }
         Ok(())
+    }
+
+    /// Sign in to playit.gg directly with email + password.
+    ///
+    /// Returns safe state only: never a session key. When the account
+    /// requires TOTP, the pending login is held in memory until
+    /// [`Self::complete_totp`] succeeds.
+    pub async fn auth_login(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> Result<AccountSessionState, PlayitError> {
+        self.account.login(email, password).await
+    }
+
+    /// Submit the TOTP code for the pending login from [`Self::auth_login`].
+    pub async fn complete_totp(&self, code: &str) -> Result<AccountSessionState, PlayitError> {
+        self.account.complete_totp(code).await
+    }
+
+    /// Delete the Bearer account session only. The agent remains running;
+    /// tunnels are untouched.
+    pub async fn auth_logout(&self) -> Result<(), PlayitError> {
+        self.account.logout().await
+    }
+
+    /// Report the locally known account session state without network access.
+    pub async fn auth_status(&self) -> AccountSessionState {
+        self.account.session_state().await
+    }
+
+    /// Validate the account session with a harmless account read.
+    pub async fn auth_validate(&self) -> Result<AccountSessionState, PlayitError> {
+        self.account.validate().await
+    }
+
+    /// List the domains visible to the logged-in account.
+    pub async fn domains(&self) -> Result<Vec<DomainInfo>, PlayitError> {
+        self.account.domains().await
+    }
+
+    /// Look up a pending machine claim as the account.
+    pub async fn claim_details(&self, code: &str) -> Result<ClaimDetailsInfo, PlayitError> {
+        self.account.claim_details(code.trim()).await
+    }
+
+    /// Approve a pending machine claim as the account, creating the agent.
+    pub async fn approve_claim(
+        &self,
+        code: &str,
+        name: Option<String>,
+    ) -> Result<String, PlayitError> {
+        let name = claim_agent_name(name)?;
+        self.account.approve_claim(code.trim(), &name).await
+    }
+
+    /// Reject a pending machine claim as the account.
+    pub async fn reject_claim(&self, code: &str) -> Result<(), PlayitError> {
+        self.account.reject_claim(code.trim()).await
+    }
+
+    /// List the agents owned by the logged-in account.
+    pub async fn list_agents(&self) -> Result<Vec<AgentInfo>, PlayitError> {
+        self.account.list_agents().await
+    }
+
+    /// Delete an account agent with an explicit tunnel strategy.
+    ///
+    /// Deleting the agent this panel's runtime is currently running on is
+    /// refused: disconnect the agent first so the operation cannot silently
+    /// orphan the local runtime.
+    pub async fn delete_agent(
+        &self,
+        agent_id: &str,
+        options: &DeleteAgentOptions,
+    ) -> Result<(), PlayitError> {
+        let target = agent_id.trim();
+        if let Ok(current) = self.agent_service().await.account().await {
+            if let Some(current_id) = current
+                .agent_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+            {
+                if ids_match(current_id, target) {
+                    return Err(PlayitError::Conflict(
+                        "refusing to delete the agent this panel is running on; disconnect the agent first".into(),
+                    ));
+                }
+            }
+        }
+        self.account.delete_agent(target, options).await
+    }
+
+    /// Browserless agent setup: claim this machine's agent under the logged-in
+    /// account with no browser redirect.
+    ///
+    /// The flow verifies the account session, starts the machine claim, looks
+    /// the code up and accepts it over the account API, then waits for the
+    /// runtime claim exchange to finish and the agent to reach Running. The
+    /// claim code stays server-side throughout. An already-configured runtime
+    /// is returned as-is, so repeated calls are idempotent. The legacy
+    /// browser claim route remains as a fallback.
+    pub async fn setup_direct(
+        &self,
+        agent_name: Option<String>,
+    ) -> Result<DirectSetupResult, PlayitError> {
+        self.setup_direct_with_options(agent_name, SetupDirectOptions::default())
+            .await
+    }
+
+    /// [`Self::setup_direct`] with injectable waits, used by tests.
+    pub async fn setup_direct_with_options(
+        &self,
+        agent_name: Option<String>,
+        options: SetupDirectOptions,
+    ) -> Result<DirectSetupResult, PlayitError> {
+        if !self.account.is_logged_in().await {
+            return Err(PlayitError::Account(
+                crate::error::AccountError::NotLoggedIn,
+            ));
+        }
+        let service = self.agent_service().await;
+        let snapshot = service.snapshot().await?;
+        let has_secret = snapshot.snapshot.status.has_secret;
+        if matches!(snapshot.snapshot.lifecycle, AgentLifecycle::Running(_)) && has_secret {
+            let agent_id = service
+                .account()
+                .await
+                .ok()
+                .and_then(|account| account.agent_id)
+                .filter(|id| !id.trim().is_empty());
+            return Ok(DirectSetupResult {
+                agent_id,
+                already_configured: true,
+                connected: true,
+                message: Some("the Playit agent is already configured".into()),
+            });
+        }
+        if !matches!(
+            snapshot.snapshot.lifecycle,
+            AgentLifecycle::WaitingForSecret
+        ) {
+            return Err(PlayitError::Conflict(
+                "the Playit agent is not ready for setup; disconnect it first or wait for it to settle".into(),
+            ));
+        }
+
+        let claim = service.start_claim().await?;
+        let code = claim_code_from_url(&claim.claim_url)?;
+        let name = claim_agent_name(agent_name)?;
+
+        // The runtime polls claim setup in the background; the account side
+        // may need a moment to see the pending claim.
+        let deadline = tokio::time::Instant::now() + options.details_timeout;
+        let details = loop {
+            match self.account.claim_details(&code).await {
+                Ok(details) => break details,
+                Err(error) if is_transient_claim_lookup(&error) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(options.poll_interval).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let _ = details;
+
+        let agent_id = self.account.approve_claim(&code, &name).await?;
+
+        // The runtime observes UserAccepted on its next poll and exchanges
+        // the code for the agent secret on its own.
+        let deadline = tokio::time::Instant::now() + options.running_timeout;
+        loop {
+            let snapshot = service.snapshot().await?;
+            if matches!(snapshot.snapshot.lifecycle, AgentLifecycle::Running(_)) {
+                return Ok(DirectSetupResult {
+                    agent_id: Some(agent_id),
+                    already_configured: false,
+                    connected: true,
+                    message: None,
+                });
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(DirectSetupResult {
+                    agent_id: Some(agent_id),
+                    already_configured: false,
+                    connected: false,
+                    message: Some(
+                        "the claim was accepted but the agent has not connected yet; check the Playit status".into(),
+                    ),
+                });
+            }
+            tokio::time::sleep(options.poll_interval).await;
+        }
+    }
+
+    /// Disconnect the agent: remove the agent secret and restart the embedded
+    /// runtime into `WaitingForSecret`. The account session is untouched.
+    /// External mode resets the daemon secret and leaves the restart to the
+    /// daemon's service manager.
+    pub async fn disconnect_agent(&self) -> Result<PlayitStatus, PlayitError> {
+        let service = self.agent_service().await;
+        let snapshot = service.snapshot().await.ok();
+        let needs_reset = snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot.snapshot.status.has_secret
+                    || !matches!(
+                        snapshot.snapshot.lifecycle,
+                        AgentLifecycle::WaitingForSecret
+                    )
+            })
+            .unwrap_or(true);
+        if needs_reset {
+            service.reset_secret().await?;
+        }
+        if self.embedded.is_some() {
+            self.restart_embedded().await?;
+        }
+        self.status().await
+    }
+
+    /// Reconnect the agent runtime: restart a stopped embedded runtime into
+    /// `WaitingForSecret` (or current secret) without touching the account
+    /// session. A running runtime is left alone and its status returned.
+    /// External mode verifies the daemon is reachable.
+    pub async fn reconnect_agent(&self) -> Result<PlayitStatus, PlayitError> {
+        if self.embedded.is_some() {
+            let restart = match &self.runtime {
+                None => true,
+                Some(runtime) => runtime.lock().await.is_none(),
+            };
+            let stopped = !restart
+                && matches!(
+                    self.agent_service()
+                        .await
+                        .snapshot()
+                        .await
+                        .map(|snapshot| snapshot.snapshot.lifecycle),
+                    Ok(AgentLifecycle::Stopping)
+                );
+            if restart || stopped {
+                self.restart_embedded().await?;
+            }
+        }
+        self.status().await
+    }
+
+    /// Stop the current embedded runtime (best-effort) and start a fresh one
+    /// from the same secret path, swapping the active backend.
+    async fn restart_embedded(&self) -> Result<(), PlayitError> {
+        let Some(params) = &self.embedded else {
+            return Err(PlayitError::Unavailable(
+                "only the embedded runtime can be restarted by the panel".into(),
+            ));
+        };
+        if let Some(runtime) = &self.runtime {
+            if let Some(previous) = runtime.lock().await.take() {
+                let _ = previous.shutdown().await;
+            }
+        }
+        let options = RuntimeOptions {
+            secret_path: params.secret_path.clone(),
+            api_base: params.api_base.clone(),
+            ..RuntimeOptions::default()
+        };
+        let (runtime, handle) = PlayitRuntime::start(options).await?;
+        *self.service.write().await =
+            Arc::new(crate::embedded::EmbeddedPlayitService::new(handle)) as Arc<dyn PlayitService>;
+        if let Some(slot) = &self.runtime {
+            *slot.lock().await = Some(runtime);
+        }
+        Ok(())
+    }
+}
+
+/// Extract the machine claim code from a `https://playit.gg/claim/{code}`
+/// URL. The code stays server-side; only safe claim details leave the panel.
+fn claim_code_from_url(claim_url: &str) -> Result<String, PlayitError> {
+    let code = claim_url
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if code.is_empty() || code.contains(|character: char| character.is_whitespace()) {
+        return Err(PlayitError::Protocol(
+            "claim response did not contain a usable claim code".into(),
+        ));
+    }
+    Ok(code.into())
+}
+
+/// Validate an operator-supplied agent name for claim approval.
+fn claim_agent_name(name: Option<String>) -> Result<String, PlayitError> {
+    let name = name
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "mcpanel".into());
+    if name.chars().count() > 64 {
+        return Err(PlayitError::Conflict(
+            "agent name must be at most 64 characters".into(),
+        ));
+    }
+    Ok(name)
+}
+
+/// Whether a claim-details failure is worth retrying while the runtime's
+/// background claim poll announces the code to the account side.
+fn is_transient_claim_lookup(error: &PlayitError) -> bool {
+    match error {
+        PlayitError::Account(crate::error::AccountError::Api(detail)) => {
+            detail.contains("has not announced its claim yet")
+        }
+        _ => false,
+    }
+}
+
+/// Compare two agent ids, tolerating UUID formatting differences.
+fn ids_match(first: &str, second: &str) -> bool {
+    if first.trim() == second.trim() {
+        return true;
+    }
+    match (
+        first.trim().parse::<uuid::Uuid>(),
+        second.trim().parse::<uuid::Uuid>(),
+    ) {
+        (Ok(first), Ok(second)) => first == second,
+        _ => false,
     }
 }
 
@@ -593,6 +1084,17 @@ impl PlayitService for UnavailablePlayitService {
     ) -> Result<playit_ipc::model::CommandResponse, PlayitError> {
         Err(PlayitError::Unavailable(self.message.clone()))
     }
+
+    async fn set_secret(
+        &self,
+        _: String,
+    ) -> Result<playit_ipc::model::CommandResponse, PlayitError> {
+        Err(PlayitError::Unavailable(self.message.clone()))
+    }
+
+    async fn reset_secret(&self) -> Result<playit_ipc::model::CommandResponse, PlayitError> {
+        Err(PlayitError::Unavailable(self.message.clone()))
+    }
 }
 
 fn account_view(account: AccountResponse) -> PlayitAccount {
@@ -724,15 +1226,16 @@ mod tests {
         Unavailable,
     }
 
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct MockService {
-        status: Mutex<ServiceStatus>,
-        lifecycle: Mutex<AgentLifecycle>,
-        account: Mutex<AccountResponse>,
-        claim: Mutex<ClaimResponse>,
-        tunnels: Mutex<TunnelListResponse>,
-        account_tunnels: Mutex<AccountTunnelListResponse>,
-        account_tunnels_failure: Mutex<Option<AccountListFailure>>,
+        status: Arc<Mutex<ServiceStatus>>,
+        lifecycle: Arc<Mutex<AgentLifecycle>>,
+        account: Arc<Mutex<AccountResponse>>,
+        claim: Arc<Mutex<ClaimResponse>>,
+        tunnels: Arc<Mutex<TunnelListResponse>>,
+        account_tunnels: Arc<Mutex<AccountTunnelListResponse>>,
+        account_tunnels_failure: Arc<Mutex<Option<AccountListFailure>>>,
+        reset_calls: Arc<Mutex<usize>>,
         created: Arc<Mutex<Vec<CreatedTunnel>>>,
         snapshot_calls: Arc<Mutex<usize>>,
         status_reads: Arc<Mutex<usize>>,
@@ -866,11 +1369,26 @@ mod tests {
                 message: None,
             })
         }
+
+        async fn set_secret(&self, _secret: String) -> Result<CommandResponse, PlayitError> {
+            Ok(CommandResponse {
+                accepted: true,
+                message: None,
+            })
+        }
+
+        async fn reset_secret(&self) -> Result<CommandResponse, PlayitError> {
+            *self.reset_calls.lock().unwrap() += 1;
+            Ok(CommandResponse {
+                accepted: true,
+                message: None,
+            })
+        }
     }
 
     fn running_service() -> MockService {
         MockService {
-            status: Mutex::new(ServiceStatus {
+            status: Arc::new(Mutex::new(ServiceStatus {
                 phase: ServicePhase::Running,
                 version: "1.2.3".into(),
                 has_secret: true,
@@ -879,8 +1397,8 @@ mod tests {
                     ..ProtocolInfo::default()
                 },
                 ..ServiceStatus::default()
-            }),
-            lifecycle: Mutex::new(AgentLifecycle::Running(Default::default())),
+            })),
+            lifecycle: Arc::new(Mutex::new(AgentLifecycle::Running(Default::default()))),
             ..MockService::default()
         }
     }
@@ -904,11 +1422,11 @@ mod tests {
     #[tokio::test]
     async fn waiting_for_secret_needs_claim() {
         let service = MockService {
-            status: Mutex::new(ServiceStatus {
+            status: Arc::new(Mutex::new(ServiceStatus {
                 phase: ServicePhase::WaitingForSecret,
                 ..ServiceStatus::default()
-            }),
-            lifecycle: Mutex::new(AgentLifecycle::WaitingForSecret),
+            })),
+            lifecycle: Arc::new(Mutex::new(AgentLifecycle::WaitingForSecret)),
             ..MockService::default()
         };
         let manager = PlayitManager::with_service(service);
@@ -939,12 +1457,12 @@ mod tests {
             ),
         ] {
             let service = MockService {
-                status: Mutex::new(ServiceStatus {
+                status: Arc::new(Mutex::new(ServiceStatus {
                     phase,
                     has_secret: false,
                     ..ServiceStatus::default()
-                }),
-                lifecycle: Mutex::new(lifecycle),
+                })),
+                lifecycle: Arc::new(Mutex::new(lifecycle)),
                 ..MockService::default()
             };
             let manager = PlayitManager::with_service(service);
@@ -999,12 +1517,12 @@ mod tests {
 
         for (lifecycle, phase, expected) in cases {
             let service = MockService {
-                status: Mutex::new(ServiceStatus {
+                status: Arc::new(Mutex::new(ServiceStatus {
                     phase,
                     has_secret: true,
                     ..ServiceStatus::default()
-                }),
-                lifecycle: Mutex::new(lifecycle),
+                })),
+                lifecycle: Arc::new(Mutex::new(lifecycle)),
                 ..MockService::default()
             };
             let manager = PlayitManager::with_service(service);
@@ -1529,5 +2047,374 @@ mod tests {
     #[tokio::test]
     async fn external_shutdown_is_a_no_op() {
         PlayitManager::external().shutdown().await.unwrap();
+    }
+
+    const MOCK_SIGNIN_OK: &str = concat!(
+        r#"{"status":"success","data":{"session_key":"manager-key","auth":{"#,
+        r#""update_version":1,"account_id":7,"timestamp":456,"#,
+        r#""account_status":"verified","totp_status":{"status":"not-setup"},"#,
+        r#""admin_id":null,"admin_review_id":null,"read_only":false,"show_admin":false}}}"#,
+    );
+    const MOCK_DETAILS_OK: &str = concat!(
+        r#"{"status":"success","data":{"agent_type":"self-managed","#,
+        r#""name":"panel-agent","remote_ip":"::1","version":"fixture"}}"#,
+    );
+    const MOCK_ACCEPT_OK: &str = concat!(
+        r#"{"status":"success","data":{"agent_id":"#,
+        r#""11111111-1111-1111-1111-111111111111"}}"#,
+    );
+    const MOCK_ACCEPT_REJECTED: &str = r#"{"status":"fail","data":"ClaimRejected"}"#;
+    const MOCK_DELETE_OK: &str = r#"{"status":"success","data":null}"#;
+    const MOCK_TUNNELS_EMPTY: &str = r#"{"status":"success","data":{"tunnels":[],"tcp_alloc":{"allowed":0,"claimed":0,"desired":0},"udp_alloc":{"allowed":0,"claimed":0,"desired":0}}}"#;
+
+    async fn mock_api(bodies: Vec<String>) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            for body in bodies {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut request = [0u8; 32 * 1024];
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(2_000),
+                    stream.read(&mut request),
+                )
+                .await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        (base, task)
+    }
+
+    fn mock_session_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "mcpanel-manager-{name}-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn short_waits() -> SetupDirectOptions {
+        SetupDirectOptions {
+            details_timeout: std::time::Duration::from_secs(5),
+            running_timeout: std::time::Duration::from_millis(300),
+            poll_interval: std::time::Duration::from_millis(10),
+        }
+    }
+
+    fn waiting_service() -> MockService {
+        MockService {
+            status: Arc::new(Mutex::new(ServiceStatus {
+                phase: ServicePhase::WaitingForSecret,
+                has_secret: false,
+                ..ServiceStatus::default()
+            })),
+            lifecycle: Arc::new(Mutex::new(AgentLifecycle::WaitingForSecret)),
+            claim: Arc::new(Mutex::new(ClaimResponse {
+                claim_url: "https://playit.gg/claim/fixturecode".into(),
+            })),
+            ..MockService::default()
+        }
+    }
+
+    #[test]
+    fn claim_code_is_extracted_from_the_claim_url() {
+        assert_eq!(
+            claim_code_from_url("https://playit.gg/claim/abc123").unwrap(),
+            "abc123"
+        );
+        assert!(claim_code_from_url("https://playit.gg/claim/").is_err());
+        assert!(claim_code_from_url("").is_err());
+        assert!(claim_code_from_url("https://playit.gg/claim/a b").is_err());
+    }
+
+    #[test]
+    fn claim_agent_names_have_a_safe_default_and_limit() {
+        assert_eq!(claim_agent_name(None).unwrap(), "mcpanel");
+        assert_eq!(
+            claim_agent_name(Some("  panel-1  ".into())).unwrap(),
+            "panel-1"
+        );
+        assert!(claim_agent_name(Some("x".repeat(65))).is_err());
+    }
+
+    #[test]
+    fn agent_ids_match_across_uuid_formatting() {
+        assert!(ids_match("abc", "abc"));
+        assert!(ids_match(
+            "11111111-1111-1111-1111-111111111111",
+            "11111111-1111-1111-1111-111111111111"
+        ));
+        assert!(ids_match(
+            "11111111-1111-1111-1111-111111111111",
+            "11111111111111111111111111111111"
+        ));
+        assert!(!ids_match(
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222"
+        ));
+    }
+
+    #[tokio::test]
+    async fn setup_direct_requires_a_login() {
+        let manager = PlayitManager::with_service(waiting_service());
+        let error = manager.setup_direct(None).await.unwrap_err();
+        assert!(matches!(
+            error,
+            PlayitError::Account(crate::error::AccountError::NotLoggedIn)
+        ));
+    }
+
+    #[tokio::test]
+    async fn setup_direct_is_idempotent_when_configured() {
+        let (base, task) = mock_api(vec![MOCK_SIGNIN_OK.to_owned()]).await;
+        let service = running_service();
+        service.account.lock().unwrap().agent_id =
+            Some("11111111-1111-1111-1111-111111111111".into());
+        let manager = PlayitManager::with_service_and_options(
+            service,
+            PlayitOptions {
+                api_base: base,
+                session_path: mock_session_path("idempotent"),
+            },
+        );
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+        // The only account call is the login: the configured runtime short-
+        // circuits before any claim traffic.
+        let result = manager.setup_direct(None).await.unwrap();
+        assert!(result.already_configured);
+        assert!(result.connected);
+        assert_eq!(
+            result.agent_id.as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn setup_direct_claims_and_waits_for_running() {
+        let (base, task) = mock_api(vec![
+            MOCK_SIGNIN_OK.to_owned(),
+            MOCK_DETAILS_OK.to_owned(),
+            MOCK_ACCEPT_OK.to_owned(),
+        ])
+        .await;
+        let service = waiting_service();
+        let control = service.clone();
+        let manager = PlayitManager::with_service_and_options(
+            service,
+            PlayitOptions {
+                api_base: base,
+                session_path: mock_session_path("setup"),
+            },
+        );
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+
+        // The runtime exchange finishing flips the lifecycle; the setup waits
+        // for it instead of returning at accept time.
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            *control.lifecycle.lock().unwrap() = AgentLifecycle::Running(Default::default());
+        });
+        let result = manager
+            .setup_direct_with_options(None, short_waits())
+            .await
+            .unwrap();
+        assert!(!result.already_configured);
+        assert!(result.connected);
+        assert_eq!(
+            result.agent_id.as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn setup_direct_reports_pending_when_exchange_is_delayed() {
+        let (base, task) = mock_api(vec![
+            MOCK_SIGNIN_OK.to_owned(),
+            MOCK_DETAILS_OK.to_owned(),
+            MOCK_ACCEPT_OK.to_owned(),
+        ])
+        .await;
+        let manager = PlayitManager::with_service_and_options(
+            waiting_service(),
+            PlayitOptions {
+                api_base: base,
+                session_path: mock_session_path("delayed"),
+            },
+        );
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+
+        let result = manager
+            .setup_direct_with_options(None, short_waits())
+            .await
+            .unwrap();
+        assert!(!result.connected);
+        assert_eq!(
+            result.agent_id.as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        assert!(result.message.is_some());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn setup_direct_surfaces_claim_rejection() {
+        let (base, task) = mock_api(vec![
+            MOCK_SIGNIN_OK.to_owned(),
+            MOCK_DETAILS_OK.to_owned(),
+            MOCK_ACCEPT_REJECTED.to_owned(),
+        ])
+        .await;
+        let manager = PlayitManager::with_service_and_options(
+            waiting_service(),
+            PlayitOptions {
+                api_base: base,
+                session_path: mock_session_path("rejected"),
+            },
+        );
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+
+        let error = manager
+            .setup_direct_with_options(None, short_waits())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("rejected"));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn delete_agent_refuses_the_current_agent() {
+        let service = running_service();
+        service.account.lock().unwrap().agent_id =
+            Some("11111111-1111-1111-1111-111111111111".into());
+        let manager = PlayitManager::with_service(service);
+        let error = manager
+            .delete_agent(
+                "11111111-1111-1111-1111-111111111111",
+                &DeleteAgentOptions {
+                    move_to_agent: None,
+                    disable_tunnels: true,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PlayitError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_agent_deletes_other_agents() {
+        let (base, task) =
+            mock_api(vec![MOCK_SIGNIN_OK.to_owned(), MOCK_DELETE_OK.to_owned()]).await;
+        let service = running_service();
+        service.account.lock().unwrap().agent_id =
+            Some("11111111-1111-1111-1111-111111111111".into());
+        let manager = PlayitManager::with_service_and_options(
+            service,
+            PlayitOptions {
+                api_base: base,
+                session_path: mock_session_path("delete"),
+            },
+        );
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+        manager
+            .delete_agent(
+                "22222222-2222-2222-2222-222222222222",
+                &DeleteAgentOptions {
+                    move_to_agent: Some("11111111-1111-1111-1111-111111111111".into()),
+                    disable_tunnels: false,
+                },
+            )
+            .await
+            .unwrap();
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn disconnect_resets_the_secret_without_touching_the_session() {
+        let (base, task) = mock_api(vec![MOCK_SIGNIN_OK.to_owned()]).await;
+        let service = MockService {
+            status: Arc::new(Mutex::new(ServiceStatus {
+                phase: ServicePhase::Running,
+                has_secret: true,
+                ..ServiceStatus::default()
+            })),
+            lifecycle: Arc::new(Mutex::new(AgentLifecycle::Running(Default::default()))),
+            ..MockService::default()
+        };
+        let resets = Arc::clone(&service.reset_calls);
+        let manager = PlayitManager::with_service_and_options(
+            service,
+            PlayitOptions {
+                api_base: base,
+                session_path: mock_session_path("disconnect"),
+            },
+        );
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+
+        let status = manager.disconnect_agent().await.unwrap();
+        assert_eq!(*resets.lock().unwrap(), 1);
+        // The account session survives the agent disconnect.
+        assert!(manager.account.is_logged_in().await);
+        assert_eq!(status.status, PlayitConnectionState::Connected);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn bearer_tunnels_win_over_the_runtime_list_when_logged_in() {
+        let (base, task) = mock_api(vec![
+            MOCK_SIGNIN_OK.to_owned(),
+            MOCK_TUNNELS_EMPTY.to_owned(),
+        ])
+        .await;
+        let service = MockService {
+            account_tunnels_failure: Arc::new(Mutex::new(Some(AccountListFailure::Unavailable))),
+            ..MockService::default()
+        };
+        let manager = PlayitManager::with_service_and_options(
+            service,
+            PlayitOptions {
+                api_base: base,
+                session_path: mock_session_path("preference"),
+            },
+        );
+        manager
+            .auth_login("user@example.com", "secret")
+            .await
+            .unwrap();
+        // The runtime list would fail; the Bearer list succeeds instead.
+        assert!(manager.account_tunnels().await.unwrap().is_empty());
+        task.abort();
     }
 }

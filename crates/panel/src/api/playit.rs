@@ -1,11 +1,12 @@
 //! Playit account, claim, and tunnel endpoints.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use playit_integration::{
-    ClaimInfo, EnsureTunnelDisposition, EnsuredServerTunnel, PlayitAccount, PlayitConnectionState,
-    PlayitProtocol, PlayitStatus, PlayitTunnel, TunnelCreateInfo,
+    AccountSessionState, AgentInfo, ClaimDetailsInfo, ClaimInfo, DeleteAgentOptions,
+    DirectSetupResult, DomainInfo, EnsureTunnelDisposition, EnsuredServerTunnel, PlayitAccount,
+    PlayitConnectionState, PlayitProtocol, PlayitStatus, PlayitTunnel, TunnelCreateInfo,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -1081,12 +1082,285 @@ fn tunnel_name(name: Option<String>) -> ApiResult<Option<String>> {
     Ok(Some(name.into()))
 }
 
+/// POST `/api/playit/auth/login`.
+///
+/// Signs in to playit.gg directly with email + password. Only safe session
+/// state is returned: the session key never leaves the server. Request
+/// bodies are never logged.
+async fn auth_login(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_admin): AdminIdentity,
+    Json(body): Json<LoginRequest>,
+) -> ApiResult<Json<AccountSessionState>> {
+    let email = valid_email(&body.email)?;
+    let password = valid_password(&body.password)?;
+    Ok(Json(state.playit.auth_login(&email, &password).await?))
+}
+
+/// POST `/api/playit/auth/totp`.
+async fn auth_totp(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_admin): AdminIdentity,
+    Json(body): Json<TotpRequest>,
+) -> ApiResult<Json<AccountSessionState>> {
+    let code = valid_totp_code(&body.code)?;
+    Ok(Json(state.playit.complete_totp(&code).await?))
+}
+
+/// GET `/api/playit/auth/session`.
+async fn auth_session(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_admin): AdminIdentity,
+) -> Json<AccountSessionState> {
+    Json(state.playit.auth_status().await)
+}
+
+/// POST `/api/playit/auth/validate`.
+async fn auth_validate(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_admin): AdminIdentity,
+) -> ApiResult<Json<AccountSessionState>> {
+    Ok(Json(state.playit.auth_validate().await?))
+}
+
+/// DELETE `/api/playit/auth/session`.
+///
+/// Logs out the playit.gg account session only. The agent keeps running and
+/// tunnels are untouched; use `/playit/agent/disconnect` to remove the agent.
+async fn auth_logout(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_admin): AdminIdentity,
+) -> ApiResult<Json<serde_json::Value>> {
+    state.playit.auth_logout().await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// POST `/api/playit/setup/direct`.
+///
+/// Single-call browserless agent setup: the panel starts the machine claim,
+/// approves it under the logged-in account, and waits for the agent to
+/// connect. The claim code never leaves the server. An already-configured
+/// agent is returned as-is.
+async fn setup_direct(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_admin): AdminIdentity,
+    Json(body): Json<DirectSetupRequest>,
+) -> ApiResult<Json<DirectSetupResult>> {
+    let name = valid_agent_name(body.name)?;
+    Ok(Json(state.playit.setup_direct(name).await?))
+}
+
+/// GET `/api/playit/claim/details?code=...`.
+async fn claim_details(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_admin): AdminIdentity,
+    Query(query): Query<ClaimCodeQuery>,
+) -> ApiResult<Json<ClaimDetailsInfo>> {
+    let code = valid_claim_code(&query.code)?;
+    Ok(Json(state.playit.claim_details(&code).await?))
+}
+
+/// POST `/api/playit/claim/approve`.
+async fn approve_claim(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_admin): AdminIdentity,
+    Json(body): Json<ApproveClaimRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let code = valid_claim_code(&body.code)?;
+    let name = valid_agent_name(body.name)?;
+    let agent_id = state.playit.approve_claim(&code, name).await?;
+    Ok(Json(
+        serde_json::json!({ "ok": true, "agent_id": agent_id }),
+    ))
+}
+
+/// POST `/api/playit/claim/reject`.
+async fn reject_claim(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_admin): AdminIdentity,
+    Json(body): Json<RejectClaimRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let code = valid_claim_code(&body.code)?;
+    state.playit.reject_claim(&code).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// GET `/api/playit/agents`.
+async fn list_agents(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_admin): AdminIdentity,
+) -> ApiResult<Json<Vec<AgentInfo>>> {
+    Ok(Json(state.playit.list_agents().await?))
+}
+
+/// DELETE `/api/playit/agents/:agent_id`.
+///
+/// The tunnel strategy is explicit: tunnels move to `move_to_agent` or are
+/// unassigned (`null`), optionally disabled. Deleting the agent this panel
+/// runs on is refused.
+async fn delete_agent(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_admin): AdminIdentity,
+    Path(agent_id): Path<String>,
+    Json(body): Json<DeleteAgentRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let options = DeleteAgentOptions {
+        move_to_agent: match body.move_to_agent {
+            None => None,
+            Some(target) if target.trim().is_empty() => None,
+            Some(target) => Some(target.trim().to_owned()),
+        },
+        disable_tunnels: body.disable_tunnels.unwrap_or(false),
+    };
+    state.playit.delete_agent(agent_id.trim(), &options).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// GET `/api/playit/domains`.
+async fn list_domains(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_admin): AdminIdentity,
+) -> ApiResult<Json<Vec<DomainInfo>>> {
+    Ok(Json(state.playit.domains().await?))
+}
+
+/// POST `/api/playit/agent/disconnect`.
+///
+/// Removes the agent secret (and restarts the embedded runtime into
+/// `WaitingForSecret`). The account session is untouched. This is distinct
+/// from logging out.
+async fn disconnect_agent(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_admin): AdminIdentity,
+) -> ApiResult<Json<PlayitStatus>> {
+    Ok(Json(safe_status(state.playit.disconnect_agent().await?)))
+}
+
+/// POST `/api/playit/agent/reconnect`.
+///
+/// Restarts a stopped embedded runtime without touching the account session.
+/// A running runtime is left alone. External mode verifies the daemon is
+/// reachable.
+async fn reconnect_agent(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_admin): AdminIdentity,
+) -> ApiResult<Json<PlayitStatus>> {
+    Ok(Json(safe_status(state.playit.reconnect_agent().await?)))
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    email: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TotpRequest {
+    code: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DirectSetupRequest {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimCodeQuery {
+    code: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApproveClaimRequest {
+    code: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RejectClaimRequest {
+    code: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteAgentRequest {
+    #[serde(default)]
+    move_to_agent: Option<String>,
+    #[serde(default)]
+    disable_tunnels: Option<bool>,
+}
+
+fn valid_email(email: &str) -> ApiResult<String> {
+    let email = email.trim();
+    if email.is_empty() || email.chars().count() > 320 {
+        return Err(ApiError::BadRequest("email must not be empty".into()));
+    }
+    Ok(email.into())
+}
+
+fn valid_password(password: &str) -> ApiResult<String> {
+    if password.is_empty() || password.len() > 4096 {
+        return Err(ApiError::BadRequest("password must not be empty".into()));
+    }
+    Ok(password.into())
+}
+
+fn valid_totp_code(code: &str) -> ApiResult<String> {
+    let code = code.trim().replace([' ', '-'], "");
+    if !(6..=8).contains(&code.len()) || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ApiError::BadRequest(
+            "totp code must be 6 to 8 digits".into(),
+        ));
+    }
+    Ok(code)
+}
+
+fn valid_claim_code(code: &str) -> ApiResult<String> {
+    let code = code.trim();
+    if code.is_empty() || code.chars().count() > 256 {
+        return Err(ApiError::BadRequest("claim code must not be empty".into()));
+    }
+    Ok(code.into())
+}
+
+fn valid_agent_name(name: Option<String>) -> ApiResult<Option<String>> {
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    if name.chars().count() > 64 {
+        return Err(ApiError::BadRequest(
+            "agent name must be at most 64 characters".into(),
+        ));
+    }
+    Ok(Some(name.into()))
+}
+
 /// Routes under `/api`.
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/playit/status", get(status))
         .route("/playit/account", get(account))
         .route("/playit/claim", post(claim))
+        .route("/playit/auth/login", post(auth_login))
+        .route("/playit/auth/totp", post(auth_totp))
+        .route(
+            "/playit/auth/session",
+            get(auth_session).delete(auth_logout),
+        )
+        .route("/playit/auth/validate", post(auth_validate))
+        .route("/playit/setup/direct", post(setup_direct))
+        .route("/playit/claim/details", get(claim_details))
+        .route("/playit/claim/approve", post(approve_claim))
+        .route("/playit/claim/reject", post(reject_claim))
+        .route("/playit/agents", get(list_agents))
+        .route("/playit/agents/{agent_id}", delete(delete_agent))
+        .route("/playit/domains", get(list_domains))
+        .route("/playit/agent/disconnect", post(disconnect_agent))
+        .route("/playit/agent/reconnect", post(reconnect_agent))
         .route("/playit/tunnels", get(list_tunnels).post(create_tunnel))
         .route("/playit/tunnels/{tunnel_id}", delete(delete_tunnel))
         .route(
@@ -1238,6 +1512,130 @@ mod tests {
             classify_server_tunnel(&test_binding(), 25565, &tunnel, "agent-1").0,
             ServerPlayitState::AgentMismatch
         );
+    }
+
+    #[test]
+    fn login_bodies_are_validated_before_any_network_call() {
+        assert_eq!(
+            valid_email("  user@example.com ").unwrap(),
+            "user@example.com"
+        );
+        assert!(valid_email("").is_err());
+        assert!(valid_email("   ").is_err());
+        assert!(valid_email(&"x".repeat(321)).is_err());
+        assert!(valid_password("secret").is_ok());
+        assert!(valid_password("").is_err());
+    }
+
+    #[test]
+    fn totp_codes_accept_formatting_but_stay_numeric() {
+        assert_eq!(valid_totp_code("123456").unwrap(), "123456");
+        assert_eq!(valid_totp_code(" 123 456 ").unwrap(), "123456");
+        assert_eq!(valid_totp_code("123-456").unwrap(), "123456");
+        assert_eq!(valid_totp_code("12345678").unwrap(), "12345678");
+        assert!(valid_totp_code("12345").is_err());
+        assert!(valid_totp_code("123456789").is_err());
+        assert!(valid_totp_code("abcdef").is_err());
+        assert!(valid_totp_code("").is_err());
+    }
+
+    #[test]
+    fn claim_codes_and_agent_names_are_bounded() {
+        assert_eq!(valid_claim_code("abc123").unwrap(), "abc123");
+        assert!(valid_claim_code("").is_err());
+        assert_eq!(valid_agent_name(None).unwrap(), None);
+        assert_eq!(valid_agent_name(Some("  ".into())).unwrap(), None);
+        assert_eq!(
+            valid_agent_name(Some(" panel-1 ".into())).unwrap(),
+            Some("panel-1".into())
+        );
+        assert!(valid_agent_name(Some("x".repeat(65))).is_err());
+    }
+
+    #[test]
+    fn auth_state_serializes_the_safe_contract() {
+        let state = AccountSessionState {
+            authenticated: true,
+            requires_totp: false,
+            account_id: Some(123),
+            account_status: Some("verified".into()),
+            read_only: false,
+        };
+        let body = serde_json::to_value(&state).unwrap();
+        assert_eq!(body["authenticated"], true);
+        assert_eq!(body["requires_totp"], false);
+        assert_eq!(body["account_id"], 123);
+        assert_eq!(body["account_status"], "verified");
+        assert_eq!(body["read_only"], false);
+        assert!(body.get("session_key").is_none());
+        assert!(body.get("password").is_none());
+    }
+
+    #[test]
+    fn agent_delete_requests_default_to_unassign_without_disabling() {
+        let body: DeleteAgentRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(body.move_to_agent, None);
+        assert_eq!(body.disable_tunnels, None);
+        let body: DeleteAgentRequest = serde_json::from_value(
+            serde_json::json!({ "move_to_agent": null, "disable_tunnels": true }),
+        )
+        .unwrap();
+        assert_eq!(body.move_to_agent, None);
+        assert_eq!(body.disable_tunnels, Some(true));
+    }
+
+    #[tokio::test]
+    async fn new_routes_are_registered_behind_admin_auth() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let state =
+            crate::state::AppState::bootstrap(data_dir.path(), crate::state::PlayitMode::External)
+                .await
+                .unwrap();
+        let app = axum::Router::new()
+            .nest(
+                "/api",
+                super::super::router_with_limits(crate::limits::ResourceLimits::default()),
+            )
+            .with_state(state);
+
+        // Every new Playit route must exist and require an admin session.
+        // Without credentials each one answers 401 before touching any body.
+        for (method, uri) in [
+            ("POST", "/api/playit/auth/login"),
+            ("POST", "/api/playit/auth/totp"),
+            ("GET", "/api/playit/auth/session"),
+            ("DELETE", "/api/playit/auth/session"),
+            ("POST", "/api/playit/auth/validate"),
+            ("POST", "/api/playit/setup/direct"),
+            ("GET", "/api/playit/claim/details?code=abc"),
+            ("POST", "/api/playit/claim/approve"),
+            ("POST", "/api/playit/claim/reject"),
+            ("GET", "/api/playit/agents"),
+            (
+                "DELETE",
+                "/api/playit/agents/11111111-1111-1111-1111-111111111111",
+            ),
+            ("GET", "/api/playit/domains"),
+            ("POST", "/api/playit/agent/disconnect"),
+            ("POST", "/api/playit/agent/reconnect"),
+            ("GET", "/api/playit/status"),
+        ] {
+            let request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
+        }
     }
 
     #[test]

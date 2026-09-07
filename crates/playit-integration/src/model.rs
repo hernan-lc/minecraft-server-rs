@@ -117,3 +117,79 @@ pub struct TunnelCreateInfo {
     /// Optional Playit service message.
     pub message: Option<String>,
 }
+
+/// The safe account-session state returned by the direct-login endpoints.
+///
+/// This never contains the session key, the password, or a TOTP code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountSessionState {
+    /// Whether an account session (or a pending TOTP login) is active.
+    pub authenticated: bool,
+    /// Whether a TOTP code must still be submitted for the pending login.
+    pub requires_totp: bool,
+    /// The playit.gg account id, when a session or pending login exists.
+    pub account_id: Option<u64>,
+    /// The account status reported by playit.gg (`verified`,
+    /// `email-not-verified`, `guest`) or `unknown` for a session restored
+    /// from disk that has not been re-validated yet.
+    pub account_status: Option<String>,
+    /// Whether the session token is marked read-only.
+    pub read_only: bool,
+}
+
+/// A playit.gg agent owned by the logged-in account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInfo {
+    /// Stable agent identifier.
+    pub id: String,
+    /// Operator-facing agent name.
+    pub name: String,
+}
+
+/// The tunnel strategy for deleting a playit.gg agent.
+///
+/// Deletion never silently drops tunnels: they are either moved to another
+/// agent or explicitly unassigned, with optional disabling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteAgentOptions {
+    /// Move the deleted agent's tunnels to this agent, or unassign them
+    /// when `None`.
+    pub move_to_agent: Option<String>,
+    /// Disable the affected tunnels instead of leaving them enabled.
+    pub disable_tunnels: bool,
+}
+
+/// What the account side sees for a pending machine claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimDetailsInfo {
+    /// The agent type the runtime registered (`self-managed` normally).
+    pub agent_type: String,
+    /// The agent name proposed by the claiming machine.
+    pub name: String,
+    /// The remote IP observed by playit.gg.
+    pub remote_ip: String,
+    /// The agent version reported by the claiming machine.
+    pub version: String,
+}
+
+/// The outcome of the single-call browserless agent setup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectSetupResult {
+    /// The agent created (or already configured), when known.
+    pub agent_id: Option<String>,
+    /// Whether the runtime was already configured and no claim ran.
+    pub already_configured: bool,
+    /// Whether the agent lifecycle reached Running.
+    pub connected: bool,
+    /// A human-readable note, e.g. why the agent is not connected yet.
+    pub message: Option<String>,
+}
+
+/// A domain visible to the logged-in playit.gg account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomainInfo {
+    /// Stable domain identifier.
+    pub id: String,
+    /// The domain name.
+    pub name: String,
+}
