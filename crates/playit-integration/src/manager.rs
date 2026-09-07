@@ -147,12 +147,16 @@ pub struct ChangeAccountOptions {
 /// A change-account flow paused while its new account waits for TOTP.
 ///
 /// Held only in memory, like the pending TOTP login itself. It contains
-/// no password and no TOTP code: only what the continuation needs to
-/// finish claiming and healing without further operator steps.
+/// no password, no TOTP code, and no tokens: only what the continuation
+/// needs to finish claiming and healing without further operator steps.
+/// The account id binds the paused change to the login it was captured
+/// for, so a later unrelated TOTP login can never trigger a stale
+/// continuation.
 #[derive(Debug, Clone)]
 struct PendingAccountChange {
     agent_name: Option<String>,
     server_ids: Vec<String>,
+    account_id: u64,
 }
 
 /// The outcome of finishing a TOTP-pending account change.
@@ -888,8 +892,20 @@ impl PlayitManager {
     }
 
     /// Submit the TOTP code for the pending login from [`Self::auth_login`].
+    ///
+    /// A rejected code keeps both the pending login and any paused account
+    /// change so the operator can retry. An expired or missing attempt can
+    /// never complete, so a paused change bound to it is dropped instead of
+    /// lingering for a future unrelated login.
     pub async fn complete_totp(&self, code: &str) -> Result<AccountSessionState, PlayitError> {
-        self.account.complete_totp(code).await
+        let result = self.account.complete_totp(code).await;
+        if matches!(
+            result,
+            Err(PlayitError::Account(AccountError::SessionExpired))
+        ) {
+            *self.pending_change.lock().await = None;
+        }
+        result
     }
 
     /// Delete the Bearer account session only. The agent remains running;
@@ -941,10 +957,15 @@ impl PlayitManager {
         if session.requires_totp {
             // Pause the flow with no credentials retained: the TOTP
             // continuation finishes the claim and the server recovery.
-            *self.pending_change.lock().await = Some(PendingAccountChange {
-                agent_name: options.agent_name,
-                server_ids: options.server_ids,
-            });
+            // The pending login always carries the new account id, which
+            // binds the paused change to this login attempt.
+            if let Some(account_id) = session.account_id {
+                *self.pending_change.lock().await = Some(PendingAccountChange {
+                    agent_name: options.agent_name,
+                    server_ids: options.server_ids,
+                    account_id,
+                });
+            }
             return Ok(ChangeAccountResult {
                 session,
                 setup: None,
@@ -965,13 +986,19 @@ impl PlayitManager {
     /// Runs the browserless setup for the new account and reports which
     /// servers the caller should reconcile. Without a paused change this
     /// is a no-op success, so plain TOTP logins share the same call path.
-    /// A setup failure is reported inside the result (never silently
-    /// dropped): the session itself is live, so the operator can retry
-    /// with a direct setup instead of losing the login.
+    /// The paused change only continues when the live session is the
+    /// account it was captured for; a stale entry left behind by an
+    /// abandoned change is discarded instead of running under an unrelated
+    /// login. A setup failure is reported inside the result (never
+    /// silently dropped): the session itself is live, so the operator can
+    /// retry with a direct setup instead of losing the login.
     pub async fn finish_pending_change(&self) -> Result<PendingChangeResult, PlayitError> {
         let Some(pending) = self.pending_change.lock().await.take() else {
             return Ok(PendingChangeResult::default());
         };
+        if self.account.session_state().await.account_id != Some(pending.account_id) {
+            return Ok(PendingChangeResult::default());
+        }
         match self.setup_direct(pending.agent_name).await {
             Ok(setup) => Ok(PendingChangeResult {
                 setup: Some(setup),
@@ -3062,6 +3089,7 @@ mod tests {
         r#""account_status":"verified","totp_status":{"status":"signed","epoch_sec":789},"#,
         r#""admin_id":null,"admin_review_id":null,"read_only":false,"show_admin":false}}}"#,
     );
+    const MOCK_TOTP_BAD: &str = r#"{"status":"fail","data":"InvalidCode"}"#;
     const MOCK_TUNNEL_NOT_FOUND: &str = r#"{"status":"fail","data":"TunnelNotFound"}"#;
     const MATCHED_AGENT_ID: &str = "00000000-0000-0000-0000-000000000002";
     const FOREIGN_AGENT_ID: &str = "11111111-1111-1111-1111-111111111111";
@@ -3436,6 +3464,103 @@ mod tests {
         manager.auth_logout().await.unwrap();
         let finished = manager.finish_pending_change().await.unwrap();
         assert!(finished.setup.is_none());
+        assert!(finished.server_ids.is_empty());
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn invalid_totp_keeps_the_paused_change_for_retry() {
+        let (base, task) = mock_api(vec![
+            MOCK_SIGNIN_TOTP.to_owned(),
+            MOCK_TOTP_BAD.to_owned(),
+            MOCK_TOTP_OK.to_owned(),
+        ])
+        .await;
+        let manager = manager_with_api(running_service(), base, "change-totp-retry");
+        manager
+            .change_account(
+                "new@example.com",
+                "secret",
+                ChangeAccountOptions {
+                    server_ids: vec!["srv-1".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // A wrong code fails without dropping the paused change.
+        let error = manager.complete_totp("000000").await.unwrap_err();
+        assert!(matches!(
+            error,
+            PlayitError::Account(AccountError::InvalidTotp)
+        ));
+
+        // The retry still completes the same paused change automatically.
+        let session = manager.complete_totp("123456").await.unwrap();
+        assert!(session.authenticated);
+        let finished = manager.finish_pending_change().await.unwrap();
+        assert!(finished.setup.is_some());
+        assert_eq!(finished.server_ids, vec!["srv-1".to_owned()]);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn expired_totp_attempt_drops_the_paused_change() {
+        let manager = PlayitManager::with_service(running_service());
+        // Seed a stale paused change directly: this is the state left when
+        // the TOTP attempt it belonged to expired on the wall clock (the
+        // pending login is already gone, so no network is touched below).
+        *manager.pending_change.lock().await = Some(PendingAccountChange {
+            agent_name: None,
+            server_ids: vec!["srv-1".into()],
+            account_id: 9,
+        });
+
+        let error = manager.complete_totp("123456").await.unwrap_err();
+        assert!(matches!(
+            error,
+            PlayitError::Account(AccountError::SessionExpired)
+        ));
+
+        // The stale entry was dropped, not left for a future login.
+        let finished = manager.finish_pending_change().await.unwrap();
+        assert!(finished.setup.is_none());
+        assert!(finished.setup_error.is_none());
+        assert!(finished.server_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_paused_change_is_discarded_after_an_unrelated_login() {
+        // MOCK_SIGNIN_TOTP pauses a change for account 9; MOCK_SIGNIN_OK
+        // logs straight into account 7.
+        let (base, task) =
+            mock_api(vec![MOCK_SIGNIN_TOTP.to_owned(), MOCK_SIGNIN_OK.to_owned()]).await;
+        let manager = manager_with_api(running_service(), base, "change-stale");
+        manager
+            .change_account(
+                "new@example.com",
+                "secret",
+                ChangeAccountOptions {
+                    server_ids: vec!["srv-1".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // The operator abandons the change and signs into another account.
+        let session = manager
+            .auth_login("other@example.com", "secret")
+            .await
+            .unwrap();
+        assert!(session.authenticated);
+        assert_eq!(session.account_id, Some(7));
+
+        // The stale paused change must not run under the unrelated login.
+        let finished = manager.finish_pending_change().await.unwrap();
+        assert!(finished.setup.is_none());
+        assert!(finished.setup_error.is_none());
         assert!(finished.server_ids.is_empty());
         task.abort();
     }
