@@ -2545,6 +2545,7 @@ dependencies = [
  "minecraft-core",
  "password-hash",
  "playit-integration",
+ "playit-runtime",
  "rand 0.9.5",
  "reqwest",
  "rust-embed",

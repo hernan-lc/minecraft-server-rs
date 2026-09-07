@@ -87,14 +87,16 @@ impl IntoResponse for ApiError {
 
         let message = match &self {
             ApiError::Playit(_) if status.is_server_error() => {
-                "external service unavailable".into()
+                playit_unavailable_message(&self).unwrap_or("external service unavailable".into())
             }
             // Conflict messages describe an account/tunnel ambiguity that
             // the operator must resolve; hiding them behind a generic 409
             // makes recovery impossible. They contain no credentials because
             // the integration only constructs them from public tunnel data.
             ApiError::Playit(PlayitError::Conflict(_)) => self.to_string(),
-            ApiError::Playit(_) => "external service request failed".into(),
+            ApiError::Playit(error) => {
+                playit_client_message(error).unwrap_or("external service request failed".into())
+            }
             _ => self.to_string(),
         };
         (status, Json(json!({ "error": message }))).into_response()
@@ -103,6 +105,47 @@ impl IntoResponse for ApiError {
 
 /// Handler result alias.
 pub type ApiResult<T> = Result<T, ApiError>;
+
+/// A safe, actionable message for Playit server-side failures. Secrets,
+/// paths, and raw backend bodies are never exposed; only known recoverable
+/// conditions get specific wording.
+fn playit_unavailable_message(error: &ApiError) -> Option<String> {
+    let ApiError::Playit(playit) = error else {
+        return None;
+    };
+    match playit.service_code()? {
+        ServiceErrorCode::AgentDisabledOverLimit => Some(
+            "Playit has disabled this agent because the account agent limit was reached. Reuse an existing Playit agent or remove an unused agent in Playit.".into(),
+        ),
+        ServiceErrorCode::InvalidSecret | ServiceErrorCode::SecretPinned => Some(
+            "The saved Playit connection is no longer valid. Reconnect the Playit account.".into(),
+        ),
+        ServiceErrorCode::ApiUnavailable | ServiceErrorCode::ProvisioningUnavailable => {
+            Some("Playit is temporarily unavailable. Try again shortly.".into())
+        }
+        ServiceErrorCode::SecretWriteFailed => {
+            Some("Playit is temporarily unavailable. Try again shortly.".into())
+        }
+        _ => None,
+    }
+}
+
+/// A safe message for Playit client-side failures with known actionable
+/// meanings. Returns `None` when only the generic message applies.
+fn playit_client_message(error: &PlayitError) -> Option<String> {
+    match error.service_code()? {
+        ServiceErrorCode::AgentDisabledOverLimit => Some(
+            "Playit has disabled this agent because the account agent limit was reached. Reuse an existing Playit agent or remove an unused agent in Playit.".into(),
+        ),
+        ServiceErrorCode::InvalidSecret | ServiceErrorCode::SecretPinned => Some(
+            "The saved Playit connection is no longer valid. Reconnect the Playit account.".into(),
+        ),
+        ServiceErrorCode::ApiUnavailable | ServiceErrorCode::ProvisioningUnavailable => {
+            Some("Playit is temporarily unavailable. Try again shortly.".into())
+        }
+        _ => None,
+    }
+}
 
 fn playit_status(error: &PlayitError) -> StatusCode {
     if matches!(error, PlayitError::Conflict(_)) {
@@ -159,5 +202,46 @@ mod tests {
     fn sandbox_policy_errors_are_conflicts_without_internal_paths() {
         let response = ApiError::Guardian(guardian::Error::SandboxUnavailable).into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    fn runtime_api_error(code: ServiceErrorCode) -> ApiError {
+        ApiError::Playit(playit_integration::PlayitError::Runtime(
+            playit_runtime::RuntimeError::Api {
+                code,
+                message: "backend detail that must stay hidden".into(),
+                retryable: false,
+                details: None,
+            },
+        ))
+    }
+
+    #[tokio::test]
+    async fn playit_agent_limit_reports_an_actionable_message() {
+        let response = runtime_api_error(ServiceErrorCode::AgentDisabledOverLimit).into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("agent limit was reached"));
+        assert!(!text.contains("backend detail"));
+    }
+
+    #[tokio::test]
+    async fn playit_invalid_secret_reports_reconnect_without_details() {
+        let response = runtime_api_error(ServiceErrorCode::InvalidSecret).into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("no longer valid"));
+        assert!(!text.contains("backend detail"));
+    }
+
+    #[tokio::test]
+    async fn playit_unavailable_reports_retry_without_details() {
+        let response = runtime_api_error(ServiceErrorCode::ApiUnavailable).into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("temporarily unavailable"));
+        assert!(!text.contains("backend detail"));
     }
 }

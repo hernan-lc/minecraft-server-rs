@@ -350,6 +350,80 @@ mod tests {
     use super::*;
     use crate::auth::LoginLimiter;
 
+    async fn state_with_user(username: &str, password: &str) -> Arc<AppState> {
+        let dir = tempfile::tempdir().unwrap();
+        let state =
+            crate::state::AppState::bootstrap(dir.path(), crate::state::PlayitMode::External)
+                .await
+                .unwrap();
+        std::mem::forget(dir);
+        let hash = tokio::task::spawn_blocking({
+            let password = password.to_owned();
+            move || crate::auth::hash_password(&password)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let username = username.to_owned();
+        state
+            .store
+            .update(move |data| {
+                data.users.push(crate::store::User {
+                    username: username.clone(),
+                    password_hash: hash.clone(),
+                    admin: true,
+                    servers: Vec::new(),
+                });
+            })
+            .await
+            .unwrap();
+        state
+    }
+
+    async fn login_response_body(
+        state: &Arc<AppState>,
+        username: &str,
+        password: &str,
+    ) -> (axum::http::StatusCode, String) {
+        let result = login(
+            State(Arc::clone(state)),
+            HeaderMap::new(),
+            None,
+            Json(LoginRequest {
+                username: username.into(),
+                password: password.into(),
+            }),
+        )
+        .await;
+        let response = match result {
+            Ok(_) => panic!("login with bad credentials must not succeed"),
+            Err(error) => error.into_response(),
+        };
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn unknown_user_and_wrong_password_are_indistinguishable_401s() {
+        let state = state_with_user("admin", "correct-horse-batterystaple").await;
+
+        let (unknown_status, unknown_body) =
+            login_response_body(&state, "nobody", "whatever-password").await;
+        let (wrong_status, wrong_body) =
+            login_response_body(&state, "admin", "wrong-password").await;
+
+        assert_eq!(unknown_status, axum::http::StatusCode::UNAUTHORIZED);
+        assert_eq!(wrong_status, axum::http::StatusCode::UNAUTHORIZED);
+        assert_eq!(unknown_body, wrong_body);
+        assert!(!unknown_body.contains("nobody"));
+        assert!(!unknown_body.contains("does not exist"));
+
+        state.playit.shutdown().await.unwrap();
+    }
+
     fn peer(address: SocketAddr) -> Extension<ConnectInfo<SocketAddr>> {
         Extension(ConnectInfo(address))
     }

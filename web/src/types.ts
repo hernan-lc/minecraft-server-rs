@@ -87,12 +87,17 @@ export type ServerPlayitState =
   | "ambiguous"
   | "unavailable";
 
+/** How a server tunnel attach obtained its tunnel. Mirrors the backend. */
+export type PlayitAttachDisposition = "created" | "reused" | "updated";
+
 export interface ServerPlayitView {
   state: ServerPlayitState;
   binding: PlayitBinding | null;
   tunnel: PlayitTunnel | null;
   message: string | null;
   cleanup_pending: boolean;
+  /** Present only on responses that directly follow an attach. */
+  disposition?: PlayitAttachDisposition | null;
 }
 
 /** Mirrors the flattened `ServerView` returned by the API. */

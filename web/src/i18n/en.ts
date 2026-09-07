@@ -140,8 +140,8 @@ export const en = {
     serverExplain: "Create a Minecraft Java tunnel to a server's local Minecraft port.",
     server: "Server",
     chooseServer: "Choose a server",
-    createServerTunnel: "Create tunnel",
-    connectBeforeTunnel: "Connect Playit before creating a tunnel.",
+    createServerTunnel: "Connect server",
+    connectBeforeTunnel: "Connect Playit before connecting a server.",
     serverCardTitle: "Playit tunnel",
     serverStates: {
       disabled: "Not configured",
@@ -175,7 +175,9 @@ export const en = {
     deleteTunnelTitle: "Delete tunnel for {name}?",
     detachTunnelBody: "This removes the Playit tunnel and its server association.",
     deleteTunnelBody: "This removes the tunnel from Playit.",
-    tunnelCreated: "Playit tunnel created.",
+    tunnelCreated: "New Playit tunnel created.",
+    tunnelReused: "Existing Playit tunnel reused.",
+    tunnelUpdated: "Existing Playit tunnel updated.",
     tunnelDeleted: "Playit tunnel deleted.",
     copyAddress: "Copy address",
     addressCopied: "Address copied.",
@@ -421,7 +423,9 @@ export const en = {
     loadPlayitTunnels: "Could not load Playit tunnels.",
     playitAction: "The Playit action failed.",
     actionFailed: "That action failed.",
-    sessionExpired: "Your session expired. Sign in again.",
+    sessionExpired: "Your session has expired. Sign in again.",
+    invalidCredentials: "Invalid username or password.",
+    forbidden: "You do not have permission to perform this action.",
   },
 } as const;
 

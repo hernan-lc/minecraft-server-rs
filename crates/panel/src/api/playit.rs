@@ -47,6 +47,29 @@ pub enum ServerPlayitState {
     Unavailable,
 }
 
+/// How a server tunnel attach obtained its tunnel, when the response is the
+/// direct result of an attach operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayitAttachDisposition {
+    /// A new tunnel was created.
+    Created,
+    /// An existing tunnel was reused unchanged.
+    Reused,
+    /// An existing tunnel was updated/reassigned in place.
+    Updated,
+}
+
+impl From<&EnsureTunnelDisposition> for PlayitAttachDisposition {
+    fn from(disposition: &EnsureTunnelDisposition) -> Self {
+        match disposition {
+            EnsureTunnelDisposition::Created => Self::Created,
+            EnsureTunnelDisposition::Reused => Self::Reused,
+            EnsureTunnelDisposition::Updated { .. } => Self::Updated,
+        }
+    }
+}
+
 /// A safe server-scoped Playit response.
 #[derive(Debug, Serialize)]
 pub struct ServerPlayitView {
@@ -60,6 +83,9 @@ pub struct ServerPlayitView {
     pub message: Option<String>,
     /// A remote deletion remains in the durable cleanup queue.
     pub cleanup_pending: bool,
+    /// How the tunnel was obtained, when this response follows an attach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<PlayitAttachDisposition>,
 }
 
 /// GET `/api/playit/status`.
@@ -120,14 +146,15 @@ struct CreateTunnelRequest {
 
 /// GET `/api/playit/tunnels`.
 ///
-/// The account-level API is used here so tunnels assigned to another Playit
+/// The account-level list is preferred so tunnels assigned to another Playit
 /// agent are visible and can be identified before an operator creates another
-/// one.
+/// one. When the account endpoint is denied, the current-agent materialized
+/// list is returned instead of failing the whole Playit page with 403.
 async fn list_tunnels(
     State(state): State<Arc<AppState>>,
     AdminIdentity(_admin): AdminIdentity,
 ) -> ApiResult<Json<Vec<PlayitTunnel>>> {
-    Ok(Json(state.playit.account_tunnels().await?))
+    Ok(Json(state.playit.visible_tunnels().await?))
 }
 
 /// POST `/api/playit/tunnels`.
@@ -262,53 +289,34 @@ async fn attach_server_playit(
     }
     let current_agent_id = required_current_agent_id(&state).await?;
 
+    // An operator-supplied display name is presentation metadata only: it is
+    // used when a new tunnel must be created, and never bypasses the reuse
+    // logic that keeps repeated attaches idempotent.
+    let custom_name = tunnel_name(body.name)?;
     let ensured = if let Some(existing_binding) = previous_binding.as_ref() {
         match inspect_existing_binding(&state, &record, existing_binding, &current_agent_id).await?
         {
             ExistingBinding::Present(ensured) => ensured,
-            ExistingBinding::Missing => match tunnel_name(body.name)? {
-                // A retry is an explicit repair request. The stable matcher
-                // still runs first, so a missing stale id cannot create a
-                // duplicate when the same managed tunnel is visible again.
-                None => {
-                    state
-                        .playit
-                        .ensure_server_tunnel(&id, &record.name, record.config.port)
-                        .await?
-                }
-                Some(name) => EnsuredServerTunnel {
-                    tunnel: state
-                        .playit
-                        .create_minecraft_java_tunnel(
-                            record.config.port,
-                            Some("127.0.0.1".into()),
-                            Some(name),
-                        )
-                        .await?,
-                    disposition: EnsureTunnelDisposition::Created,
-                },
-            },
-        }
-    } else {
-        match tunnel_name(body.name)? {
-            None => {
+            // A retry is an explicit repair request. The stable matcher
+            // still runs first, so a missing stale id cannot create a
+            // duplicate when the same managed tunnel is visible again.
+            ExistingBinding::Missing => {
                 state
                     .playit
-                    .ensure_server_tunnel(&id, &record.name, record.config.port)
+                    .ensure_server_tunnel_with_name(
+                        &id,
+                        &record.name,
+                        record.config.port,
+                        custom_name,
+                    )
                     .await?
             }
-            Some(name) => EnsuredServerTunnel {
-                tunnel: state
-                    .playit
-                    .create_minecraft_java_tunnel(
-                        record.config.port,
-                        Some("127.0.0.1".into()),
-                        Some(name),
-                    )
-                    .await?,
-                disposition: EnsureTunnelDisposition::Created,
-            },
         }
+    } else {
+        state
+            .playit
+            .ensure_server_tunnel_with_name(&id, &record.name, record.config.port, custom_name)
+            .await?
     };
 
     let binding = PlayitBinding {
@@ -381,12 +389,15 @@ async fn attach_server_playit(
     }
 
     record.playit = Some(binding);
-    Ok(Json(server_playit_view(&state, &record).await))
+    let disposition = PlayitAttachDisposition::from(&ensured.disposition);
+    let mut view = server_playit_view(&state, &record).await;
+    view.disposition = Some(disposition);
+    Ok(Json(view))
 }
 
 /// Compensate an attach whose remote ensure succeeded but whose local commit
 /// did not. A newly-created tunnel is deleted; if that delete is unavailable,
-/// retain it in the durable cleanup queue. Reused and reassigned tunnels are
+/// retain it in the durable cleanup queue. Reused and updated tunnels are
 /// always preserved by the manager.
 async fn compensate_attach_failure(
     state: &AppState,
@@ -465,7 +476,10 @@ async fn inspect_existing_binding(
         ));
     }
 
-    let tunnels = state.playit.account_tunnels().await?;
+    // Use the resilient tunnel source: when the account-wide list is
+    // denied, what is visible on the current agent is enough to repair the
+    // stored binding instead of failing the attach.
+    let tunnels = state.playit.visible_tunnels().await?;
     let matches: Vec<_> = tunnels
         .into_iter()
         .filter(|tunnel| tunnel.id == binding.tunnel_id)
@@ -489,7 +503,13 @@ async fn inspect_existing_binding(
                 .unwrap_or_default()
         )));
     }
-    if tunnel.tunnel_type.as_deref() != Some("minecraft-java") {
+    // The current-agent fallback list carries no semantic tunnel type, so
+    // `None` is unknown-but-repairable when the stored id matched exactly.
+    if tunnel
+        .tunnel_type
+        .as_deref()
+        .is_some_and(|kind| kind != "minecraft-java")
+    {
         return Err(ApiError::Conflict(
             "the stored Playit tunnel is not a Minecraft Java tunnel".into(),
         ));
@@ -500,10 +520,14 @@ async fn inspect_existing_binding(
         ));
     }
 
-    let needs_reassignment = tunnel.agent_id.as_deref() != Some(current_agent_id)
-        || tunnel.local_address.as_deref() != Some(binding.local_address.as_str())
+    // A live tunnel whose destination drifted (e.g. the server port changed)
+    // or whose agent changed is repaired in place: the same tunnel id is
+    // kept and reassigned rather than duplicated.
+    let destination_changed = tunnel.local_address.as_deref()
+        != Some(binding.local_address.as_str())
         || tunnel.local_port != Some(record.config.port);
-    if needs_reassignment {
+    let agent_changed = tunnel.agent_id.as_deref() != Some(current_agent_id);
+    if destination_changed || agent_changed {
         state
             .playit
             .reassign_tunnel(
@@ -515,10 +539,11 @@ async fn inspect_existing_binding(
         return Ok(ExistingBinding::Present(EnsuredServerTunnel {
             tunnel: TunnelCreateInfo {
                 tunnel_id: binding.tunnel_id.clone(),
-                message: Some("Existing Minecraft Java tunnel reconciled".into()),
+                message: Some("Existing Minecraft Java tunnel updated".into()),
             },
-            disposition: EnsureTunnelDisposition::Reassigned {
+            disposition: EnsureTunnelDisposition::Updated {
                 previous_agent_id: tunnel.agent_id,
+                destination_changed,
             },
         }));
     }
@@ -730,6 +755,7 @@ async fn server_playit_view(state: &AppState, record: &ServerRecord) -> ServerPl
                 "The local Playit association is cleared; remote tunnel cleanup is pending".into(),
             ),
             cleanup_pending,
+            disposition: None,
         };
     };
 
@@ -743,6 +769,7 @@ async fn server_playit_view(state: &AppState, record: &ServerRecord) -> ServerPl
                 tunnel: None,
                 message: Some("Playit service unavailable".into()),
                 cleanup_pending,
+                disposition: None,
             };
         }
     };
@@ -756,6 +783,7 @@ async fn server_playit_view(state: &AppState, record: &ServerRecord) -> ServerPl
                 tunnel: None,
                 message: Some("Playit is reconnecting; tunnel state is not trusted yet".into()),
                 cleanup_pending,
+                disposition: None,
             };
         }
         PlayitConnectionState::Connected => {}
@@ -766,6 +794,7 @@ async fn server_playit_view(state: &AppState, record: &ServerRecord) -> ServerPl
                 tunnel: None,
                 message: Some("Playit account needs to be claimed".into()),
                 cleanup_pending,
+                disposition: None,
             };
         }
         PlayitConnectionState::Unavailable
@@ -777,6 +806,7 @@ async fn server_playit_view(state: &AppState, record: &ServerRecord) -> ServerPl
                 tunnel: None,
                 message: Some("Playit service unavailable".into()),
                 cleanup_pending,
+                disposition: None,
             };
         }
     }
@@ -791,6 +821,7 @@ async fn server_playit_view(state: &AppState, record: &ServerRecord) -> ServerPl
                 tunnel: None,
                 message: Some("Playit account unavailable".into()),
                 cleanup_pending,
+                disposition: None,
             };
         }
     };
@@ -805,6 +836,7 @@ async fn server_playit_view(state: &AppState, record: &ServerRecord) -> ServerPl
             tunnel: None,
             message: Some("The current Playit agent is not known yet".into()),
             cleanup_pending,
+            disposition: None,
         };
     };
 
@@ -821,10 +853,13 @@ async fn server_playit_view(state: &AppState, record: &ServerRecord) -> ServerPl
                 "The stored Playit association belongs to a different account or agent".into(),
             ),
             cleanup_pending,
+            disposition: None,
         };
     }
 
-    let tunnels = match state.playit.account_tunnels().await {
+    // The resilient tunnel source keeps per-server views working when the
+    // account-wide list is denied but the current agent still sees tunnels.
+    let tunnels = match state.playit.visible_tunnels().await {
         Ok(tunnels) => tunnels,
         Err(error) => {
             tracing::warn!(error = ?error, "Playit status unavailable for server view");
@@ -834,6 +869,7 @@ async fn server_playit_view(state: &AppState, record: &ServerRecord) -> ServerPl
                 tunnel: None,
                 message: Some("Playit service unavailable".into()),
                 cleanup_pending,
+                disposition: None,
             };
         }
     };
@@ -849,6 +885,7 @@ async fn server_playit_view(state: &AppState, record: &ServerRecord) -> ServerPl
             tunnel: None,
             message: Some("Playit returned duplicate records for this tunnel id".into()),
             cleanup_pending,
+            disposition: None,
         };
     }
     let Some(tunnel) = matches.into_iter().next() else {
@@ -867,6 +904,7 @@ async fn server_playit_view(state: &AppState, record: &ServerRecord) -> ServerPl
                 _ => unreachable!("missing tunnel only has provisioning or missing states"),
             }),
             cleanup_pending,
+            disposition: None,
         };
     };
 
@@ -879,6 +917,7 @@ async fn server_playit_view(state: &AppState, record: &ServerRecord) -> ServerPl
         tunnel: Some(tunnel),
         message,
         cleanup_pending,
+        disposition: None,
     }
 }
 
@@ -901,13 +940,24 @@ fn classify_server_tunnel(
             tunnel.disabled_reason.clone(),
         );
     }
-    if tunnel.agent_id.as_deref() != Some(current_agent_id) {
+    // The current-agent fallback list carries no agent or semantic-type
+    // metadata; missing values mean "unknown", not "mismatched", because that
+    // list is inherently scoped to the current agent.
+    if tunnel
+        .agent_id
+        .as_deref()
+        .is_some_and(|agent_id| agent_id != current_agent_id)
+    {
         return (
             ServerPlayitState::AgentMismatch,
             Some("The Playit tunnel is not assigned to the current agent".into()),
         );
     }
-    if tunnel.tunnel_type.as_deref() != Some("minecraft-java") {
+    if tunnel
+        .tunnel_type
+        .as_deref()
+        .is_some_and(|kind| kind != "minecraft-java")
+    {
         return (
             ServerPlayitState::Drifted,
             Some("The Playit tunnel is not a Minecraft Java tunnel".into()),

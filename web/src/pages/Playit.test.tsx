@@ -136,6 +136,50 @@ describe("Playit page refresh lifecycle", () => {
     expect(screen.queryByText("old")).toBeNull();
   });
 
+  it("labels the action as connecting rather than always creating", async () => {
+    renderPlayit();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Connect server" })).toBeInTheDocument(),
+    );
+  });
+
+  it.each([
+    ["reused", "Existing Playit tunnel reused."],
+    ["updated", "Existing Playit tunnel updated."],
+    ["created", "New Playit tunnel created."],
+    [undefined, "New Playit tunnel created."],
+  ] as const)("announces attach disposition %s as %s", async (disposition, message) => {
+    apiMock.attachPlayit.mockResolvedValue({
+      state: "connected",
+      binding: null,
+      tunnel: null,
+      message: null,
+      cleanup_pending: false,
+      disposition,
+    });
+
+    renderPlayit();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("option", { name: "Survival · :25565" }),
+      ).toBeInTheDocument(),
+    );
+
+    // Drive the controlled select the way a user interaction does: pick the
+    // option, then dispatch the bubbled change Preact listens for.
+    const combo = screen.getByRole("combobox") as HTMLSelectElement;
+    combo.value = "server-1";
+    combo.dispatchEvent(new Event("change", { bubbles: true }));
+    // Preact flushes state asynchronously; wait for the selection to commit
+    // before clicking, since a disabled button ignores clicks.
+    const button = screen.getByRole("button", { name: "Connect server" });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+
+    await waitFor(() => expect(apiMock.attachPlayit).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText(message)).toBeInTheDocument());
+  });
+
   it("clears a local claim URL once the account is connected", async () => {
     apiMock.playitStatus
       .mockResolvedValueOnce({ status: "needs_claim", version: "1", message: null })

@@ -28,7 +28,14 @@ import { useDialogs } from "../components/Modal";
 import { useToast } from "../components/Toast";
 import { useT } from "../i18n";
 import { serverActionCapabilities } from "../serverActions";
-import type { ProgressState, Server, ServerPlayitView, Status, User } from "../types";
+import type {
+  PlayitAttachDisposition,
+  ProgressState,
+  Server,
+  ServerPlayitView,
+  Status,
+  User,
+} from "../types";
 
 type Tab = "console" | "files" | "plugins" | "backups" | "settings";
 
@@ -721,8 +728,8 @@ export function PlayitSettings({
   async function attach() {
     setBusy(true);
     try {
-      await api.attachPlayit(server.id);
-      toast.success(t("playit.tunnelCreated"));
+      const view = await api.attachPlayit(server.id);
+      toast.success(attachSuccessMessage(view.disposition, t));
       onChanged();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : t("errors.playitAction"));
@@ -769,8 +776,8 @@ export function PlayitSettings({
   async function repair() {
     setBusy(true);
     try {
-      await api.attachPlayit(server.id);
-      toast.success(t("playit.tunnelCreated"));
+      const view = await api.attachPlayit(server.id);
+      toast.success(attachSuccessMessage(view.disposition, t));
       onChanged();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : t("errors.playitAction"));
@@ -904,4 +911,13 @@ export function PlayitSettings({
       )}
     </Card>
   );
+}
+
+function attachSuccessMessage(
+  disposition: PlayitAttachDisposition | null | undefined,
+  t: ReturnType<typeof useT>,
+): string {
+  if (disposition === "reused") return t("playit.tunnelReused");
+  if (disposition === "updated") return t("playit.tunnelUpdated");
+  return t("playit.tunnelCreated");
 }

@@ -16,6 +16,7 @@ import { useT } from "../i18n";
 import type {
   PlayitAccount,
   PlayitAccountStatus,
+  PlayitAttachDisposition,
   PlayitConnectionState,
   PlayitStatus,
   PlayitTunnel,
@@ -128,8 +129,8 @@ export function Playit() {
     if (!selectedServer) return;
     setBusy(true);
     try {
-      await api.attachPlayit(selectedServer);
-      toast.success(t("playit.tunnelCreated"));
+      const view = await api.attachPlayit(selectedServer);
+      toast.success(attachSuccessMessage(view.disposition, t));
       setSelectedServer("");
       await refresh();
     } catch (e) {
@@ -444,6 +445,15 @@ function statusTone(state: PlayitConnectionState | undefined): "good" | "warn" |
 
 function errorText(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
+}
+
+function attachSuccessMessage(
+  disposition: PlayitAttachDisposition | null | undefined,
+  t: ReturnType<typeof useT>,
+): string {
+  if (disposition === "reused") return t("playit.tunnelReused");
+  if (disposition === "updated") return t("playit.tunnelUpdated");
+  return t("playit.tunnelCreated");
 }
 
 function safeExternalUrl(value: string | null | undefined): string | null {

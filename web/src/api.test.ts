@@ -52,6 +52,44 @@ describe("authentication", () => {
       "port 25565 is already assigned",
     );
   });
+
+  it("reports invalid credentials without triggering a session-expired logout", async () => {
+    mockFetch(jsonResponse({ error: "authentication required" }, 401));
+
+    const loggedOut = vi.fn();
+    window.addEventListener("mcpanel:logout", loggedOut);
+
+    await expect(api.login("admin", "wrong-password")).rejects.toThrow(
+      "Invalid username or password.",
+    );
+    expect(loggedOut).not.toHaveBeenCalled();
+  });
+
+  it("reports an expired session and fires the logout event", async () => {
+    mockFetch(jsonResponse({ error: "authentication required" }, 401));
+
+    const loggedOut = vi.fn();
+    window.addEventListener("mcpanel:logout", loggedOut);
+
+    await expect(api.servers()).rejects.toThrow(
+      "Your session has expired. Sign in again.",
+    );
+    expect(loggedOut).toHaveBeenCalled();
+  });
+
+  it("surfaces a useful backend message for forbidden requests", async () => {
+    mockFetch(jsonResponse({ error: "Playit cleanup is still pending" }, 403));
+
+    await expect(api.servers()).rejects.toThrow("Playit cleanup is still pending");
+  });
+
+  it("falls back to a generic permission message for empty forbidden responses", async () => {
+    mockFetch(jsonResponse({}, 403));
+
+    await expect(api.servers()).rejects.toThrow(
+      "You do not have permission to perform this action.",
+    );
+  });
 });
 
 describe("playit", () => {

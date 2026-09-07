@@ -39,27 +39,52 @@ export class ApiError extends Error {
   }
 }
 
+/** Per-request control over how authentication failures are reported. */
+export type RequestOptions = RequestInit & {
+  /**
+   * `"credentials"` for the login call itself, where a 401 means the
+   * username/password were rejected — not that a session expired.
+   * Defaults to `"session"`.
+   */
+  authFailureMode?: "session" | "credentials";
+};
+
 async function request<T>(
   path: string,
-  init: RequestInit = {},
+  init: RequestOptions = {},
 ): Promise<T> {
-  const headers = new Headers(init.headers);
-  if (init.body) headers.set("Content-Type", "application/json");
-  if (!["GET", "HEAD", "OPTIONS"].includes((init.method ?? "GET").toUpperCase())) {
+  const { authFailureMode, ...fetchInit } = init;
+  const headers = new Headers(fetchInit.headers);
+  if (fetchInit.body) headers.set("Content-Type", "application/json");
+  if (!["GET", "HEAD", "OPTIONS"].includes((fetchInit.method ?? "GET").toUpperCase())) {
     const csrf = csrfToken();
     if (csrf) headers.set("X-CSRF-Token", csrf);
   }
 
   const response = await fetch(`/api${path}`, {
-    ...init,
+    ...fetchInit,
     headers,
     credentials: "same-origin",
   });
 
   if (response.status === 401) {
+    if (authFailureMode === "credentials") {
+      // A rejected username/password is not an expired session: report it
+      // without triggering the global logout flow.
+      throw new ApiError("Invalid username or password.", 401);
+    }
     // The session is gone; drop it so the shell renders the login screen.
     window.dispatchEvent(new CustomEvent("mcpanel:logout"));
-    throw new ApiError("session expired", 401);
+    throw new ApiError("Your session has expired. Sign in again.", 401);
+  }
+
+  if (response.status === 403) {
+    const body = await response.json().catch(() => ({}));
+    const message =
+      typeof body.error === "string" && body.error.trim()
+        ? body.error
+        : "You do not have permission to perform this action.";
+    throw new ApiError(message, 403);
   }
 
   if (!response.ok) {
@@ -84,13 +109,14 @@ function startDownload(url: string) {
 }
 
 export const api = {
- async login(username: string, password: string): Promise<User> {
+  async login(username: string, password: string): Promise<User> {
     const result = await request<{ user: User }>("/auth/login", {
-     method: "POST",
-     body: json({ username, password }),
-   });
-   return result.user;
- },
+      method: "POST",
+      body: json({ username, password }),
+      authFailureMode: "credentials",
+    });
+    return result.user;
+  },
 
  async logout(): Promise<void> {
    await request("/auth/logout", { method: "POST" }).catch(() => {});
@@ -243,8 +269,8 @@ export const api = {
     // Upload cannot go through `request` because the body is FormData, so the
     // expired-session handling has to be repeated rather than inherited.
     if (response.status === 401) {
-     window.dispatchEvent(new CustomEvent("mcpanel:logout"));
-      throw new ApiError("session expired", 401);
+      window.dispatchEvent(new CustomEvent("mcpanel:logout"));
+      throw new ApiError("Your session has expired. Sign in again.", 401);
     }
     if (!response.ok) {
       const detail = await response.json().catch(() => ({}));
