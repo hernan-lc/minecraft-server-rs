@@ -1,12 +1,12 @@
 # mcpanel demo automation (Playwright)
 
 Automated, reproducible mcpanel demo workflows using Playwright.
-The first workflow drives the real web UI from first run to server creation
-and records it to video — with zero configuration.
+The first workflow drives the real web UI from first run to a started
+server and records it to video — with zero configuration.
 
 ## Purpose
 
-- Reproducible automated demos of the real mcpanel UI.
+- Reproducible automated demos of the real mcpanel UI (~15–20 s video).
 - A foundation for future browser workflow/regression testing.
 - Fully deterministic: stable `data-testid` locators, no AI, no API keys,
   no cloud sessions.
@@ -21,8 +21,8 @@ The password is filled directly with a locator and never logged.
 
 ## Recording a demo
 
-No environment setup needed. Every run records
-`artifacts/demos/first-run.webm` (1280×720):
+No environment setup needed. `npm run demo:first-run` is human-readable
+by default and records `artifacts/demos/first-run.webm` (1280×720):
 
 ```bash
 # terminal 1 — serve the app from a FRESH data directory
@@ -47,27 +47,44 @@ Output:
 [demo] minecraft: 26.2 (latest of 66)
 [demo] java: 25
 [demo] server visible
+[demo] opening Survival
+[demo] starting server
+[demo] status: preparing
 [demo] recording saved: .../artifacts/demos/first-run.webm
 [demo] success
 ```
 
+The video tells the story without narration: configure mcpanel → sign
+in → create a Paper server → open it → start it → mcpanel begins
+provisioning it. A synthetic cursor (injected via `addInitScript`, never
+touching production code) travels smoothly to each control with click
+ripples, so every action is followable.
+
+Note: the panel serves a strict `style-src 'self'` CSP, which would
+silently block the injected cursor's stylesheet. The demo browser relaxes
+`style-src` to `'unsafe-inline'` for document responses in its own
+Playwright context only (`browser.ts` request routing); production headers
+and all API/websocket traffic are untouched.
+
+Fast mode is the special case for development/debugging:
+
+```bash
+npm run demo:first-run:fast
+```
 To watch it live while it records:
 
 ```bash
 npm run demo:first-run:headed
 ```
 
-which is shorthand for `tsx demo/first-run.ts --headed --slow`.
-`--slow` adds 250/500/1000 ms pacing so the footage is watchable;
-without it the run is as fast as possible.
-
 ## Options (all optional)
 
 CLI flags (highest precedence):
 
 ```text
+--slow / --fast         presentation pacing or test-suite speed
+                        (default: slow; demo:* is watchable by default)
 --headed / --headless   show the browser or not (default: headless)
---slow                  human-readable pacing for published demos
 --url <url>             panel URL
 --user <name>           demo username (default: admin)
 --password <pw>         demo password (default: mcpanel-demo-password)
@@ -91,19 +108,35 @@ directory (convention: `./data-demo/` or a temporary directory).
 
 ## What the demo does
 
-`demo/first-run.ts` — "First Run → Create Server":
+`demo/first-run.ts` — "First Run → Create Server → Start":
 
 1. Opens `${url}/setup`, fails unless setup is required.
-2. Creates the admin account (deterministic fills).
+2. Creates the admin account (typed username, filled password).
 3. Logs in, waits for the dashboard (`New Server` button).
 4. Opens New Server, creates a Paper server named `Survival` using the
    latest Minecraft version from the UI, verifies (not overrides) the
    application's Java selection (26.x ⇒ Java 25), accepts the EULA, submits.
-5. Verifies the `Survival` card appears; holds the dashboard ~1.5 s in
-   slow mode for a stable final frame.
+5. Verifies the `Survival` card appears and holds it on screen.
+6. Opens `Survival`, waits for the server detail view.
+7. Clicks the real Start control and waits until the status leaves the
+   stopped state (`preparing`/`starting`/`running` via the
+   localization-independent `data-status` attribute) — without waiting for
+   the full network-dependent Minecraft provisioning.
+8. Holds the begun lifecycle ~2–3 s for a stable final frame.
 
-The demo does not start the Minecraft server. Provisioning/startup belongs
-in a future demo.
+Starting the server begins background provisioning (Java/JAR downloads)
+inside the disposable demo data directory; the demo does not clean that
+up. Stop the panel and delete `data-demo/` when done.
+
+## Waiting vs pacing
+
+Two concerns stay separate throughout `web/demo/`:
+
+- Application synchronization: `waitFor()`, `waitForFunction()`, UI state.
+- Presentation pacing: `demoPause()`, cursor movement, typing delay, holds.
+
+Presentation pauses always run *after* the expected state exists — never
+as a substitute for waiting on it.
 
 ## Troubleshooting
 
@@ -118,16 +151,20 @@ in a future demo.
   to catch; do not paper over it in automation.
 - `dashboard did not appear within 15 seconds` — login failed or the API
   is down; each phase reports its own stage name.
+- `server did not enter preparing/starting/running ... after Start` —
+  the Start action was rejected or provisioning stalled; check the panel
+  logs and network access to Java/Minecraft upstreams.
 
 ## Structure
 
 ```text
 web/demo/
-├── config.ts     # zero-config env/CLI parsing (nothing required)
+├── config.ts     # zero-config env/CLI parsing (slow by default)
 ├── browser.ts    # Playwright Chromium launch + video context
+├── cursor.ts     # injected demo cursor + human interaction helpers
 ├── helpers.ts    # pacing, step(), condition-based waits (no raw sleeps)
 ├── recording.ts  # save the .webm to artifacts/demos/first-run.webm
-├── first-run.ts  # First Run → Create Server workflow
+├── first-run.ts  # First Run → Create Server → Start workflow
 └── README.md     # this file
 ```
 

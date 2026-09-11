@@ -12,12 +12,17 @@ export function pause(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export type DemoPace = "short" | "normal" | "long";
+export type DemoPace = "short" | "normal" | "long" | "reveal";
 
 const PACING_MS: Record<DemoPace, number> = {
-  short: 250,
-  normal: 500,
-  long: 1000,
+  // Tuned so the full demo lands at 15–20 s: cursor travel (~0.3 s per
+  // control) and app latency (hashing, catalog fetch) already consume
+  // ~10 s, leaving ~9 s for deliberate pauses.
+  short: 200,
+  normal: 400,
+  long: 800,
+  // States the viewer needs to understand: server card, final lifecycle.
+  reveal: 1000,
 };
 
 /** No-op unless slow/published-demo pacing is enabled. */
@@ -31,9 +36,14 @@ export async function demoPause(
 
 /** Wrap a demo phase so failures identify the failing step. */
 export async function step<T>(name: string, operation: () => Promise<T>): Promise<T> {
+  const started = Date.now();
   console.log(`[demo] ${name}`);
   try {
-    return await operation();
+    const result = await operation();
+    console.log(
+      `[demo] ${name} done in ${((Date.now() - started) / 1000).toFixed(1)}s`,
+    );
+    return result;
   } catch (error) {
     throw new Error(
       `Demo failed during "${name}": ${error instanceof Error ? error.message : String(error)}`,
@@ -105,4 +115,45 @@ export async function waitForSelectOptions(
     }
     await pause(250);
   }
+}
+
+/**
+ * Wait until the server-detail status leaves the stopped state.
+ *
+ * Reads the localization-independent `data-status` attribute exposed by
+ * `data-testid="server-status"`. Never waits for full Minecraft
+ * provisioning — `preparing` is enough to prove the lifecycle began.
+ */
+export async function waitForServerLifecycle(
+  page: Page,
+  statuses: string[] = ["preparing", "starting", "running"],
+  timeoutMs = 60_000,
+): Promise<string> {
+  try {
+    await page.waitForFunction(
+      (expected: string[]) => {
+        const status = document
+          .querySelector('[data-testid="server-status"]')
+          ?.getAttribute("data-status");
+        return status !== null && expected.includes(status ?? "");
+      },
+      statuses,
+      // Timer polling, not rAF: a busy renderer (progress streaming,
+      // animations, software video encode) can starve rAF for seconds,
+      // delaying the observation long after the UI actually flipped.
+      { timeout: timeoutMs, polling: 100 },
+    );
+  } catch (error) {
+    throw new Error(
+      `server did not enter ${statuses.join("/")} within ${Math.round(timeoutMs / 1000)} seconds after Start`,
+      { cause: error },
+    );
+  }
+  const status =
+    (await page
+      .getByTestId("server-status")
+      .getAttribute("data-status")
+      .catch(() => null)) ?? "unknown";
+  console.log(`[demo] status: ${status}`);
+  return status;
 }

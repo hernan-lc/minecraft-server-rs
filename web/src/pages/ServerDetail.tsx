@@ -144,7 +144,7 @@ export function ServerDetail({
       : undefined;
 
   return (
-    <div class="mx-auto flex h-full w-full max-w-6xl flex-col gap-3 px-3 py-3 sm:gap-5 sm:px-6 sm:py-6">
+    <div data-testid="server-detail" class="mx-auto flex h-full w-full max-w-6xl flex-col gap-3 px-3 py-3 sm:gap-5 sm:px-6 sm:py-6">
       <header class="space-y-3 sm:space-y-4">
         <div class="rounded-2xl border border-ink-700 bg-ink-850 p-3 sm:p-5">
           <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -198,7 +198,9 @@ export function ServerDetail({
           </div>
 
             <div class="flex min-w-0 items-center justify-between gap-1 sm:justify-end sm:gap-2">
-            <StatusPill status={server.status} />
+            <div data-testid="server-status" data-status={server.status}>
+              <StatusPill status={server.status} />
+            </div>
 
             {actions.cancel ? (
               <Button
@@ -220,6 +222,7 @@ export function ServerDetail({
               <Button
                 variant="primary"
                 icon={<Icon.Play size={13} />}
+                data-testid="server-start"
                 onClick={() => power("start")}
               >
                 {t("dashboard.start")}

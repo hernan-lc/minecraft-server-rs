@@ -8,7 +8,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "demo:first-run": "tsx demo/first-run.ts",
+    "demo:first-run": "tsx demo/first-run.ts --slow",
+    "demo:first-run:fast": "tsx demo/first-run.ts --fast",
     "demo:first-run:headed": "tsx demo/first-run.ts --headed --slow"
   },
   "dependencies": {

@@ -54,9 +54,11 @@ function cliValue(name: string): string | null {
 /**
  * Zero-config demo configuration.
  *
+ * Presentation pacing is the default: `npm run demo:first-run` produces a
+ * human-readable video without flags. `--fast` is the special mode for
+ * development/debugging.
+ *
  * Precedence: CLI flags > environment variables > built-in defaults.
- * Nothing is required: `npm run demo:first-run` just works against a
- * locally running panel with a fresh data directory.
  */
 export function loadDemoConfig(): DemoConfig {
   loadDemoEnvFiles();
@@ -65,7 +67,7 @@ export function loadDemoConfig(): DemoConfig {
   const headless =
     cliFlag("headless") || (!headed && parseBoolean(process.env.MCPANEL_DEMO_HEADLESS, true));
   const slow =
-    cliFlag("slow") || parseBoolean(process.env.MCPANEL_DEMO_SLOW, false);
+    !cliFlag("fast") && (cliFlag("slow") || parseBoolean(process.env.MCPANEL_DEMO_SLOW, true));
 
   const baseUrl = (
     cliValue("url") ??
