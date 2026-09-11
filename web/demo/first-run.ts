@@ -197,7 +197,27 @@ async function runFirstRun(
   await step("awaiting online", async () => {
     // The whole point of the demo: Java download → core download → boot,
     // for real. This takes minutes on first start and is recorded uncut.
-    await waitForServerLifecycle(page, ["online"], ONLINE_TIMEOUT_MS);
+    // Heartbeat every 30 s so long provisioning visibly progresses.
+    const started = Date.now();
+    const beat = setInterval(() => {
+      const elapsed = Math.round((Date.now() - started) / 1000);
+      page
+        .getByTestId("server-status")
+        .textContent()
+        .then((text) =>
+          console.log(
+            `[demo] still provisioning… ${elapsed}s elapsed (status: ${(text ?? "").trim() || "unknown"})`,
+          ),
+        )
+        .catch(() => {
+          console.log(`[demo] still provisioning… ${elapsed}s elapsed`);
+        });
+    }, 30_000);
+    try {
+      await waitForServerLifecycle(page, ["online"], ONLINE_TIMEOUT_MS);
+    } finally {
+      clearInterval(beat);
+    }
     chapters.mark("online");
     // Hold the running server so the published ending lands on green.
     await demoPause(config, "reveal");
@@ -207,6 +227,36 @@ async function runFirstRun(
 
 async function main(): Promise<void> {
   const config = loadDemoConfig();
+  const logIndex = process.argv.indexOf("--log");
+  const logFile =
+    logIndex !== -1 ? process.argv[logIndex + 1] : undefined;
+  let logStream: { write: (text: string) => void; end: () => void } | null =
+    null;
+  if (logFile) {
+    const { createWriteStream } = await import("node:fs");
+    const { mkdir } = await import("node:fs/promises");
+    const { dirname } = await import("node:path");
+    await mkdir(dirname(logFile), { recursive: true });
+    logStream = createWriteStream(logFile, { encoding: "utf8" });
+    logStream.on("error", () => {
+      logStream = null;
+    });
+    for (const method of ["log", "error"] as const) {
+      const original = console[method].bind(console);
+      console[method] = (...args: unknown[]) => {
+        original(...args);
+        try {
+          logStream?.write(
+            args
+              .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
+              .join(" ") + "\n",
+          );
+        } catch {
+          // Logging must never break the demo.
+        }
+      };
+    }
+  }
   console.log(`[demo] target: ${config.baseUrl}`);
 
   let handle: DemoBrowser | null = null;
@@ -223,6 +273,7 @@ async function main(): Promise<void> {
     console.log("[demo] success");
   } finally {
     await closeDemoBrowser(handle ?? {});
+    logStream?.end();
   }
 }
 
