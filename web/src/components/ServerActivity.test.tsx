@@ -14,7 +14,11 @@ describe("ServerActivity", () => {
       </I18nProvider>,
     );
 
-    expect(screen.getByTestId("server-activity")).toBeInTheDocument();
+    const activity = screen.getByTestId("server-activity");
+    expect(activity).toBeInTheDocument();
+    expect(activity).toHaveAttribute("data-stage", "Downloading Paper 26.2");
+    expect(activity).toHaveAttribute("data-progress-stage", "Downloading Paper 26.2");
+    expect(activity).toHaveAttribute("data-fraction", "0.38");
     expect(screen.getAllByText("Downloading Paper 26.2")).toHaveLength(1);
     expect(screen.getAllByText("38%")).toHaveLength(1);
   });

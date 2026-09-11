@@ -144,8 +144,23 @@ export async function demoClick(
   locator: Locator,
   config: DemoConfig,
 ): Promise<void> {
+  // Verify the target before moving the physical mouse. This catches a
+  // disabled, covered, or stale target before the recording shows a missed
+  // click.
+  await locator.click({ trial: true });
   await moveToLocator(page, locator);
   await demoPause(config, "short");
+
+  // The pause can allow a responsive layout to reflow. Revalidate and read a
+  // fresh box immediately before pressing the physical mouse button.
+  await locator.click({ trial: true });
+  const box = await locator.boundingBox();
+  if (!box) {
+    throw new Error("Demo click target disappeared before click.");
+  }
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(x, y, { steps: 3 });
   await page.mouse.down();
   await pause(100);
   await page.mouse.up();
@@ -158,8 +173,10 @@ export async function demoFocus(
   locator: Locator,
   config: DemoConfig,
 ): Promise<void> {
+  await locator.click({ trial: true });
   await moveToLocator(page, locator);
   await demoPause(config, "short");
+  await locator.click({ trial: true });
   await locator.focus();
 }
 
@@ -171,9 +188,7 @@ export async function demoType(
   config: DemoConfig,
   delayMs = 45,
 ): Promise<void> {
-  await moveToLocator(page, locator);
-  await demoPause(config, "short");
-  await locator.click();
+  await demoClick(page, locator, config);
   // Clear first: pressSequentially appends, and some fields (e.g. the setup
   // username) already carry a default value.
   await locator.fill("");
@@ -187,8 +202,10 @@ export async function demoSelectOption(
   value: string,
   config: DemoConfig,
 ): Promise<void> {
+  await locator.click({ trial: true });
   await moveToLocator(page, locator);
   await demoPause(config, "short");
+  await locator.click({ trial: true });
   await locator.selectOption(value);
   await demoPause(config, "short");
 }

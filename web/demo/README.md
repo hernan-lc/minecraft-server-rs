@@ -1,8 +1,8 @@
 # mcpanel demo automation (Playwright)
 
 Automated, reproducible mcpanel demo workflows using Playwright.
-The first workflow drives the real web UI from first run to a started
-server and records it to video — with zero configuration.
+The first workflow drives the real web UI from first run to a genuinely
+online Minecraft server and records the complete raw source footage.
 
 ## Purpose
 
@@ -22,11 +22,10 @@ The password is filled directly with a locator and never logged.
 
 ## Recording a demo
 
-No environment setup needed. `npm run demo:first-run` is human-readable
-by default and records the full run to `artifacts/demos/first-run.webm`
-(1280×720), plus chapter markers in `artifacts/demos/first-run.chapters.json`
-(`startClicked` / `preparing` / `online` / `end`, in video-relative seconds)
-for trimming the footage afterwards.
+`npm run demo:first-run` is human-readable by default and records the full
+run to `artifacts/demos/first-run.webm` (1280×720), plus chapter markers in
+`artifacts/demos/first-run.chapters.json`. Provisioning is intentionally
+uncut; long Java, Paper, or world-initialization sections are edited later.
 
 ```bash
 # terminal 1 — serve the app from a FRESH data directory
@@ -54,13 +53,16 @@ Output:
 [demo] opening Survival
 [demo] starting server
 [demo] status: preparing
+[demo] provisioning… 30s status=preparing stage=downloading Java 25 fraction=0.23
+[demo] status: starting
+[demo] status: online
 [demo] recording saved: .../artifacts/demos/first-run.webm
 [demo] success
 ```
 
 The video tells the story without narration: configure mcpanel → sign
-in → create a Paper server → open it → start it → mcpanel begins
-provisioning it. A synthetic cursor (injected via `addInitScript`, never
+in → create a Paper server → open it → start it → watch the real provisioning
+finish online. A synthetic cursor (injected via `addInitScript`, never
 touching production code) travels smoothly to each control with click
 ripples, so every action is followable.
 
@@ -70,7 +72,7 @@ silently block the injected cursor's stylesheet. The demo browser relaxes
 Playwright context only (`browser.ts` request routing); production headers
 and all API/websocket traffic are untouched.
 
-Fast mode is the special case for development/debugging:
+Fast mode only reduces presentation pauses; it still waits for real Online:
 
 ```bash
 npm run demo:first-run:fast
@@ -81,6 +83,19 @@ To watch it live while it records:
 npm run demo:first-run:headed
 ```
 
+For a cold provisioning validation run:
+
+```bash
+npm run demo:first-run:cold
+```
+
+Cold mode does not create or inject application state. Use it with a newly
+prepared panel data directory when uncached provisioning is required. The
+default warm recording still uses fresh `/setup` state, but may benefit from
+immutable host/backend downloads already available to the real provisioner.
+Installing Java 25 on the demo host is the simplest warm optimization because
+the panel's normal Java discovery can use it without demo-specific code.
+
 ## Options (all optional)
 
 CLI flags (highest precedence):
@@ -89,6 +104,7 @@ CLI flags (highest precedence):
 --slow / --fast         presentation pacing or test-suite speed
                         (default: slow; demo:* is watchable by default)
 --headed / --headless   show the browser or not (default: headless)
+--cold / --warm         cache-validation intent (default: warm)
 --url <url>             panel URL
 --user <name>           demo username (default: admin)
 --password <pw>         demo password (default: mcpanel-demo-password)
@@ -96,7 +112,17 @@ CLI flags (highest precedence):
 
 Environment variables (or a `web/.env.demo` file, see
 `.env.demo.example`) use the same values under `MCPANEL_DEMO_*` names.
-Nothing is required — defaults cover the standard local setup.
+Timeout overrides are correctness limits, not presentation delays:
+
+```dotenv
+MCPANEL_DEMO_UI_TIMEOUT_MS=30000
+MCPANEL_DEMO_CATALOG_TIMEOUT_MS=90000
+MCPANEL_DEMO_CREATE_SERVER_TIMEOUT_MS=60000
+MCPANEL_DEMO_START_TIMEOUT_MS=60000
+MCPANEL_DEMO_ONLINE_TIMEOUT_MS=1200000
+```
+
+Nothing else is required — defaults cover the standard local setup.
 
 ## Fresh data requirement
 
@@ -122,15 +148,37 @@ directory (convention: `./data-demo/` or a temporary directory).
    application's Java selection (26.x ⇒ Java 25), accepts the EULA, submits.
 5. Verifies the `Survival` card appears and holds it on screen.
 6. Opens `Survival`, waits for the server detail view.
-7. Clicks the real Start control, waits for `preparing`, then keeps
-   recording through the real provisioning (Java download, core download,
-   first boot) until the status is `online` — this takes minutes on first
-   start and is recorded uncut. Chapter markers locate each segment.
-8. Holds the running server for a stable final frame.
+7. Clicks the real Start control, accepts `preparing`, `starting`, or
+   `online` as the initial acknowledgement, then keeps recording through the
+   real provisioning (Java download, core download, first boot) until the
+   status is `online` — this can take many minutes and is recorded uncut.
+8. Holds the `online` server for a stable final frame.
 
 Starting the server begins background provisioning (Java/JAR downloads)
-inside the disposable demo data directory; the demo records it raw and
-does not clean it up. Stop the panel and delete `data-demo/` when done.
+inside the disposable demo data directory; the demo records it raw and does
+not clean it up. Stop the panel and remove only the demo directory when done.
+
+The demo never pre-creates an administrator, `Survival`, a world, or an
+online process. Warm/cold concerns apply to immutable downloads only; the UI
+workflow and Guardian lifecycle remain real. The current backend keeps
+managed JDKs under its data directory and installs server artifacts into each
+server directory. A shared verified Paper-artifact cache is a separate
+backend follow-up, not a Playwright shortcut.
+
+## Editing workflow
+
+1. Record `first-run.webm`.
+2. Inspect `first-run.chapters.json` for `setup`, `login`, `newServer`,
+   `serverCreated`, `serverOpened`, `startClicked`, `startAccepted`, observed
+   lifecycle states, `online`, and `end` (or `failed`).
+3. Import the WebM into a video editor.
+4. Trim or speed up long download/provisioning sections while preserving the
+   Setup → Create → Start → Online narrative.
+5. Export the edited demo separately.
+
+Failed attempts preserve `first-run-failed.webm`,
+`first-run-failed.png` when a screenshot is available, and
+`first-run.chapters.json` for diagnosis.
 
 ## Waiting vs pacing
 
@@ -148,26 +196,29 @@ as a substitute for waiting on it.
   completed.` — start mcpanel with an empty `--data-dir` (e.g. `./data-demo`).
 - Playwright missing browser (`Executable doesn't exist`) — run
   `npx playwright install chromium`.
-- `Minecraft versions failed to populate` — the panel backend or its
-  catalog upstream is unreachable; check the server logs.
+- `Minecraft versions did not populate ... Last error: ...` — the panel
+  backend or its catalog upstream is unreachable; the last visible catalog
+  error is preserved in the demo output. Check the server logs.
 - `expected Java version 25 for Minecraft 26.x ...` — the application
   selected the wrong Java. This is an application bug the demo is designed
   to catch; do not paper over it in automation.
-- `dashboard did not appear within 15 seconds` — login failed or the API
+- `dashboard did not appear within 30 seconds` — login failed or the API
   is down; each phase reports its own stage name.
-- `server did not enter preparing/starting/running ... after Start` —
+- `Server crashed during first boot` — the demo fails immediately and includes
+  status, elapsed time, progress stage/fraction when available, and recent
+  console lines.
+- `server did not enter preparing/starting/online ... after Start` —
   the Start action was rejected or provisioning stalled; check the panel
   logs and network access to Java/Minecraft upstreams.
-- `server did not reach online within 15 minutes` — first provisioning
+- `Server did not reach online within 1200 seconds` — first provisioning
   needs to download Java (~150 MB) and the Paper build plus boot the
-  server; on a slow line or with blocked upstreams it can exceed the
-  timeout. Check the panel logs and retry.
+  server. The timeout is configurable; check the panel logs and retry.
 
 ## Structure
 
 ```text
 web/demo/
-├── config.ts     # zero-config env/CLI parsing (slow by default)
+├── config.ts     # env/CLI parsing, cache mode, and timeout categories
 ├── browser.ts    # Playwright Chromium launch + video context
 ├── cursor.ts     # injected demo cursor + human interaction helpers
 ├── helpers.ts    # pacing, step(), condition-based waits (no raw sleeps)

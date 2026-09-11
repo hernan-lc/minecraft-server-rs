@@ -21,7 +21,7 @@ export default defineConfig({
     },
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
-    include: ["src/**/*.test.{ts,tsx}"],
+    include: ["src/**/*.test.{ts,tsx}", "demo/**/*.test.ts"],
   },
   server: {
     port: 5173,

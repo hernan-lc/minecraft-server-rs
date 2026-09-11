@@ -1,7 +1,9 @@
 import "dotenv/config";
+import type { WriteStream } from "node:fs";
 import type { BrowserContext, Page } from "playwright";
 import { closeDemoBrowser, disableRequestInterception, launchDemoBrowser, type DemoBrowser } from "./browser.js";
 import { loadDemoConfig, type DemoConfig } from "./config.js";
+import { recommendedJavaForVersion } from "../src/minecraftJava.js";
 import {
   demoClick,
   demoFocus,
@@ -14,22 +16,21 @@ import {
   demoPause,
   pause,
   readBodyText,
+  readServerDiagnostics,
   step,
   waitForGone,
   waitForSelectOptions,
+  waitForSelectValue,
+  waitForServerOnline,
   waitForServerLifecycle,
 } from "./helpers.js";
-import { saveRecording, ChapterLog } from "./recording.js";
+import {
+  ChapterLog,
+  saveFailureScreenshot,
+  saveRecording,
+} from "./recording.js";
 
 const DEMO_SERVER_NAME = "Survival";
-
-/**
- * Full provisioning can take minutes on first start (Java download, server
- * JAR download, first boot), depending on network speed. This is a
- * correctness wait, not pacing: the demo must prove the server actually
- * comes online. The long middle is recorded raw for manual editing.
- */
-const ONLINE_TIMEOUT_MS = 3 * 60_000;
 
 /**
  * First Run → Create Server → Start → Online, recorded to
@@ -58,7 +59,8 @@ async function runFirstRun(
     // The setup form is the proof that a fresh data directory is in use.
     // A completed setup renders an "already completed" notice instead.
     try {
-      await assertVisible(page.getByTestId("setup-username"), "setup form", 15_000);
+      await assertVisible(page.getByTestId("setup-username"), "setup form", config.uiTimeoutMs);
+      chapters.mark("setup");
     } catch (error) {
       const body = await readBodyText(page).catch(() => "");
       if (/already been completed/i.test(body)) {
@@ -77,7 +79,11 @@ async function runFirstRun(
     await page.getByTestId("setup-password-confirm").fill(config.password);
     await demoClick(page, page.getByTestId("setup-submit"), config);
     // Setup redirects to / (login). Wait for the login form, not a sleep.
-    await assertVisible(page.getByTestId("login-username"), "login form after setup", 15_000);
+    await assertVisible(
+      page.getByTestId("login-username"),
+      "login form after setup",
+      config.uiTimeoutMs,
+    );
   });
 
   await step("logging in", async () => {
@@ -85,7 +91,9 @@ async function runFirstRun(
     await demoFocus(page, page.getByTestId("login-password"), config);
     await page.getByTestId("login-password").fill(config.password);
     await demoClick(page, page.getByTestId("login-submit"), config);
-    await assertVisible(page.getByTestId("new-server"), "dashboard", 15_000);
+    await assertVisible(page.getByTestId("new-server"), "dashboard", config.uiTimeoutMs);
+    chapters.mark("login");
+    chapters.mark("dashboard");
     // Last full navigation is done (the rest is SPA state): drop request
     // interception so live traffic runs at full speed. Cursor styles are
     // already applied to every loaded document.
@@ -94,41 +102,73 @@ async function runFirstRun(
 
   await step("opening new server", async () => {
     await demoClick(page, page.getByTestId("new-server"), config);
-    await assertVisible(page.getByTestId("server-name"), "new server form", 15_000);
+    await assertVisible(page.getByTestId("server-name"), "new server form", config.uiTimeoutMs);
+    chapters.mark("newServer");
   });
 
   await step(`creating ${DEMO_SERVER_NAME}`, async () => {
     await demoType(page, page.getByTestId("server-name"), DEMO_SERVER_NAME, config);
 
     // Core: paper. Native selects are shown, not dropdown-automated.
+    await waitForSelectOptions(
+      page,
+      "server-core",
+      "server providers",
+      config.catalogTimeoutMs,
+    );
     await demoSelectOption(page, page.getByTestId("server-core"), "paper", config);
 
     // Minecraft version: use the latest provided by the actual UI/API —
     // never a hard-coded version. The versions list populates async.
-    const versions = await waitForSelectOptions(page, "server-version", "Minecraft versions", 30_000);
+    const versions = await waitForSelectOptions(
+      page,
+      "server-version",
+      "Minecraft versions",
+      config.catalogTimeoutMs,
+    );
+    const latestVersion = versions[0];
+    if (!latestVersion) {
+      throw new Error("Minecraft versions failed to populate");
+    }
+    await waitForSelectValue(
+      page,
+      "server-version",
+      latestVersion,
+      "latest Minecraft version",
+      config.catalogTimeoutMs,
+    );
     await moveToLocator(page, page.getByTestId("server-version"));
     await demoPause(config, "short");
     const minecraftVersion = await page.getByTestId("server-version").inputValue();
     if (!minecraftVersion) {
       throw new Error("Minecraft versions failed to populate");
     }
+    if (minecraftVersion !== latestVersion) {
+      throw new Error(
+        `expected the latest Minecraft version ${latestVersion}, but the form selected ${minecraftVersion}`,
+      );
+    }
     console.log(`[demo] minecraft: ${minecraftVersion} (latest of ${versions.length})`);
 
     // Java: verify the application's selection rather than overriding it.
-    // Current Minecraft 26.x releases expect Java 25; silently flipping
-    // Java 21 → 25 here would hide an application regression.
+    // Verify the application's compatibility mapping rather than overriding
+    // it. Silently flipping Java here would hide an application regression.
+    const expectedJava = String(recommendedJavaForVersion(minecraftVersion));
     await moveToLocator(page, page.getByTestId("server-java"));
     await demoPause(config, "short");
+    await waitForSelectValue(
+      page,
+      "server-java",
+      expectedJava,
+      "compatible Java version",
+      config.uiTimeoutMs,
+    );
     const java = await page.getByTestId("server-java").inputValue();
     console.log(`[demo] java: ${java}`);
-    if (/^26(\.|$)/.test(minecraftVersion.trim())) {
-      if (java !== "25") {
-        throw new Error(
-          `expected Java version 25 for Minecraft ${minecraftVersion}, but the application selected Java ${java || "(none)"}`,
-        );
-      }
-    } else if (!java) {
-      throw new Error("expected Java version not selected");
+    if (java !== expectedJava) {
+      throw new Error(
+        `expected Java version ${expectedJava} for Minecraft ${minecraftVersion}, but the application selected Java ${java || "(none)"}`,
+      );
     }
 
     // Port: keep the sensible default unless the app requires otherwise.
@@ -151,7 +191,11 @@ async function runFirstRun(
     await demoClick(page, create, config);
 
     // Wait for the modal to close, then for the Survival card.
-    await waitForGone(page.getByTestId("server-name"), "server creation", 30_000);
+    await waitForGone(
+      page.getByTestId("server-name"),
+      "server creation",
+      config.createServerTimeoutMs,
+    );
   });
 
   const card = page.locator(
@@ -159,7 +203,7 @@ async function runFirstRun(
   );
 
   await step("server visible", async () => {
-    await assertVisible(card, "Survival server card", 30_000);
+    await assertVisible(card, "Survival server card", config.uiTimeoutMs);
     const body = await readBodyText(page);
     if (!body.includes(DEMO_SERVER_NAME)) {
       throw new Error(`server "${DEMO_SERVER_NAME}" did not appear on the dashboard`);
@@ -170,6 +214,7 @@ async function runFirstRun(
         console.log(`[demo] note: server card does not mention "${expected}" yet`);
       }
     }
+    chapters.mark("serverCreated");
     await demoPause(config, "reveal");
   });
 
@@ -178,20 +223,32 @@ async function runFirstRun(
     await moveToLocator(page, openServer);
     await demoPause(config, "short");
     await demoClick(page, openServer, config);
-    await assertVisible(page.getByTestId("server-detail"), "server detail", 15_000);
+    await assertVisible(page.getByTestId("server-detail"), "server detail", config.uiTimeoutMs);
+    chapters.mark("serverOpened");
   });
 
   await step("starting server", async () => {
     const start = page.getByTestId("server-start");
-    await assertVisible(start, "server Start button", 15_000);
+    await assertVisible(start, "server Start button", config.uiTimeoutMs);
     await demoClick(page, start, config);
     chapters.mark("startClicked");
-    // Checkpoint: mcpanel accepted the action and the lifecycle began.
-    await waitForServerLifecycle(page);
-    chapters.mark("preparing");
-    // Final frame: hold the begun lifecycle so the recording lands.
+    // Checkpoint: mcpanel accepted the action and the lifecycle began. A
+    // warm/cached start may skip a visible intermediate state, so online is
+    // explicitly accepted here too.
+    const acceptedStatus = await waitForServerLifecycle(
+      page,
+      ["preparing", "starting", "online"],
+      config.startTimeoutMs,
+    );
+    chapters.mark("startAccepted");
+    if (acceptedStatus === "preparing" || acceptedStatus === "starting") {
+      chapters.markOnce(acceptedStatus);
+    } else if (acceptedStatus === "online") {
+      chapters.markOnce("online");
+    }
+    // Let the accepted lifecycle state settle visibly before the long raw
+    // provisioning section begins. This is pacing, not synchronization.
     await demoPause(config, "reveal");
-    await pause(1000);
   });
 
   await step("awaiting online", async () => {
@@ -199,29 +256,37 @@ async function runFirstRun(
     // for real. This takes minutes on first start and is recorded uncut.
     // Heartbeat every 30 s so long provisioning visibly progresses.
     const started = Date.now();
-    const beat = setInterval(() => {
+    const logHeartbeat = async (): Promise<void> => {
       const elapsed = Math.round((Date.now() - started) / 1000);
-      page
-        .getByTestId("server-status")
-        .textContent()
-        .then((text) =>
-          console.log(
-            `[demo] still provisioning… ${elapsed}s elapsed (status: ${(text ?? "").trim() || "unknown"})`,
-          ),
-        )
-        .catch(() => {
-          console.log(`[demo] still provisioning… ${elapsed}s elapsed`);
-        });
+      const diagnostics = await readServerDiagnostics(page).catch(() => null);
+      if (!diagnostics) {
+        console.log(`[demo] provisioning… ${elapsed}s status=unknown stage=unknown fraction=unknown`);
+        return;
+      }
+      const fraction = diagnostics.fraction === null ? "unknown" : diagnostics.fraction;
+      console.log(
+        `[demo] provisioning… ${elapsed}s status=${diagnostics.status} stage=${diagnostics.stage ?? "unknown"} fraction=${fraction}`,
+      );
+    };
+    await logHeartbeat();
+    const beat = setInterval(() => {
+      void logHeartbeat();
     }, 30_000);
     try {
-      await waitForServerLifecycle(page, ["online"], ONLINE_TIMEOUT_MS);
+      await waitForServerOnline(page, config.onlineTimeoutMs, (status) => {
+        if (status === "preparing" || status === "starting" || status === "online") {
+          chapters.markOnce(status);
+        }
+      });
     } finally {
       clearInterval(beat);
     }
-    chapters.mark("online");
-    // Hold the running server so the published ending lands on green.
+    chapters.markOnce("online");
+    console.log("[demo] status: online");
+    // Hold the real online state for raw-footage editing. The unconditional
+    // 2.5s hold keeps the final frame useful even in --fast mode.
     await demoPause(config, "reveal");
-    await pause(2000);
+    await pause(2500);
   });
 }
 
@@ -230,8 +295,7 @@ async function main(): Promise<void> {
   const logIndex = process.argv.indexOf("--log");
   const logFile =
     logIndex !== -1 ? process.argv[logIndex + 1] : undefined;
-  let logStream: { write: (text: string) => void; end: () => void } | null =
-    null;
+  let logStream: WriteStream | null = null;
   if (logFile) {
     const { createWriteStream } = await import("node:fs");
     const { mkdir } = await import("node:fs/promises");
@@ -258,18 +322,59 @@ async function main(): Promise<void> {
     }
   }
   console.log(`[demo] target: ${config.baseUrl}`);
+  console.log(`[demo] cache mode: ${config.cold ? "cold validation" : "warm recording"}`);
 
   let handle: DemoBrowser | null = null;
+  let chapters: ChapterLog | null = null;
+  let workflowError: unknown = null;
   try {
     handle = await launchDemoBrowser(config);
-    const chapters = new ChapterLog(handle.startedAt);
-    await runFirstRun(handle.page, handle.context, config, chapters);
-    chapters.mark("end");
-    await chapters.save();
-    const videoPath = await saveRecording(handle);
-    if (videoPath) {
-      console.log(`[demo] recording saved: ${videoPath}`);
+    chapters = new ChapterLog(handle.startedAt);
+
+    try {
+      await runFirstRun(handle.page, handle.context, config, chapters);
+      chapters.mark("end");
+    } catch (error) {
+      workflowError = error;
+      chapters.mark("failed");
+      try {
+        const screenshot = await saveFailureScreenshot(handle.page);
+        console.log(`[demo] failure screenshot saved: ${screenshot}`);
+      } catch (screenshotError) {
+        console.error(
+          `[demo] could not save failure screenshot: ${
+            screenshotError instanceof Error ? screenshotError.message : String(screenshotError)
+          }`,
+        );
+      }
+    } finally {
+      try {
+        const chapterPath = await chapters.save();
+        console.log(`[demo] chapters saved: ${chapterPath}`);
+      } catch (chapterError) {
+        console.error(
+          `[demo] could not save chapters: ${
+            chapterError instanceof Error ? chapterError.message : String(chapterError)
+          }`,
+        );
+        if (!workflowError) workflowError = chapterError;
+      }
+
+      try {
+        const fileName = workflowError ? "first-run-failed.webm" : "first-run.webm";
+        const videoPath = await saveRecording(handle, fileName);
+        if (videoPath) console.log(`[demo] recording saved: ${videoPath}`);
+      } catch (recordingError) {
+        console.error(
+          `[demo] could not save recording: ${
+            recordingError instanceof Error ? recordingError.message : String(recordingError)
+          }`,
+        );
+        if (!workflowError) workflowError = recordingError;
+      }
     }
+
+    if (workflowError) throw workflowError;
     console.log("[demo] success");
   } finally {
     await closeDemoBrowser(handle ?? {});

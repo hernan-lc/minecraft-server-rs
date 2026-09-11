@@ -67,6 +67,8 @@ export function ToastProvider({ children }: { children: ComponentChildren }) {
           <div
             key={toast.id}
             class={`pointer-events-auto animate-[fade-in_150ms_ease-out] rounded-xl border px-4 py-3 text-sm shadow-lg backdrop-blur ${tones[toast.tone]}`}
+            data-testid="toast"
+            data-tone={toast.tone}
             onClick={() => setToasts((prev) => prev.filter((t) => t.id !== toast.id))}
           >
             {toast.message}

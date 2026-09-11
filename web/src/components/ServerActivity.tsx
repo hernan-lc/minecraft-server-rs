@@ -32,6 +32,9 @@ export function ServerActivity({
     <section
       class="rounded-xl border border-sky-500/40 bg-sky-500/10 px-4 py-3"
       data-testid="server-activity"
+      data-stage={stage}
+      data-progress-stage={progress?.stage}
+      data-fraction={fraction === null ? undefined : String(fraction)}
       aria-live="polite"
     >
       <div class="flex items-center justify-between gap-3 text-sm text-sky-100">
