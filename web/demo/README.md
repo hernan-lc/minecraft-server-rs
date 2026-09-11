@@ -6,7 +6,8 @@ server and records it to video — with zero configuration.
 
 ## Purpose
 
-- Reproducible automated demos of the real mcpanel UI (~15–20 s video).
+- Reproducible automated demos of the real mcpanel UI, recorded raw and
+  uncut for manual editing.
 - A foundation for future browser workflow/regression testing.
 - Fully deterministic: stable `data-testid` locators, no AI, no API keys,
   no cloud sessions.
@@ -22,7 +23,10 @@ The password is filled directly with a locator and never logged.
 ## Recording a demo
 
 No environment setup needed. `npm run demo:first-run` is human-readable
-by default and records `artifacts/demos/first-run.webm` (1280×720):
+by default and records the full run to `artifacts/demos/first-run.webm`
+(1280×720), plus chapter markers in `artifacts/demos/first-run.chapters.json`
+(`startClicked` / `preparing` / `online` / `end`, in video-relative seconds)
+for trimming the footage afterwards.
 
 ```bash
 # terminal 1 — serve the app from a FRESH data directory
@@ -118,15 +122,15 @@ directory (convention: `./data-demo/` or a temporary directory).
    application's Java selection (26.x ⇒ Java 25), accepts the EULA, submits.
 5. Verifies the `Survival` card appears and holds it on screen.
 6. Opens `Survival`, waits for the server detail view.
-7. Clicks the real Start control and waits until the status leaves the
-   stopped state (`preparing`/`starting`/`running` via the
-   localization-independent `data-status` attribute) — without waiting for
-   the full network-dependent Minecraft provisioning.
-8. Holds the begun lifecycle ~2–3 s for a stable final frame.
+7. Clicks the real Start control, waits for `preparing`, then keeps
+   recording through the real provisioning (Java download, core download,
+   first boot) until the status is `online` — this takes minutes on first
+   start and is recorded uncut. Chapter markers locate each segment.
+8. Holds the running server for a stable final frame.
 
 Starting the server begins background provisioning (Java/JAR downloads)
-inside the disposable demo data directory; the demo does not clean that
-up. Stop the panel and delete `data-demo/` when done.
+inside the disposable demo data directory; the demo records it raw and
+does not clean it up. Stop the panel and delete `data-demo/` when done.
 
 ## Waiting vs pacing
 
@@ -154,6 +158,10 @@ as a substitute for waiting on it.
 - `server did not enter preparing/starting/running ... after Start` —
   the Start action was rejected or provisioning stalled; check the panel
   logs and network access to Java/Minecraft upstreams.
+- `server did not reach online within 15 minutes` — first provisioning
+  needs to download Java (~150 MB) and the Paper build plus boot the
+  server; on a slow line or with blocked upstreams it can exceed the
+  timeout. Check the panel logs and retry.
 
 ## Structure
 

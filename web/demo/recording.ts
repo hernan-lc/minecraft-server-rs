@@ -1,4 +1,4 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DemoBrowser } from "./browser.js";
@@ -38,4 +38,43 @@ export async function saveRecording(
     await rm(original, { force: true }).catch(() => {});
   }
   return target;
+}
+
+export interface ChapterEvent {
+  name: string;
+  /** Seconds since the recording started (video-relative). */
+  at: number;
+}
+
+/**
+ * Chapter markers for manual editing.
+ *
+ * Long phases (Java/core download, first boot) are recorded raw and uncut;
+ * chapters locate each segment (startClicked / preparing / online / end) so
+ * the footage can be trimmed afterwards. Times are video-relative with the
+ * page-creation clock as t=0.
+ */
+export class ChapterLog {
+  private readonly events: ChapterEvent[] = [];
+
+  constructor(private readonly startedAt: number) {}
+
+  mark(name: string): number {
+    const at = Math.max(0, (Date.now() - this.startedAt) / 1000);
+    this.events.push({ name, at });
+    console.log(`[demo] chapter ${name} at ${at.toFixed(1)}s`);
+    return at;
+  }
+
+  at(name: string): number | null {
+    return this.events.find((e) => e.name === name)?.at ?? null;
+  }
+
+  async save(fileName = "first-run.chapters.json"): Promise<string> {
+    const dir = recordingDir();
+    await mkdir(dir, { recursive: true });
+    const target = resolve(dir, fileName);
+    await writeFile(target, JSON.stringify({ events: this.events }, null, 2));
+    return target;
+  }
 }

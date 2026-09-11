@@ -19,16 +19,26 @@ import {
   waitForSelectOptions,
   waitForServerLifecycle,
 } from "./helpers.js";
-import { saveRecording } from "./recording.js";
+import { saveRecording, ChapterLog } from "./recording.js";
 
 const DEMO_SERVER_NAME = "Survival";
 
 /**
- * First Run → Create Server → Start, recorded to
- * `artifacts/demos/first-run.webm` (~15–20 s).
+ * Full provisioning can take minutes on first start (Java download, server
+ * JAR download, first boot), depending on network speed. This is a
+ * correctness wait, not pacing: the demo must prove the server actually
+ * comes online. The long middle is recorded raw for manual editing.
+ */
+const ONLINE_TIMEOUT_MS = 3 * 60_000;
+
+/**
+ * First Run → Create Server → Start → Online, recorded to
+ * `artifacts/demos/first-run.webm`.
  *
  * The story, without narration: configure mcpanel → sign in → create a
- * Paper server → open it → start it → mcpanel begins provisioning it.
+ * Paper server → open it → start it → watch it come online for real
+ * (Java download, core download, boot). The full provisioning is recorded
+ * raw and uncut for manual editing afterwards.
  *
  * Two concerns stay separate: Playwright waits synchronize on application
  * state; `demoPause()` + cursor movement exist only for presentation
@@ -41,6 +51,7 @@ async function runFirstRun(
   page: Page,
   context: BrowserContext,
   config: DemoConfig,
+  chapters: ChapterLog,
 ): Promise<void> {
   await step("opening setup", async () => {
     await page.goto(`${config.baseUrl}/setup`);
@@ -174,12 +185,23 @@ async function runFirstRun(
     const start = page.getByTestId("server-start");
     await assertVisible(start, "server Start button", 15_000);
     await demoClick(page, start, config);
-    // Prove mcpanel accepted the action and the lifecycle began — without
-    // waiting for the full (network-dependent) Minecraft provisioning.
+    chapters.mark("startClicked");
+    // Checkpoint: mcpanel accepted the action and the lifecycle began.
     await waitForServerLifecycle(page);
+    chapters.mark("preparing");
     // Final frame: hold the begun lifecycle so the recording lands.
     await demoPause(config, "reveal");
     await pause(1000);
+  });
+
+  await step("awaiting online", async () => {
+    // The whole point of the demo: Java download → core download → boot,
+    // for real. This takes minutes on first start and is recorded uncut.
+    await waitForServerLifecycle(page, ["online"], ONLINE_TIMEOUT_MS);
+    chapters.mark("online");
+    // Hold the running server so the published ending lands on green.
+    await demoPause(config, "reveal");
+    await pause(2000);
   });
 }
 
@@ -190,7 +212,10 @@ async function main(): Promise<void> {
   let handle: DemoBrowser | null = null;
   try {
     handle = await launchDemoBrowser(config);
-    await runFirstRun(handle.page, handle.context, config);
+    const chapters = new ChapterLog(handle.startedAt);
+    await runFirstRun(handle.page, handle.context, config, chapters);
+    chapters.mark("end");
+    await chapters.save();
     const videoPath = await saveRecording(handle);
     if (videoPath) {
       console.log(`[demo] recording saved: ${videoPath}`);
