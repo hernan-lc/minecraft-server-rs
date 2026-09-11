@@ -6,6 +6,7 @@ import * as Icon from "../components/icons";
 import { tileColour } from "../components/serverTile";
 import { useToast } from "../components/Toast";
 import { useT } from "../i18n";
+import { recommendedJavaForVersion } from "../minecraftJava";
 import { serverActionCapabilities } from "../serverActions";
 import type { Server, SystemStats, User } from "../types";
 
@@ -74,6 +75,7 @@ export function Dashboard({
             variant="primary"
             icon={<Icon.Plus size={15} />}
             class="shrink-0"
+            data-testid="new-server"
             onClick={() => setCreating(true)}
           >
             {t("dashboard.newServer")}
@@ -135,6 +137,8 @@ export function Dashboard({
           return (
             <article
               key={server.id}
+              data-testid="server-card"
+              data-server-name={server.name}
               class="rounded-2xl border border-ink-700 bg-ink-850 p-3 sm:px-5 sm:py-4"
             >
               <div class="flex items-start gap-3">
@@ -282,7 +286,14 @@ function CreateServer({
       .versions(form.core)
       .then((list) => {
         setVersions(list);
-        setForm((f) => ({ ...f, version: list[0] ?? "" }));
+        const version = list[0] ?? "";
+        setForm((f) => ({
+          ...f,
+          version,
+          // Minecraft version selection drives the compatible Java default.
+          // The demo verifies this mapping instead of overriding it.
+          java_major: version ? recommendedJavaForVersion(version) : f.java_major,
+        }));
       })
       .catch((e) => toast.error(e.message));
   }, [form.core]);
@@ -328,6 +339,7 @@ function CreateServer({
             form="create-server-form"
             variant="primary"
             disabled={busy || !form.version}
+            data-testid="server-create"
           >
             {busy ? t("common.creating") : t("createServer.submit")}
           </Button>
@@ -340,6 +352,7 @@ function CreateServer({
             <Input
               value={form.name}
               placeholder="Survival"
+              data-testid="server-name"
               onInput={(e) => set({ name: (e.target as HTMLInputElement).value })}
             />
           </Field>
@@ -348,6 +361,7 @@ function CreateServer({
             <Input
               type="number"
               value={form.port}
+              data-testid="server-port"
               onInput={(e) => set({ port: Number((e.target as HTMLInputElement).value) })}
             />
           </Field>
@@ -355,6 +369,7 @@ function CreateServer({
           <Field label={t("createServer.flavour")}>
             <Select
               value={form.core}
+              data-testid="server-core"
               onChange={(e) => set({ core: (e.target as HTMLSelectElement).value })}
             >
               {providers.map((p) => (
@@ -372,7 +387,15 @@ function CreateServer({
           >
             <Select
               value={form.version}
-              onChange={(e) => set({ version: (e.target as HTMLSelectElement).value })}
+              data-testid="server-version"
+              onChange={(e) => {
+                const version = (e.target as HTMLSelectElement).value;
+                set({
+                  version,
+                  // Keep Java in sync with the selected Minecraft version.
+                  java_major: recommendedJavaForVersion(version),
+                });
+              }}
             >
               {versions.map((v) => (
                 <option key={v} value={v}>
@@ -385,6 +408,7 @@ function CreateServer({
           <Field label={t("createServer.javaVersion")} hint={t("createServer.javaHint")}>
             <Select
               value={String(form.java_major)}
+              data-testid="server-java"
               onChange={(e) => set({ java_major: Number((e.target as HTMLSelectElement).value) })}
             >
               {[8, 11, 16, 17, 21, 25].map((v) => (
@@ -417,6 +441,7 @@ function CreateServer({
           <input
             type="checkbox"
             checked={form.eula_accepted}
+            data-testid="server-eula"
             onChange={(e) => set({ eula_accepted: (e.target as HTMLInputElement).checked })}
             class="mt-0.5 size-4 rounded border-ink-600 bg-ink-900 accent-[var(--color-accent)]"
           />

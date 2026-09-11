@@ -46,6 +46,7 @@ export function Login({ onSignedIn }: { onSignedIn: (user: User) => void }) {
           <Input
             value={username}
             autocomplete="username"
+            data-testid="login-username"
             onInput={(e) => setUsername((e.target as HTMLInputElement).value)}
           />
         </Field>
@@ -55,11 +56,12 @@ export function Login({ onSignedIn }: { onSignedIn: (user: User) => void }) {
             type="password"
             value={password}
             autocomplete="current-password"
+            data-testid="login-password"
             onInput={(e) => setPassword((e.target as HTMLInputElement).value)}
           />
         </Field>
 
-        <Button type="submit" variant="primary" class="w-full" disabled={busy}>
+        <Button type="submit" variant="primary" class="w-full" disabled={busy} data-testid="login-submit">
           {busy ? t("login.signingIn") : t("login.signIn")}
         </Button>
 

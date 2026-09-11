@@ -76,15 +76,15 @@ export function Setup({ onDone }: { onDone: () => void }) {
         </div>
         {error && <Banner kind="error">{error}</Banner>}
         <Field label={t("login.username")}>
-          <Input value={username} autocomplete="username" onInput={(e) => setUsername((e.target as HTMLInputElement).value)} />
+          <Input value={username} autocomplete="username" data-testid="setup-username" onInput={(e) => setUsername((e.target as HTMLInputElement).value)} />
         </Field>
         <Field label={t("login.password")}>
-          <Input type="password" value={password} autocomplete="new-password" onInput={(e) => setPassword((e.target as HTMLInputElement).value)} />
+          <Input type="password" value={password} autocomplete="new-password" data-testid="setup-password" onInput={(e) => setPassword((e.target as HTMLInputElement).value)} />
         </Field>
         <Field label={t("setup.confirm")}>
-          <Input type="password" value={confirm} autocomplete="new-password" onInput={(e) => setConfirm((e.target as HTMLInputElement).value)} />
+          <Input type="password" value={confirm} autocomplete="new-password" data-testid="setup-password-confirm" onInput={(e) => setConfirm((e.target as HTMLInputElement).value)} />
         </Field>
-        <Button type="submit" variant="primary" class="w-full" disabled={busy}>
+        <Button type="submit" variant="primary" class="w-full" disabled={busy} data-testid="setup-submit">
           {busy ? t("common.creating") : t("setup.create")}
         </Button>
       </form>

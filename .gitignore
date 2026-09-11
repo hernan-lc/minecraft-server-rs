@@ -1,5 +1,9 @@
 /target
 /data
+# Disposable first-run demo data (see web/demo/README.md). Never use /data.
+/data-demo
+# Optional Browserbase recording downloads (see web/demo/recording.ts).
+web/artifacts
 node_modules
 web/dist
 *.log
