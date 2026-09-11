@@ -1,8 +1,9 @@
 import type { WriteStream } from "node:fs";
 import type { BrowserContext, Page } from "playwright";
 import { closeDemoBrowser, disableRequestInterception, launchDemoBrowser, type DemoBrowser } from "./browser.js";
-import { loadDemoConfig, type DemoConfig } from "./config.js";
+import { demoEnvFileLabel, loadDemoConfig, type DemoConfig } from "./config.js";
 import { recommendedJavaForVersion } from "../src/minecraftJava.js";
+import { startCaptureHeartbeat, type DisposableCaptureHeartbeat } from "./captureHeartbeat.js";
 import {
   demoClick,
   demoFocus,
@@ -27,6 +28,8 @@ import {
 } from "./helpers.js";
 import {
   ChapterLog,
+  VIDEO_HEIGHT,
+  VIDEO_WIDTH,
   saveFailureScreenshot,
   saveDiagnosticsArtifact,
   saveRecording,
@@ -279,7 +282,11 @@ async function runFirstRun(
     const beat = setInterval(() => {
       void logHeartbeat();
     }, 30_000);
+    let heartbeat: DisposableCaptureHeartbeat | null = null;
     try {
+      if (config.captureHeartbeat) {
+        heartbeat = await startCaptureHeartbeat(page);
+      }
       await waitForServerOnline(page, config.onlineTimeoutMs, (status) => {
         if (status === "preparing" || status === "starting" || status === "online") {
           chapters.markOnce(status);
@@ -288,6 +295,7 @@ async function runFirstRun(
     } finally {
       heartbeatActive = false;
       clearInterval(beat);
+      await heartbeat?.stop();
     }
     chapters.markOnce("online");
     console.log("[demo] status: online");
@@ -340,6 +348,9 @@ async function main(): Promise<void> {
     );
   }
   console.log(`[demo] cache mode: ${config.cold ? "cold validation" : "warm recording"}`);
+  console.log(
+    `[demo] recording: ${VIDEO_WIDTH}x${VIDEO_HEIGHT} quality=${config.videoQuality} heartbeat=${config.captureHeartbeat}`,
+  );
 
   let handle: DemoBrowser | null = null;
   let chapters: ChapterLog | null = null;
@@ -386,12 +397,27 @@ async function main(): Promise<void> {
       }
 
       try {
+        const fileName = workflowError ? "first-run-failed.webm" : "first-run.webm";
+        const videoPath = await saveRecording(handle, fileName);
+        console.log(`[demo] recording saved: ${videoPath}`);
+      } catch (recordingError) {
+        console.error(
+          `[demo] could not save recording: ${
+            recordingError instanceof Error ? recordingError.message : String(recordingError)
+          }`,
+        );
+        if (!workflowError) workflowError = recordingError;
+      }
+
+      try {
         const diagnosticsPath = await saveDiagnosticsArtifact(
           {
             effectiveConfig: {
-              envFile: config.envFile,
+              envFile: demoEnvFileLabel(config.envFile),
               baseUrl: config.baseUrl,
               cold: config.cold,
+              videoQuality: config.videoQuality,
+              captureHeartbeat: config.captureHeartbeat,
               uiTimeoutMs: config.uiTimeoutMs,
               catalogTimeoutMs: config.catalogTimeoutMs,
               createServerTimeoutMs: config.createServerTimeoutMs,
@@ -408,6 +434,12 @@ async function main(): Promise<void> {
                 }
               : null,
             recentLogs: latestDiagnostics?.backendConsoleLines ?? [],
+            recording: {
+              width: VIDEO_WIDTH,
+              height: VIDEO_HEIGHT,
+              quality: config.videoQuality,
+              captureHeartbeat: config.captureHeartbeat,
+            },
             network: handle.networkDiagnostics.snapshot(),
           },
           workflowError ? "first-run-failed.diagnostics.json" : "first-run.diagnostics.json",
@@ -422,18 +454,6 @@ async function main(): Promise<void> {
         if (!workflowError) workflowError = diagnosticsError;
       }
 
-      try {
-        const fileName = workflowError ? "first-run-failed.webm" : "first-run.webm";
-        const videoPath = await saveRecording(handle, fileName);
-        if (videoPath) console.log(`[demo] recording saved: ${videoPath}`);
-      } catch (recordingError) {
-        console.error(
-          `[demo] could not save recording: ${
-            recordingError instanceof Error ? recordingError.message : String(recordingError)
-          }`,
-        );
-        if (!workflowError) workflowError = recordingError;
-      }
     }
 
     if (workflowError) throw workflowError;

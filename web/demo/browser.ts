@@ -1,7 +1,13 @@
+import { mkdir, rm } from "node:fs/promises";
 import type { Browser, BrowserContext, Page } from "playwright";
 import { chromium } from "playwright";
 import { installDemoCursor } from "./cursor.js";
-import { recordingDir, VIDEO_HEIGHT, VIDEO_WIDTH } from "./recording.js";
+import {
+  createRecordingStagingPath,
+  recordingDir,
+  VIDEO_HEIGHT,
+  VIDEO_WIDTH,
+} from "./recording.js";
 import type { DemoConfig } from "./config.js";
 import {
   installNetworkDiagnostics,
@@ -15,24 +21,24 @@ export interface DemoBrowser {
   networkDiagnostics: NetworkDiagnostics;
   /** Wall-clock ms when the page (and its video recording) was created. */
   startedAt: number;
+  recording: {
+    stagingPath: string;
+    active: boolean;
+  };
 }
 
 /**
- * Launch Chromium with video recording enabled.
+ * Launch Chromium with a high-quality Playwright screencast enabled.
  *
- * Recording is a context-level Playwright feature: every page in the
- * context is captured to a `.webm` file, finalized when the page closes.
+ * The page owns one `.webm` staging file from before the first navigation.
  * No API keys, accounts, or cloud sessions are involved.
  */
 export async function launchDemoBrowser(config: DemoConfig): Promise<DemoBrowser> {
   const browser = await chromium.launch({ headless: config.headless });
+  let stagingPath: string | null = null;
   try {
     const context = await browser.newContext({
       viewport: { width: VIDEO_WIDTH, height: VIDEO_HEIGHT },
-      recordVideo: {
-        dir: recordingDir(),
-        size: { width: VIDEO_WIDTH, height: VIDEO_HEIGHT },
-      },
     });
     try {
       // The panel serves a strict `style-src 'self'` CSP, which silently
@@ -52,9 +58,24 @@ export async function launchDemoBrowser(config: DemoConfig): Promise<DemoBrowser
       // Installed before the first navigation so the cursor is present in
       // every document, including after full-page redirects.
       await installDemoCursor(page);
-      return { browser, context, page, networkDiagnostics, startedAt: Date.now() };
+      await mkdir(recordingDir(), { recursive: true });
+      stagingPath = createRecordingStagingPath();
+      await page.screencast.start({
+        path: stagingPath,
+        size: { width: VIDEO_WIDTH, height: VIDEO_HEIGHT },
+        quality: config.videoQuality,
+      });
+      return {
+        browser,
+        context,
+        page,
+        networkDiagnostics,
+        startedAt: Date.now(),
+        recording: { stagingPath, active: true },
+      };
     } catch (error) {
       await context.close();
+      if (stagingPath) await rm(stagingPath, { force: true }).catch(() => {});
       throw error;
     }
   } catch (error) {
@@ -65,10 +86,18 @@ export async function launchDemoBrowser(config: DemoConfig): Promise<DemoBrowser
 
 /** Close everything; safe to call after a partial launch failure. */
 export async function closeDemoBrowser(handle: Partial<DemoBrowser>): Promise<void> {
-  // The page is closed by recording finalization; closing the context and
-  // browser here covers every partial-initialization path.
-  await handle.context?.close().catch(() => {});
-  await handle.browser?.close().catch(() => {});
+  if (handle.page && handle.recording?.active) {
+    try {
+      await handle.page.screencast.stop();
+    } catch {
+      // Preserve the workflow error; browser cleanup is best effort.
+    } finally {
+      handle.recording.active = false;
+    }
+  }
+  if (handle.page) await handle.page.close().catch(() => {});
+  if (handle.context) await handle.context.close().catch(() => {});
+  if (handle.browser) await handle.browser.close().catch(() => {});
 }
 
 async function enableCspCursorWorkaround(context: BrowserContext): Promise<void> {

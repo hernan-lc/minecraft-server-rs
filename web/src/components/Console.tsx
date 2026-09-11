@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
-import { ApiError, openConsole } from "../api";
+import { ApiError, api, openConsole } from "../api";
 import { useT } from "../i18n";
 import * as Icon from "./icons";
 import { IconButton } from "./ui";
@@ -9,6 +9,7 @@ import type { ConsoleLine, ProgressState, ServerEvent, Status } from "../types";
 const MAX_LINES = 2000;
 
 const MAX_RETRY_DELAY_MS = 30_000;
+export const INITIAL_BACKFILL_TIMEOUT_MS = 10_000;
 
 export type ConsoleConnectionState =
   | "connecting"
@@ -55,8 +56,20 @@ function uniqueLines(lines: ConsoleLine[]): ConsoleLine[] {
   });
 }
 
+function isUsableBackfill(
+  message: ServerEvent,
+): message is Extract<ServerEvent, { type: "backfill" }> {
+  return (
+    message.type === "backfill" &&
+    Array.isArray(message.lines) &&
+    typeof message.status === "object" &&
+    message.status !== null &&
+    typeof message.status.status === "string"
+  );
+}
+
 /** Merge a reconnect backfill with lines received while the socket reopened. */
-function mergeBackfill(previous: ConsoleEntry[], incoming: ConsoleLine[]): ConsoleEntry[] {
+export function mergeBackfill(previous: ConsoleEntry[], incoming: ConsoleLine[]): ConsoleEntry[] {
   const bySeq = new Map<number, ConsoleLine>();
   for (const entry of previous) {
     if (entry.kind === "line") bySeq.set(entry.line.seq, entry.line);
@@ -123,9 +136,42 @@ export function Console({
     noticeIdRef.current = 0;
     let closed = false;
     let retry: number | undefined;
+    let backfillTimer: number | undefined;
     let attempt = 0;
 
+    const clearBackfillWatchdog = () => {
+      if (backfillTimer !== undefined) {
+        window.clearTimeout(backfillTimer);
+        backfillTimer = undefined;
+      }
+    };
+
+    const armBackfillWatchdog = (ws: WebSocket) => {
+      clearBackfillWatchdog();
+      backfillTimer = window.setTimeout(() => {
+        if (closed || socket.current !== ws) return;
+        // A browser WebSocket can remain CONNECTING when the upgrade is
+        // blocked, and a fast server can deliver the first frame before a
+        // consumer observes it. Either way, do not leave the console stuck
+        // forever with no close event to trigger the retry path.
+        setLastConnectionError("handshake");
+        setConnectionState("reconnecting");
+        ws.close();
+      }, INITIAL_BACKFILL_TIMEOUT_MS);
+    };
+
+    const scheduleReconnect = () => {
+      if (closed || retry !== undefined) return;
+      retry = window.setTimeout(() => {
+        retry = undefined;
+        void connect();
+      }, consoleRetryDelay(attempt));
+      attempt += 1;
+    };
+
     const connect = async () => {
+      if (closed) return;
+      retry = undefined;
       let ws: WebSocket;
       try {
         ws = await openConsole(serverId);
@@ -138,8 +184,7 @@ export function Console({
           return;
         }
         setConnectionState("reconnecting");
-        retry = window.setTimeout(connect, consoleRetryDelay(attempt));
-        attempt += 1;
+        scheduleReconnect();
         return;
       }
       if (closed) {
@@ -147,11 +192,15 @@ export function Console({
         return;
       }
       socket.current = ws;
+      // Start this before onopen as well as from onopen. This covers a
+      // handshake that never reaches onopen and the small window in which a
+      // very fast socket opens before the awaited helper resumes.
+      armBackfillWatchdog(ws);
 
       ws.onopen = () => {
-        setConnectionState("connected");
-        setLastConnectionError(null);
-        attempt = 0;
+        if (closed) return;
+        setConnectionState(attempt === 0 ? "connecting" : "reconnecting");
+        armBackfillWatchdog(ws);
       };
       ws.onerror = () => {
         if (closed) return;
@@ -159,6 +208,8 @@ export function Console({
         setLastConnectionError("network");
       };
       ws.onclose = (event) => {
+        clearBackfillWatchdog();
+        if (socket.current !== ws) return;
         socket.current = null;
         if (closed) return;
         // A policy/protocol close is the browser-visible equivalent of a
@@ -171,13 +222,26 @@ export function Console({
         }
         setConnectionState("reconnecting");
         setLastConnectionError("network");
-        retry = window.setTimeout(connect, consoleRetryDelay(attempt));
-        attempt += 1;
+        scheduleReconnect();
       };
       ws.onmessage = (event) => {
-        const message: ServerEvent = JSON.parse(event.data);
+        let message: ServerEvent;
+        try {
+          message = JSON.parse(event.data) as ServerEvent;
+        } catch {
+          setLastConnectionError("handshake");
+          return;
+        }
         switch (message.type) {
           case "backfill": {
+            if (!isUsableBackfill(message)) {
+              setLastConnectionError("handshake");
+              return;
+            }
+            clearBackfillWatchdog();
+            attempt = 0;
+            setConnectionState("connected");
+            setLastConnectionError(null);
             const backfill = uniqueLines(message.lines).slice(-MAX_LINES);
             setLines((previous) => mergeBackfill(previous, backfill));
 
@@ -235,15 +299,69 @@ export function Console({
             break;
         }
       };
+
+      // `openConsole()` constructs the browser socket before returning its
+      // promise. If Chromium completed the upgrade in that gap, the handler
+      // above may never receive `onopen`; the watchdog will still close and
+      // retry it, while this check keeps the visible state accurate.
+      if (ws.readyState === WebSocket.OPEN) {
+        setConnectionState(attempt === 0 ? "connecting" : "reconnecting");
+        armBackfillWatchdog(ws);
+      }
     };
 
     void connect();
     return () => {
       closed = true;
       if (retry) clearTimeout(retry);
+      clearBackfillWatchdog();
       socket.current?.close();
     };
   }, [serverId]);
+
+  // Keep retained output visible while the interactive socket is unavailable.
+  // This is intentionally read-only: command input remains gated on the
+  // validated WebSocket backfill above.
+  useEffect(() => {
+    if (connectionState === "connected") return;
+
+    let cancelled = false;
+    let polling = false;
+    const intervalMs = status === "online" ? 5_000 : 2_500;
+
+    const pollLogs = async () => {
+      if (cancelled || polling) return;
+      polling = true;
+      try {
+        const recent = await api.logs(serverId);
+        if (cancelled) return;
+        const lines = uniqueLines(recent).slice(-MAX_LINES);
+        if (lines.length === 0) return;
+        setLines((previous) => mergeBackfill(previous, lines));
+        const highest = lines.reduce(
+          (value, line) => Math.max(value, line.seq),
+          -1,
+        );
+        if (highest >= 0) {
+          lastSeqRef.current = Math.max(lastSeqRef.current ?? -1, highest);
+        }
+      } catch {
+        // The WebSocket retry and server status polling remain authoritative;
+        // a temporary REST failure should not add another visible error.
+      } finally {
+        polling = false;
+      }
+    };
+
+    void pollLogs();
+    const timer = window.setInterval(() => {
+      void pollLogs();
+    }, intervalMs);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [connectionState, serverId, status]);
 
   // Follow the tail, but stop fighting the operator once they scroll up.
   useEffect(() => {

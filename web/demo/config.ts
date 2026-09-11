@@ -13,6 +13,10 @@ export interface DemoConfig {
   cold: boolean;
   /** The single environment file selected by the demo loader, if present. */
   envFile: string | null;
+  /** JPEG quality used by Playwright's browser screencast recorder. */
+  videoQuality: number;
+  /** Whether to force tiny recording-only paints during long idle waits. */
+  captureHeartbeat: boolean;
   uiTimeoutMs: number;
   catalogTimeoutMs: number;
   createServerTimeoutMs: number;
@@ -28,6 +32,8 @@ export const TIMEOUTS = {
   startAccepted: 60_000,
   online: 20 * 60_000,
 } as const;
+
+export const DEFAULT_VIDEO_QUALITY = 95;
 
 /**
  * Disposable demo credentials. The demo creates this account itself on a
@@ -57,6 +63,11 @@ export function loadDemoEnvFiles(candidates?: readonly string[]): string | null 
   return null;
 }
 
+/** Keep persisted diagnostics shareable instead of embedding a local path. */
+export function demoEnvFileLabel(envFile: string | null): string | null {
+  return envFile ? ".env.demo" : null;
+}
+
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) return fallback;
   return value.trim().toLowerCase() === "true";
@@ -66,6 +77,21 @@ function parseBoolean(value: string | undefined, fallback: boolean): boolean {
 export function parsePositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+export function parseVideoQuality(
+  value: string | undefined,
+  fallback = DEFAULT_VIDEO_QUALITY,
+): number {
+  if (value === undefined) return fallback;
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+    throw new Error(
+      "MCPANEL_DEMO_VIDEO_QUALITY must be an integer from 1 to 100.",
+    );
+  }
+  return parsed;
 }
 
 function cliFlag(name: string): boolean {
@@ -99,6 +125,12 @@ export function loadDemoConfig(envCandidates?: readonly string[]): DemoConfig {
     !cliFlag("fast") && (cliFlag("slow") || parseBoolean(process.env.MCPANEL_DEMO_SLOW, true));
   const cold =
     cliFlag("cold") || (!cliFlag("warm") && parseBoolean(process.env.MCPANEL_DEMO_COLD, false));
+  const videoQuality = parseVideoQuality(
+    cliValue("video-quality") ?? process.env.MCPANEL_DEMO_VIDEO_QUALITY,
+  );
+  const captureHeartbeat =
+    !cliFlag("no-capture-heartbeat") &&
+    parseBoolean(process.env.MCPANEL_DEMO_CAPTURE_HEARTBEAT, true);
 
   const uiTimeoutMs = parsePositiveInt(
     process.env.MCPANEL_DEMO_UI_TIMEOUT_MS,
@@ -146,6 +178,8 @@ export function loadDemoConfig(envCandidates?: readonly string[]): DemoConfig {
     slow,
     cold,
     envFile,
+    videoQuality,
+    captureHeartbeat,
     uiTimeoutMs,
     catalogTimeoutMs,
     createServerTimeoutMs,

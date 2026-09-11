@@ -8,6 +8,8 @@ online Minecraft server and records the complete raw source footage.
 
 - Reproducible automated demos of the real mcpanel UI, recorded raw and
   uncut for manual editing.
+- High-quality Playwright screencast capture at 1280×720 (quality 95 by
+  default), with no desktop recorder or second cursor.
 - A foundation for future browser workflow/regression testing.
 - Fully deterministic: stable `data-testid` locators, no AI, no API keys,
   no cloud sessions.
@@ -58,6 +60,7 @@ Output:
 [demo] startup 60s ui=starting backend=starting pid=1234 uptime=58s console=connected logs=47 last="Preparing spawn area: 83%"
 [demo] backend status: online
 [demo] UI status: online
+[demo] recording: 1280x720 quality=95 heartbeat=true
 [demo] recording saved: .../artifacts/demos/first-run.webm
 [demo] success
 ```
@@ -107,6 +110,8 @@ CLI flags (highest precedence):
                         (default: slow; demo:* is watchable by default)
 --headed / --headless   show the browser or not (default: headless)
 --cold / --warm         cache-validation intent (default: warm)
+--video-quality <1-100> high-quality screencast setting (default: 95)
+--no-capture-heartbeat  disable recording-only idle repaint heartbeat
 --url <url>             panel URL
 --user <name>           demo username (default: admin)
 --password <pw>         demo password (default: mcpanel-demo-password)
@@ -125,6 +130,8 @@ MCPANEL_DEMO_CATALOG_TIMEOUT_MS=90000
 MCPANEL_DEMO_CREATE_SERVER_TIMEOUT_MS=60000
 MCPANEL_DEMO_START_TIMEOUT_MS=60000
 MCPANEL_DEMO_ONLINE_TIMEOUT_MS=1200000
+MCPANEL_DEMO_VIDEO_QUALITY=95
+MCPANEL_DEMO_CAPTURE_HEARTBEAT=true
 ```
 
 Nothing else is required — defaults cover the standard local setup.
@@ -199,6 +206,12 @@ Two concerns stay separate throughout `web/demo/`:
 Presentation pauses always run *after* the expected state exists — never
 as a substitute for waiting on it.
 
+The browser recorder uses `page.screencast` instead of context-level
+`recordVideo`; raw footage is intentionally larger so small version, Java,
+status, and console text stays readable. During long startup waits, an
+optional 1×1 recording-only paint heartbeat keeps browser frames fresh
+without moving the cursor or simulating input.
+
 ## Troubleshooting
 
 - `Demo requires a fresh mcpanel data directory. Setup has already been
@@ -230,9 +243,10 @@ as a substitute for waiting on it.
 ```text
 web/demo/
 ├── config.ts     # env/CLI parsing, cache mode, and timeout categories
-├── browser.ts    # Playwright Chromium launch + video context
+├── browser.ts    # Playwright Chromium launch + screencast context
 ├── cursor.ts     # injected demo cursor + human interaction helpers
 ├── helpers.ts    # pacing, step(), condition-based waits (no raw sleeps)
+├── captureHeartbeat.ts # recording-only idle repaint heartbeat
 ├── recording.ts  # save video, chapters, screenshots, and diagnostics
 ├── networkDiagnostics.ts # sanitized HTTP/WebSocket observation
 ├── first-run.ts  # First Run → Create Server → Start workflow

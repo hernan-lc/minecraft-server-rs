@@ -19,6 +19,16 @@ export function recordingPath(fileName: string): string {
   return resolve(recordingDir(), fileName);
 }
 
+export function createRecordingStagingPath(
+  stem = "first-run",
+): string {
+  const safeStem = stem.replace(/[^a-zA-Z0-9_-]/g, "-");
+  return resolve(
+    recordingDir(),
+    `.${safeStem}.${process.pid}.${Date.now()}.webm`,
+  );
+}
+
 function isNotFoundError(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -29,45 +39,42 @@ function isNotFoundError(error: unknown): boolean {
 }
 
 /**
- * Finalize the recording and save it as `artifacts/demos/first-run.webm`.
- *
- * Playwright finalizes the `.webm` when the page closes; `saveAs` then
- * moves it to its stable published path. Call this after the workflow,
- * before closing the context/browser.
+ * Stop the Playwright screencast, validate its staging file, and publish it
+ * atomically as `artifacts/demos/first-run.webm`.
  */
 export async function saveRecording(
   handle: DemoBrowser,
   fileName = RECORDING_FILE_NAME,
-): Promise<string | null> {
-  const video = handle.page.video();
-  if (!video) return null;
-  await handle.page.close().catch(() => {});
+): Promise<string> {
+  if (handle.recording.active) {
+    let stopped = false;
+    try {
+      await handle.page.screencast.stop();
+      stopped = true;
+    } finally {
+      if (stopped) handle.recording.active = false;
+    }
+  }
+
+  const source = handle.recording.stagingPath;
   const dir = recordingDir();
   await mkdir(dir, { recursive: true });
   const target = recordingPath(fileName);
-  const staging = resolve(
-    dir,
-    `.${fileName}.${process.pid}.${Date.now()}.tmp`,
-  );
   const backup = resolve(
     dir,
     `.${fileName}.${process.pid}.${Date.now()}.bak`,
   );
-  const original = await video.path().catch(() => null);
   let backupCreated = false;
 
   try {
-    // Save to a private temporary path first. A failed finalization must never
-    // replace a previous successful recording with a partial/zero-byte file.
-    await video.saveAs(staging);
-    const saved = await stat(staging);
+    const saved = await stat(source);
     if (!saved.isFile() || saved.size === 0) {
-      throw new Error("Playwright produced an empty recording.");
+      throw new Error("Playwright produced an empty screencast.");
     }
 
-    // The staged file is valid before the stable name is touched. Windows
-    // does not replace an existing file with rename(), so move the old stable
-    // file aside and restore it if publishing the new one fails.
+    // Validate the staging file before touching the stable name. Windows does
+    // not replace an existing file with rename(), so move the old stable file
+    // aside and restore it if publishing the new one fails.
     try {
       await rename(target, backup);
       backupCreated = true;
@@ -75,7 +82,7 @@ export async function saveRecording(
       if (!isNotFoundError(error)) throw error;
     }
     try {
-      await rename(staging, target);
+      await rename(source, target);
     } catch (error) {
       if (backupCreated) {
         await rm(target, { force: true }).catch(() => {});
@@ -89,12 +96,8 @@ export async function saveRecording(
       backupCreated = false;
     }
 
-    // `saveAs` may leave the original behind — keep only the published file.
-    if (original && resolve(original) !== target) {
-      await rm(original, { force: true }).catch(() => {});
-    }
   } catch (error) {
-    await rm(staging, { force: true }).catch(() => {});
+    await rm(source, { force: true }).catch(() => {});
     if (backupCreated) {
       await rm(target, { force: true }).catch(() => {});
       await rename(backup, target).catch(() => {});

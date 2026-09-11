@@ -2,31 +2,45 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import { I18nProvider } from "../i18n";
 import type { ConsoleLine, ServerEvent, ServerSnapshot } from "../types";
-import { Console, consoleErrorKind, consoleRetryDelay, isTerminalConsoleError } from "./Console";
+import {
+  Console,
+  consoleErrorKind,
+  consoleRetryDelay,
+  INITIAL_BACKFILL_TIMEOUT_MS,
+  isTerminalConsoleError,
+} from "./Console";
 import { ApiError } from "../api";
 
-const apiMock = vi.hoisted(() => ({ openConsole: vi.fn() }));
+const apiMock = vi.hoisted(() => ({ openConsole: vi.fn(), logs: vi.fn() }));
 
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
-  return { ...actual, openConsole: apiMock.openConsole };
+  return {
+    ...actual,
+    api: { ...actual.api, logs: apiMock.logs },
+    openConsole: apiMock.openConsole,
+  };
 });
 
 class FakeSocket {
   static instances: FakeSocket[] = [];
   readyState = 1;
   onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event?: { code?: number }) => void) | null = null;
+  onerror: (() => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
 
   constructor() {
     FakeSocket.instances.push(this);
-    queueMicrotask(() => this.onopen?.());
   }
 
-  close() {
+  open() {
+    this.onopen?.();
+  }
+
+  close(code = 1000) {
     this.readyState = 3;
-    this.onclose?.();
+    this.onclose?.({ code });
   }
 
   emit(message: ServerEvent) {
@@ -48,11 +62,16 @@ function preparingStatus(): ServerSnapshot {
   };
 }
 
-function renderConsole(onProgress = vi.fn()) {
+function renderConsole(status: "preparing" | "starting" | "online" = "preparing", onProgress = vi.fn()) {
   const onStatus = vi.fn();
   render(
     <I18nProvider>
-      <Console serverId="server-1" onStatus={onStatus} onProgress={onProgress} />
+      <Console
+        serverId="server-1"
+        status={status}
+        onStatus={onStatus}
+        onProgress={onProgress}
+      />
     </I18nProvider>,
   );
   return { onStatus, onProgress };
@@ -62,12 +81,14 @@ describe("console sequence handling", () => {
   beforeEach(() => {
     FakeSocket.instances = [];
     apiMock.openConsole.mockImplementation(async () => new FakeSocket() as unknown as WebSocket);
+    apiMock.logs.mockResolvedValue([]);
   });
 
   it("deduplicates backfill/live overlap and forwards current progress", async () => {
     const { onProgress } = renderConsole();
     await waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
     const socket = FakeSocket.instances[0];
+    socket.open();
 
     socket.emit({
       type: "backfill",
@@ -94,6 +115,7 @@ describe("console sequence handling", () => {
       renderConsole();
       await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
       const first = FakeSocket.instances[0];
+      first.open();
       first.emit({
         type: "backfill",
         status: preparingStatus(),
@@ -144,14 +166,112 @@ describe("console sequence handling", () => {
     expect(screen.queryByText("downloading paper 26.2")).not.toBeInTheDocument();
   });
 
-  it("exposes localization-independent connection state", async () => {
+  it("requires a valid backfill before exposing connected state", async () => {
     renderConsole();
 
     await waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
-    FakeSocket.instances[0].onopen?.();
+    const socket = FakeSocket.instances[0];
+    socket.open();
 
     const connection = await screen.findByTestId("server-console-connection");
+    expect(connection).toHaveAttribute("data-state", "reconnecting");
+    socket.emit({
+      type: "backfill",
+      status: preparingStatus(),
+      lines: [],
+      through_seq: null,
+    });
     await waitFor(() => expect(connection).toHaveAttribute("data-state", "connected"));
+  });
+
+  it("closes a socket that never delivers its initial backfill", async () => {
+    vi.useFakeTimers();
+    try {
+      renderConsole();
+      await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+      const socket = FakeSocket.instances[0];
+      socket.open();
+
+      await vi.advanceTimersByTimeAsync(INITIAL_BACKFILL_TIMEOUT_MS);
+
+      expect(socket.readyState).toBe(3);
+      expect(screen.getByTestId("server-console-connection")).toHaveAttribute(
+        "data-state",
+        "reconnecting",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows retained REST logs while disconnected and keeps commands disabled", async () => {
+    apiMock.logs.mockResolvedValue([line(20), line(21)]);
+    renderConsole("starting");
+
+    expect(await screen.findByText("line-21")).toBeInTheDocument();
+    expect(screen.getByText("line-20")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Not connected")).toBeDisabled();
+    expect(screen.getByTestId("server-console-connection")).toHaveAttribute(
+      "data-state",
+      "reconnecting",
+    );
+  });
+
+  it("stops REST polling after a socket backfill and deduplicates lines", async () => {
+    vi.useFakeTimers();
+    try {
+      apiMock.logs.mockResolvedValue([line(20), line(21)]);
+      renderConsole("starting");
+      await vi.waitFor(() => expect(apiMock.logs).toHaveBeenCalled());
+      await vi.waitFor(() => expect(screen.getByText("line-21")).toBeInTheDocument());
+
+      const socket = FakeSocket.instances[0];
+      socket.open();
+      socket.emit({
+        type: "backfill",
+        status: preparingStatus(),
+        lines: [line(20), line(21), line(22)],
+        through_seq: 22,
+      });
+      await vi.waitFor(() =>
+        expect(screen.getByTestId("server-console-connection")).toHaveAttribute(
+          "data-state",
+          "connected",
+        ),
+      );
+      expect(screen.getAllByText("line-20")).toHaveLength(1);
+      expect(screen.getByText("line-22")).toBeInTheDocument();
+
+      apiMock.logs.mockClear();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(apiMock.logs).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resets reconnect delay only after a valid backfill", async () => {
+    vi.useFakeTimers();
+    try {
+      renderConsole("starting");
+      await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+      const first = FakeSocket.instances[0];
+      first.open();
+      first.emit({ type: "backfill", status: preparingStatus(), lines: [], through_seq: null });
+      first.close();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(2));
+      const second = FakeSocket.instances[1];
+      second.open();
+      second.emit({ type: "backfill", status: preparingStatus(), lines: [], through_seq: null });
+      second.close();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(FakeSocket.instances).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("uses capped exponential reconnect backoff and terminal HTTP errors", () => {
