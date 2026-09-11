@@ -55,6 +55,10 @@ pub fn hidden_std_command(program: impl AsRef<OsStr>) -> std::process::Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    use std::process::Stdio;
+    #[cfg(windows)]
+    use tokio::io::AsyncReadExt;
 
     #[test]
     fn flag_matches_the_windows_sdk_value() {
@@ -80,5 +84,39 @@ mod tests {
         hide_std(&mut std_cmd);
         hide_std(&mut std_cmd);
         assert_eq!(std_cmd.get_program(), OsStr::new("java"));
+    }
+
+    /// Keep this Windows-only because the behavior under test is the
+    /// CREATE_NO_WINDOW + piped stdio combination used for the JVM.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn create_no_window_preserves_piped_stdout_and_stderr() {
+        let command = std::env::var_os("ComSpec").expect("Windows has ComSpec");
+        let mut child = hidden_tokio_command(command)
+            .args(["/C", "echo stdout-pump & echo stderr-pump 1>&2"])
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("hidden child should spawn");
+        let mut stdout = child.stdout.take().expect("stdout pipe");
+        let mut stderr = child.stderr.take().expect("stderr pipe");
+        let (stdout, stderr) = tokio::join!(
+            async {
+                let mut bytes = Vec::new();
+                stdout.read_to_end(&mut bytes).await.unwrap();
+                bytes
+            },
+            async {
+                let mut bytes = Vec::new();
+                stderr.read_to_end(&mut bytes).await.unwrap();
+                bytes
+            },
+        );
+        let status = child.wait().await.unwrap();
+        assert!(status.success());
+        assert!(String::from_utf8_lossy(&stdout).contains("stdout-pump"));
+        assert!(String::from_utf8_lossy(&stderr).contains("stderr-pump"));
     }
 }

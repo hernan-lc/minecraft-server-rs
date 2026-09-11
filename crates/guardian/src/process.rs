@@ -930,7 +930,19 @@ impl Guardian {
         let this = Arc::downgrade(self);
         tokio::spawn(async move {
             let mut lines = BufReader::new(reader).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            loop {
+                let line = match lines.next_line().await {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(error) => {
+                        if let Some(guardian) = this.upgrade() {
+                            guardian
+                                .say(format!("{stream:?} reader failed: {error}"))
+                                .await;
+                        }
+                        break;
+                    }
+                };
                 let Some(guardian) = this.upgrade() else {
                     return;
                 };
@@ -1602,6 +1614,75 @@ mod tests {
         let (lines, through_seq) = guardian.console_backfill().await;
         assert_eq!(lines.len(), 2);
         assert_eq!(through_seq, Some(lines[1].seq));
+    }
+
+    #[tokio::test]
+    async fn stdout_reader_stores_paper_output_and_promotes_starting_online() {
+        let guardian = Guardian::new(
+            ServerConfig::paper("/tmp/mcpanel-reader-ready", "1.21.8"),
+            GuardianConfig::default(),
+            "/tmp/mcpanel-reader-ready",
+        );
+        {
+            let mut state = guardian.state.lock().await;
+            state.generation = 1;
+            state.status = Some(ServerStatus::Starting);
+        }
+
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        guardian.spawn_reader(reader, Stream::Stdout, "paper".into(), 1);
+        writer
+            .write_all(b"[INFO]: Done (1.23s)! For help, type \"help\"\n")
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if guardian.status().await == ServerStatus::Online {
+                    let lines = guardian.console().await;
+                    if lines.iter().any(|line| line.line.contains("Done (1.23s)")) {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("stdout reader should promote the server and retain the line");
+    }
+
+    #[tokio::test]
+    async fn stderr_reader_stores_child_output() {
+        let guardian = Guardian::new(
+            ServerConfig::paper("/tmp/mcpanel-reader-stderr", "1.21.8"),
+            GuardianConfig::default(),
+            "/tmp/mcpanel-reader-stderr",
+        );
+        {
+            let mut state = guardian.state.lock().await;
+            state.generation = 1;
+            state.status = Some(ServerStatus::Starting);
+        }
+
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        guardian.spawn_reader(reader, Stream::Stderr, "paper".into(), 1);
+        writer.write_all(b"stderr-pump-test\n").await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if guardian
+                    .console()
+                    .await
+                    .iter()
+                    .any(|line| line.stream == Stream::Stderr && line.line == "stderr-pump-test")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("stderr reader should retain child output");
     }
 
     #[test]

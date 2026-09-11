@@ -240,8 +240,30 @@ pub fn router() -> Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use crate::auth::Identity;
+    use crate::limits::ResourceLimits;
     use crate::state::{AppState, PlayitMode};
+    use axum::Router;
+    use futures_util::StreamExt;
     use guardian::{GuardianConfig, ServerConfig};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    async fn issue_ticket(base_url: &str, server_id: &str, token: &str) -> String {
+        let response = reqwest::Client::new()
+            .post(format!("{base_url}/api/servers/{server_id}/ws/ticket"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        response.json::<serde_json::Value>().await.unwrap()["ticket"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
 
     /// The console's own authorization check: session snapshot first, then the
     /// live user and server records, exactly as the socket loop applies it.
@@ -367,5 +389,112 @@ mod tests {
         sessions.revoke_user("bob").await;
         assert!(sessions.resolve(&token1).await.is_none());
         assert!(sessions.resolve(&token2).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn console_ticket_upgrades_to_backfill_and_live_guardian_event() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(data_dir.path(), PlayitMode::External)
+            .await
+            .unwrap();
+        let record = crate::store::ServerRecord {
+            id: "srv-ws".into(),
+            name: "Server".into(),
+            config: ServerConfig::paper(state.server_dir("srv-ws"), "1.21.8"),
+            policy: GuardianConfig::default(),
+            playit: None,
+            created_at: "2026-08-28T00:00:00Z".into(),
+            backup_policy: None,
+        };
+        state
+            .store
+            .update(|data| data.servers.push(record.clone()))
+            .await
+            .unwrap();
+        let guardian = state.insert_guardian(&record).await;
+        guardian.say("initial-system-line").await;
+
+        let token = state
+            .sessions
+            .create(Identity {
+                username: "admin".into(),
+                admin: true,
+                servers: Vec::new(),
+            })
+            .await;
+        let app = Router::new()
+            .nest(
+                "/api",
+                crate::api::router_with_limits(ResourceLimits::default()),
+            )
+            .with_state(Arc::clone(&state));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+        let base_url = format!("http://{address}");
+        let ticket = issue_ticket(&base_url, "srv-ws", &token).await;
+        let ws_url = format!("ws://{address}/api/servers/srv-ws/ws?ticket={ticket}");
+        let (mut socket, _) = connect_async(&ws_url).await.unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let Some(message) = socket.next().await else {
+                    panic!("console socket closed before backfill");
+                };
+                let message = message.unwrap();
+                if let Message::Text(text) = message {
+                    break serde_json::from_str::<serde_json::Value>(text.as_ref()).unwrap();
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(first["type"], "backfill");
+        assert_eq!(first["status"]["status"], "offline");
+        assert_eq!(first["lines"][0]["line"], "initial-system-line");
+
+        guardian.say("integration-test-line").await;
+        let live = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let Some(message) = socket.next().await else {
+                    panic!("console socket closed before live event");
+                };
+                let message = message.unwrap();
+                if let Message::Text(text) = message {
+                    let value = serde_json::from_str::<serde_json::Value>(text.as_ref()).unwrap();
+                    if value["type"] == "console" {
+                        break value;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(live["line"], "integration-test-line");
+        socket.close(None).await.unwrap();
+
+        // The grant is consumed by the successful upgrade.
+        let reused = connect_async(&ws_url).await;
+        assert!(reused.is_err(), "a console ticket must be single-use");
+
+        // A ticket cannot be replayed against another server path.
+        let wrong_path_ticket = issue_ticket(&base_url, "srv-ws", &token).await;
+        let wrong_path_url =
+            format!("ws://{address}/api/servers/not-srv-ws/ws?ticket={wrong_path_ticket}");
+        assert!(connect_async(&wrong_path_url).await.is_err());
+
+        // A ticket issued to a session that is revoked before the upgrade is
+        // rejected by the live session check.
+        let revoked_ticket = issue_ticket(&base_url, "srv-ws", &token).await;
+        state.sessions.revoke(&token).await;
+        let revoked_url = format!("ws://{address}/api/servers/srv-ws/ws?ticket={revoked_ticket}");
+        assert!(connect_async(&revoked_url).await.is_err());
+
+        server.abort();
+        state.playit.shutdown().await.unwrap();
     }
 }

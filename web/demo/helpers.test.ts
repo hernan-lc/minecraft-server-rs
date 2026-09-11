@@ -1,11 +1,13 @@
 import type { Locator, Page } from "playwright";
 import { describe, expect, it, vi } from "vitest";
 import {
+  classifyStartupFailure,
   waitForGone,
   waitForSelectOptions,
   waitForServerLifecycle,
   waitForServerOnline,
 } from "./helpers.js";
+import type { ServerDiagnostics } from "./helpers.js";
 
 function lifecyclePage(status: string): Page {
   const locators = {
@@ -88,5 +90,71 @@ describe("demo lifecycle helpers", () => {
     await expect(waitForSelectOptions(page, "server-version", "Minecraft versions", 0)).rejects.toThrow(
       /Last error: catalog request failed/,
     );
+  });
+
+  it("classifies Guardian output with no browser console as a transport failure", () => {
+    const diagnostics: ServerDiagnostics = {
+      uiStatus: "starting",
+      status: "starting",
+      backendStatus: "starting",
+      serverId: "srv-1",
+      pid: 1234,
+      uptimeSecs: 30,
+      stage: null,
+      fraction: null,
+      consoleConnection: "disconnected",
+      uiConsoleLines: [],
+      backendConsoleLines: [{ stream: "stdout", line: "Preparing spawn area" }],
+      consoleLines: [],
+      serverHttpStatus: 200,
+      logsHttpStatus: 200,
+      backendError: null,
+    };
+
+    expect(classifyStartupFailure(diagnostics)).toMatch(/Console transport failure/);
+  });
+
+  it("classifies a Paper Done line that did not promote status", () => {
+    const diagnostics: ServerDiagnostics = {
+      uiStatus: "starting",
+      status: "starting",
+      backendStatus: "starting",
+      serverId: "srv-1",
+      pid: 1234,
+      uptimeSecs: 30,
+      stage: null,
+      fraction: null,
+      consoleConnection: "connected",
+      uiConsoleLines: ["Done (1.2s)! For help, type \"help\""],
+      backendConsoleLines: [{ stream: "stdout", line: "Done (1.2s)! For help, type \"help\"" }],
+      consoleLines: [],
+      serverHttpStatus: 200,
+      logsHttpStatus: 200,
+      backendError: null,
+    };
+
+    expect(classifyStartupFailure(diagnostics)).toMatch(/readiness detection failure/);
+  });
+
+  it("classifies an online backend with a stale UI", () => {
+    const diagnostics: ServerDiagnostics = {
+      uiStatus: "starting",
+      status: "starting",
+      backendStatus: "online",
+      serverId: "srv-1",
+      pid: 1234,
+      uptimeSecs: 30,
+      stage: null,
+      fraction: null,
+      consoleConnection: "connected",
+      uiConsoleLines: [],
+      backendConsoleLines: [],
+      consoleLines: [],
+      serverHttpStatus: 200,
+      logsHttpStatus: 200,
+      backendError: null,
+    };
+
+    expect(classifyStartupFailure(diagnostics)).toMatch(/Frontend status synchronization failure/);
   });
 });

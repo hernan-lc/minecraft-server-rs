@@ -2,11 +2,15 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/preact";
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import { I18nProvider } from "../i18n";
 import type { ConsoleLine, ServerEvent, ServerSnapshot } from "../types";
-import { Console } from "./Console";
+import { Console, consoleErrorKind, consoleRetryDelay, isTerminalConsoleError } from "./Console";
+import { ApiError } from "../api";
 
 const apiMock = vi.hoisted(() => ({ openConsole: vi.fn() }));
 
-vi.mock("../api", () => ({ openConsole: apiMock.openConsole }));
+vi.mock("../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api")>();
+  return { ...actual, openConsole: apiMock.openConsole };
+});
 
 class FakeSocket {
   static instances: FakeSocket[] = [];
@@ -138,5 +142,29 @@ describe("console sequence handling", () => {
 
     expect(screen.getByText(/Preparing.*38%/)).toBeInTheDocument();
     expect(screen.queryByText("downloading paper 26.2")).not.toBeInTheDocument();
+  });
+
+  it("exposes localization-independent connection state", async () => {
+    renderConsole();
+
+    await waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+    FakeSocket.instances[0].onopen?.();
+
+    const connection = await screen.findByTestId("server-console-connection");
+    await waitFor(() => expect(connection).toHaveAttribute("data-state", "connected"));
+  });
+
+  it("uses capped exponential reconnect backoff and terminal HTTP errors", () => {
+    expect(consoleRetryDelay(0)).toBe(1_000);
+    expect(consoleRetryDelay(1)).toBe(2_000);
+    expect(consoleRetryDelay(5)).toBe(30_000);
+    expect(consoleRetryDelay(20)).toBe(30_000);
+
+    const denied = new ApiError("denied", 403);
+    const unavailable = new ApiError("unavailable", 503);
+    expect(isTerminalConsoleError(denied)).toBe(true);
+    expect(isTerminalConsoleError(unavailable)).toBe(false);
+    expect(consoleErrorKind(denied)).toBe("authorization");
+    expect(consoleErrorKind(unavailable)).toBe("server");
   });
 });

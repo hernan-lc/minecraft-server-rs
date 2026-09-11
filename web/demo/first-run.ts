@@ -1,4 +1,3 @@
-import "dotenv/config";
 import type { WriteStream } from "node:fs";
 import type { BrowserContext, Page } from "playwright";
 import { closeDemoBrowser, disableRequestInterception, launchDemoBrowser, type DemoBrowser } from "./browser.js";
@@ -13,10 +12,12 @@ import {
 } from "./cursor.js";
 import {
   assertVisible,
+  formatServerDiagnostics,
   demoPause,
   pause,
   readBodyText,
   readServerDiagnostics,
+  type ServerDiagnostics,
   step,
   waitForGone,
   waitForSelectOptions,
@@ -27,6 +28,7 @@ import {
 import {
   ChapterLog,
   saveFailureScreenshot,
+  saveDiagnosticsArtifact,
   saveRecording,
 } from "./recording.js";
 
@@ -53,6 +55,7 @@ async function runFirstRun(
   context: BrowserContext,
   config: DemoConfig,
   chapters: ChapterLog,
+  onDiagnostics?: (diagnostics: ServerDiagnostics) => void,
 ): Promise<void> {
   await step("opening setup", async () => {
     await page.goto(`${config.baseUrl}/setup`);
@@ -256,16 +259,20 @@ async function runFirstRun(
     // for real. This takes minutes on first start and is recorded uncut.
     // Heartbeat every 30 s so long provisioning visibly progresses.
     const started = Date.now();
+    let heartbeatActive = true;
     const logHeartbeat = async (): Promise<void> => {
       const elapsed = Math.round((Date.now() - started) / 1000);
       const diagnostics = await readServerDiagnostics(page).catch(() => null);
+      if (!heartbeatActive) return;
       if (!diagnostics) {
-        console.log(`[demo] provisioning… ${elapsed}s status=unknown stage=unknown fraction=unknown`);
+        console.log(`[demo] startup ${elapsed}s ui=unknown backend=unknown pid=unknown console=unknown logs=0`);
         return;
       }
-      const fraction = diagnostics.fraction === null ? "unknown" : diagnostics.fraction;
+      onDiagnostics?.(diagnostics);
+      const last = diagnostics.backendConsoleLines.at(-1)?.line ?? diagnostics.uiConsoleLines.at(-1) ?? "";
+      const compactLast = last.length > 120 ? `${last.slice(0, 117)}...` : last;
       console.log(
-        `[demo] provisioning… ${elapsed}s status=${diagnostics.status} stage=${diagnostics.stage ?? "unknown"} fraction=${fraction}`,
+        `[demo] startup ${elapsed}s ui=${diagnostics.uiStatus} backend=${diagnostics.backendStatus ?? "unknown"} pid=${diagnostics.pid ?? "unknown"} uptime=${diagnostics.uptimeSecs ?? "unknown"}s console=${diagnostics.consoleConnection} logs=${diagnostics.backendConsoleLines.length} last=${JSON.stringify(compactLast)}`,
       );
     };
     await logHeartbeat();
@@ -277,16 +284,17 @@ async function runFirstRun(
         if (status === "preparing" || status === "starting" || status === "online") {
           chapters.markOnce(status);
         }
-      });
+      }, onDiagnostics);
     } finally {
+      heartbeatActive = false;
       clearInterval(beat);
     }
     chapters.markOnce("online");
     console.log("[demo] status: online");
     // Hold the real online state for raw-footage editing. The unconditional
-    // 2.5s hold keeps the final frame useful even in --fast mode.
+    // 3.5s hold keeps the final frame useful even in --fast mode.
     await demoPause(config, "reveal");
-    await pause(2500);
+    await pause(3500);
   });
 }
 
@@ -322,21 +330,38 @@ async function main(): Promise<void> {
     }
   }
   console.log(`[demo] target: ${config.baseUrl}`);
+  console.log(`[demo] env file: ${config.envFile ?? "none"}`);
+  console.log(
+    `[demo] timeouts: ui=${config.uiTimeoutMs / 1000}s catalog=${config.catalogTimeoutMs / 1000}s create=${config.createServerTimeoutMs / 1000}s start=${config.startTimeoutMs / 1000}s online=${config.onlineTimeoutMs / 1000}s`,
+  );
+  if (config.onlineTimeoutMs < 15 * 60_000) {
+    console.warn(
+      "[demo] warning: online timeout is below 15 minutes. First provisioning may outlive the recorder.",
+    );
+  }
   console.log(`[demo] cache mode: ${config.cold ? "cold validation" : "warm recording"}`);
 
   let handle: DemoBrowser | null = null;
   let chapters: ChapterLog | null = null;
   let workflowError: unknown = null;
+  let latestDiagnostics: ServerDiagnostics | null = null;
   try {
     handle = await launchDemoBrowser(config);
     chapters = new ChapterLog(handle.startedAt);
 
     try {
-      await runFirstRun(handle.page, handle.context, config, chapters);
+      await runFirstRun(handle.page, handle.context, config, chapters, (diagnostics) => {
+        latestDiagnostics = diagnostics;
+      });
       chapters.mark("end");
     } catch (error) {
       workflowError = error;
       chapters.mark("failed");
+      const failureDiagnostics = await readServerDiagnostics(handle.page).catch(() => null);
+      if (failureDiagnostics) latestDiagnostics = failureDiagnostics;
+      if (latestDiagnostics) {
+        console.error(`[demo] startup failed\n${formatServerDiagnostics(latestDiagnostics)}`);
+      }
       try {
         const screenshot = await saveFailureScreenshot(handle.page);
         console.log(`[demo] failure screenshot saved: ${screenshot}`);
@@ -358,6 +383,43 @@ async function main(): Promise<void> {
           }`,
         );
         if (!workflowError) workflowError = chapterError;
+      }
+
+      try {
+        const diagnosticsPath = await saveDiagnosticsArtifact(
+          {
+            effectiveConfig: {
+              envFile: config.envFile,
+              baseUrl: config.baseUrl,
+              cold: config.cold,
+              uiTimeoutMs: config.uiTimeoutMs,
+              catalogTimeoutMs: config.catalogTimeoutMs,
+              createServerTimeoutMs: config.createServerTimeoutMs,
+              startTimeoutMs: config.startTimeoutMs,
+              onlineTimeoutMs: config.onlineTimeoutMs,
+            },
+            events: chapters.events,
+            finalServer: latestDiagnostics,
+            consoleConnection: latestDiagnostics
+              ? {
+                  state: latestDiagnostics.consoleConnection,
+                  backendStatus: latestDiagnostics.backendStatus,
+                  uiStatus: latestDiagnostics.uiStatus,
+                }
+              : null,
+            recentLogs: latestDiagnostics?.backendConsoleLines ?? [],
+            network: handle.networkDiagnostics.snapshot(),
+          },
+          workflowError ? "first-run-failed.diagnostics.json" : "first-run.diagnostics.json",
+        );
+        console.log(`[demo] diagnostics saved: ${diagnosticsPath}`);
+      } catch (diagnosticsError) {
+        console.error(
+          `[demo] could not save diagnostics: ${
+            diagnosticsError instanceof Error ? diagnosticsError.message : String(diagnosticsError)
+          }`,
+        );
+        if (!workflowError) workflowError = diagnosticsError;
       }
 
       try {

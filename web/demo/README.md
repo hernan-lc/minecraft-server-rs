@@ -24,7 +24,8 @@ The password is filled directly with a locator and never logged.
 
 `npm run demo:first-run` is human-readable by default and records the full
 run to `artifacts/demos/first-run.webm` (1280×720), plus chapter markers in
-`artifacts/demos/first-run.chapters.json`. Provisioning is intentionally
+`artifacts/demos/first-run.chapters.json` and sanitized startup diagnostics in
+`artifacts/demos/first-run.diagnostics.json`. Provisioning is intentionally
 uncut; long Java, Paper, or world-initialization sections are edited later.
 
 ```bash
@@ -53,9 +54,10 @@ Output:
 [demo] opening Survival
 [demo] starting server
 [demo] status: preparing
-[demo] provisioning… 30s status=preparing stage=downloading Java 25 fraction=0.23
-[demo] status: starting
-[demo] status: online
+[demo] startup 30s ui=preparing backend=preparing pid=unknown uptime=unknowns console=reconnecting logs=0 last=""
+[demo] startup 60s ui=starting backend=starting pid=1234 uptime=58s console=connected logs=47 last="Preparing spawn area: 83%"
+[demo] backend status: online
+[demo] UI status: online
 [demo] recording saved: .../artifacts/demos/first-run.webm
 [demo] success
 ```
@@ -111,7 +113,10 @@ CLI flags (highest precedence):
 ```
 
 Environment variables (or a `web/.env.demo` file, see
-`.env.demo.example`) use the same values under `MCPANEL_DEMO_*` names.
+`.env.demo.example`) use the same values under `MCPANEL_DEMO_*` names. The
+demo reports which `.env.demo` file it selected and never loads the generic
+`.env` file implicitly. Existing process variables take precedence over that
+file; CLI flags take precedence over both.
 Timeout overrides are correctness limits, not presentation delays:
 
 ```dotenv
@@ -178,7 +183,11 @@ backend follow-up, not a Playwright shortcut.
 
 Failed attempts preserve `first-run-failed.webm`,
 `first-run-failed.png` when a screenshot is available, and
-`first-run.chapters.json` for diagnosis.
+`first-run.chapters.json` plus `first-run-failed.diagnostics.json` for
+diagnosis. The diagnostic artifact contains only effective non-secret config,
+chapter events, sanitized server/log snapshots, and redacted network events;
+it never stores passwords, cookies, CSRF values, authorization headers, or
+WebSocket tickets.
 
 ## Waiting vs pacing
 
@@ -205,8 +214,10 @@ as a substitute for waiting on it.
 - `dashboard did not appear within 30 seconds` — login failed or the API
   is down; each phase reports its own stage name.
 - `Server crashed during first boot` — the demo fails immediately and includes
-  status, elapsed time, progress stage/fraction when available, and recent
-  console lines.
+  UI/backend status, PID/uptime, progress stage/fraction when available,
+  console transport state, recent Guardian/UI lines, and a likely failing
+  layer. The backend REST snapshot is collected even when the browser console
+  WebSocket is disconnected.
 - `server did not enter preparing/starting/online ... after Start` —
   the Start action was rejected or provisioning stalled; check the panel
   logs and network access to Java/Minecraft upstreams.
@@ -222,7 +233,8 @@ web/demo/
 ├── browser.ts    # Playwright Chromium launch + video context
 ├── cursor.ts     # injected demo cursor + human interaction helpers
 ├── helpers.ts    # pacing, step(), condition-based waits (no raw sleeps)
-├── recording.ts  # save the .webm to artifacts/demos/first-run.webm
+├── recording.ts  # save video, chapters, screenshots, and diagnostics
+├── networkDiagnostics.ts # sanitized HTTP/WebSocket observation
 ├── first-run.ts  # First Run → Create Server → Start workflow
 └── README.md     # this file
 ```

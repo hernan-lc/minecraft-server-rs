@@ -11,6 +11,8 @@ export interface DemoConfig {
   slow: boolean;
   /** Cold validation deliberately avoids relying on a demo prewarm step. */
   cold: boolean;
+  /** The single environment file selected by the demo loader, if present. */
+  envFile: string | null;
   uiTimeoutMs: number;
   catalogTimeoutMs: number;
   createServerTimeoutMs: number;
@@ -33,22 +35,26 @@ export const TIMEOUTS = {
  */
 const DEFAULT_PASSWORD = "mcpanel-demo-password";
 
-function loadDemoEnvFiles(): void {
+export function loadDemoEnvFiles(candidates?: readonly string[]): string | null {
   // Optional overrides only — the demo runs with zero configuration.
   // `tsx demo/first-run.ts` runs with `web/` as cwd; also resolve relative
   // to this file so it works from the repo root.
   const here = dirname(fileURLToPath(import.meta.url));
-  for (const path of [
+  const paths = candidates ?? [
     resolve(here, "../.env.demo"),
     resolve(here, ".env.demo"),
     resolve(process.cwd(), ".env.demo"),
-  ]) {
+  ];
+  for (const path of paths) {
     if (existsSync(path)) {
-      loadDotenv({ path, override: false });
-      return;
+      loadDotenv({ path, override: false, quiet: true });
+      return path;
     }
   }
-  loadDotenv({ override: false });
+  // Deliberately do not load the generic `.env` file. The demo has one
+  // explicit owner for its environment so a developer's unrelated `.env`
+  // cannot silently change a recording.
+  return null;
 }
 
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {
@@ -80,10 +86,11 @@ function cliValue(name: string): string | null {
  * human-readable video without flags. `--fast` is the special mode for
  * development/debugging.
  *
- * Precedence: CLI flags > environment variables > built-in defaults.
+ * Precedence: CLI flags > existing process environment > `.env.demo` >
+ * built-in defaults.
  */
-export function loadDemoConfig(): DemoConfig {
-  loadDemoEnvFiles();
+export function loadDemoConfig(envCandidates?: readonly string[]): DemoConfig {
+  const envFile = loadDemoEnvFiles(envCandidates);
 
   const headed = cliFlag("headed") || cliFlag("headful");
   const headless =
@@ -138,6 +145,7 @@ export function loadDemoConfig(): DemoConfig {
     headless,
     slow,
     cold,
+    envFile,
     uiTimeoutMs,
     catalogTimeoutMs,
     createServerTimeoutMs,

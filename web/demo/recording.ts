@@ -115,6 +115,18 @@ export async function saveFailureScreenshot(
   return target;
 }
 
+/** Save sanitized run diagnostics independently of video/chapter finalization. */
+export async function saveDiagnosticsArtifact(
+  diagnostics: unknown,
+  fileName: string,
+): Promise<string> {
+  const dir = recordingDir();
+  await mkdir(dir, { recursive: true });
+  const target = recordingPath(fileName);
+  await writeFile(target, JSON.stringify(diagnostics, null, 2), "utf8");
+  return target;
+}
+
 export interface ChapterEvent {
   name: string;
   /** Seconds since the recording started (video-relative). */

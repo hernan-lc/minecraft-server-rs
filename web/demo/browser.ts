@@ -3,11 +3,16 @@ import { chromium } from "playwright";
 import { installDemoCursor } from "./cursor.js";
 import { recordingDir, VIDEO_HEIGHT, VIDEO_WIDTH } from "./recording.js";
 import type { DemoConfig } from "./config.js";
+import {
+  installNetworkDiagnostics,
+  type NetworkDiagnostics,
+} from "./networkDiagnostics.js";
 
 export interface DemoBrowser {
   browser: Browser;
   context: BrowserContext;
   page: Page;
+  networkDiagnostics: NetworkDiagnostics;
   /** Wall-clock ms when the page (and its video recording) was created. */
   startedAt: number;
 }
@@ -43,10 +48,11 @@ export async function launchDemoBrowser(config: DemoConfig): Promise<DemoBrowser
       // navigations must re-enable it the same way.
       await enableCspCursorWorkaround(context);
       const page = await context.newPage();
+      const networkDiagnostics = installNetworkDiagnostics(page);
       // Installed before the first navigation so the cursor is present in
       // every document, including after full-page redirects.
       await installDemoCursor(page);
-      return { browser, context, page, startedAt: Date.now() };
+      return { browser, context, page, networkDiagnostics, startedAt: Date.now() };
     } catch (error) {
       await context.close();
       throw error;

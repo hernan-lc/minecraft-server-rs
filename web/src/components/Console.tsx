@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
-import { openConsole } from "../api";
+import { ApiError, openConsole } from "../api";
 import { useT } from "../i18n";
 import * as Icon from "./icons";
 import { IconButton } from "./ui";
@@ -8,8 +8,39 @@ import type { ConsoleLine, ProgressState, ServerEvent, Status } from "../types";
 /** Keep the DOM bounded; the backend keeps the authoritative buffer. */
 const MAX_LINES = 2000;
 
-/** Give up after this many failed reconnects rather than retrying forever. */
-const MAX_RECONNECTS = 8;
+const MAX_RETRY_DELAY_MS = 30_000;
+
+export type ConsoleConnectionState =
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "disconnected";
+
+export type ConsoleConnectionErrorKind =
+  | "ticket"
+  | "handshake"
+  | "network"
+  | "authorization"
+  | "server";
+
+/** Exponential retry with a bounded tail: 1s, 2s, 4s, …, 30s, 30s. */
+export function consoleRetryDelay(attempt: number): number {
+  return Math.min(1000 * 2 ** Math.max(0, attempt), MAX_RETRY_DELAY_MS);
+}
+
+export function consoleErrorKind(error: unknown): ConsoleConnectionErrorKind {
+  if (error instanceof ApiError) {
+    if (error.status === 401) return "authorization";
+    if (error.status === 403 || error.status === 404) return "authorization";
+    if (error.status >= 500 || error.status === 429) return "server";
+    return "ticket";
+  }
+  return "network";
+}
+
+export function isTerminalConsoleError(error: unknown): boolean {
+  return error instanceof ApiError && [401, 403, 404].includes(error.status);
+}
 
 type ConsoleEntry =
   | { kind: "line"; line: ConsoleLine }
@@ -63,12 +94,12 @@ export function Console({
 }) {
   const t = useT();
   const [lines, setLines] = useState<ConsoleEntry[]>([]);
-  const [connected, setConnected] = useState(false);
+  const [connectionState, setConnectionState] = useState<ConsoleConnectionState>("connecting");
+  const [lastConnectionError, setLastConnectionError] = useState<ConsoleConnectionErrorKind | null>(null);
   const [draft, setDraft] = useState("");
   const [history, setHistory] = useState<string[]>([]);
   const [historyAt, setHistoryAt] = useState(-1);
 
-  const [gaveUp, setGaveUp] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
 
@@ -85,7 +116,8 @@ export function Console({
       : null;
 
   useEffect(() => {
-    setGaveUp(false);
+    setConnectionState("connecting");
+    setLastConnectionError(null);
     setLines([]);
     lastSeqRef.current = null;
     noticeIdRef.current = 0;
@@ -97,14 +129,17 @@ export function Console({
       let ws: WebSocket;
       try {
         ws = await openConsole(serverId);
-      } catch {
+      } catch (error) {
         if (closed) return;
-        attempt += 1;
-        if (attempt > MAX_RECONNECTS) {
-          setGaveUp(true);
+        const kind = consoleErrorKind(error);
+        setLastConnectionError(kind);
+        if (isTerminalConsoleError(error)) {
+          setConnectionState("disconnected");
           return;
         }
-        retry = window.setTimeout(connect, Math.min(1000 * 2 ** (attempt - 1), 30000));
+        setConnectionState("reconnecting");
+        retry = window.setTimeout(connect, consoleRetryDelay(attempt));
+        attempt += 1;
         return;
       }
       if (closed) {
@@ -114,22 +149,30 @@ export function Console({
       socket.current = ws;
 
       ws.onopen = () => {
-        setConnected(true);
+        setConnectionState("connected");
+        setLastConnectionError(null);
         attempt = 0;
       };
-      ws.onclose = () => {
-        setConnected(false);
+      ws.onerror = () => {
         if (closed) return;
-
-        // Backed off and bounded. A socket rejected because the session expired
-        // closes immediately every time, and retrying twice a second forever
-        // would hammer the panel from a tab nobody is even looking at.
-        attempt += 1;
-        if (attempt > MAX_RECONNECTS) {
-          setGaveUp(true);
+        setConnectionState("reconnecting");
+        setLastConnectionError("network");
+      };
+      ws.onclose = (event) => {
+        socket.current = null;
+        if (closed) return;
+        // A policy/protocol close is the browser-visible equivalent of a
+        // 403/404 handshake failure. Do not keep issuing one-use tickets for
+        // a session that the backend has rejected.
+        if (event?.code === 1003 || event?.code === 1008) {
+          setConnectionState("disconnected");
+          setLastConnectionError("authorization");
           return;
         }
-        retry = window.setTimeout(connect, Math.min(1000 * 2 ** (attempt - 1), 30000));
+        setConnectionState("reconnecting");
+        setLastConnectionError("network");
+        retry = window.setTimeout(connect, consoleRetryDelay(attempt));
+        attempt += 1;
       };
       ws.onmessage = (event) => {
         const message: ServerEvent = JSON.parse(event.data);
@@ -250,6 +293,7 @@ export function Console({
       lines.map((entry) => (
         <div
           key={entry.kind === "line" ? entry.line.seq : `notice-${entry.id}`}
+          data-console-line="true"
           class={`whitespace-pre-wrap break-words ${lineClass(entry.line)}`}
         >
           {entry.line.line}
@@ -277,14 +321,27 @@ export function Console({
             </span>
           )}
           <span
+            data-testid="server-console-connection"
+            data-state={
+              connectionState === "connected"
+                ? "connected"
+                : connectionState === "disconnected"
+                  ? "disconnected"
+                  : "reconnecting"
+            }
+            data-last-error-kind={lastConnectionError ?? undefined}
             class={`size-2.5 rounded-full ${
-              connected ? "bg-accent" : gaveUp ? "bg-red-500" : "animate-pulse bg-amber-400"
+              connectionState === "connected"
+                ? "bg-accent"
+                : connectionState === "disconnected"
+                  ? "bg-red-500"
+                  : "animate-pulse bg-amber-400"
             }`}
             role="status"
             aria-label={
-              connected
+              connectionState === "connected"
                 ? t("console.connected")
-                : gaveUp
+                : connectionState === "disconnected"
                   ? t("console.disconnectedState")
                   : t("console.reconnecting")
             }
@@ -334,8 +391,8 @@ export function Console({
           value={draft}
           onInput={(e) => setDraft((e.target as HTMLInputElement).value)}
           onKeyDown={onKeyDown}
-          placeholder={connected ? t("console.placeholder") : t("console.disconnected")}
-          disabled={!connected}
+          placeholder={connectionState === "connected" ? t("console.placeholder") : t("console.disconnected")}
+          disabled={connectionState !== "connected"}
           spellcheck={false}
           autocomplete="off"
           class="flex-1 bg-transparent font-mono text-sm text-fg placeholder:text-fg-muted/60 focus:outline-none disabled:opacity-50"
