@@ -57,6 +57,8 @@ function renderDetail(server: Server) {
   apiMock.serverPlayit.mockResolvedValue(null);
   apiMock.openConsole.mockRejectedValue(new Error("not connected in this test"));
 
+  // The first-visit tour is covered by Guide.test.tsx.
+  localStorage.setItem("mcpanel:guide:v2:server:admin", "seen");
   render(
     <I18nProvider>
       <ToastProvider>

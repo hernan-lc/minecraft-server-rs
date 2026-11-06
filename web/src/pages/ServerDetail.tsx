@@ -4,7 +4,7 @@ import { Loading } from "../components/Loading";
 import { useEffect, useState } from "preact/hooks";
 import { api } from "../api";
 import { useServerPower } from "../useServerPower";
-import { Guide } from "../components/Guide";
+import { Guide, type GuideStep } from "../components/Guide";
 import { Console } from "../components/Console";
 import { ServerActivity } from "../components/ServerActivity";
 import {
@@ -126,6 +126,21 @@ export function ServerDetail({
     { id: "settings", icon: <Icon.Settings size={15} /> },
   ];
 
+  const guideSteps: GuideStep[] = [
+    { title: t("guide.serverPowerTitle"), body: t("guide.serverPowerBody"), target: '[data-tour="server-power"]' },
+    ...(!server.eula_accepted
+      ? [{ title: t("guide.serverEulaTitle"), body: t("guide.serverEulaBody"), target: '[data-tour="server-eula"]', optional: true }]
+      : []),
+    { title: t("guide.serverTabsTitle"), body: t("guide.serverTabsBody"), target: '[data-tour="server-tabs"]' },
+    ...tabs.map(({ id }) => ({
+      title: t(`server.tabs.${id}` as "server.tabs.console"),
+      body: t(`guide.${id}` as "guide.console"),
+      target: '[data-tour="server-panel"]',
+      enter: () => setTab(id),
+    })),
+    { title: t("guide.replayTitle"), body: t("guide.replayBody"), target: '[data-tour="guide-help"]' },
+  ];
+
   const cpuHostPercent =
     typeof server.metrics?.cpu_host_percent === "number" &&
     Number.isFinite(server.metrics.cpu_host_percent)
@@ -204,7 +219,7 @@ export function ServerDetail({
             </div>
           </div>
 
-            <div class="flex min-w-0 items-center justify-between gap-1 sm:justify-end sm:gap-2">
+            <div data-tour="server-power" class="flex min-w-0 items-center justify-between gap-1 sm:justify-end sm:gap-2">
             <div data-testid="server-status" data-status={server.status}>
               <StatusPill status={server.status} />
             </div>
@@ -282,8 +297,8 @@ export function ServerDetail({
           </div>
         </div>
 
-        <nav class="-mx-3 flex px-3 sm:mx-0 sm:px-0">
-          <div class="flex w-full gap-0.5 rounded-2xl border border-ink-700 bg-ink-850 p-1 sm:w-fit sm:rounded-full">
+        <nav class="-mx-3 flex items-center gap-2 px-3 sm:mx-0 sm:px-0">
+          <div data-tour="server-tabs" class="flex min-w-0 flex-1 gap-0.5 rounded-2xl border border-ink-700 bg-ink-850 p-1 sm:w-fit sm:flex-none sm:rounded-full">
             {tabs.map(({ id, icon }) => {
               const label = t(`server.tabs.${id}` as "server.tabs.console");
               return (
@@ -307,21 +322,19 @@ export function ServerDetail({
               );
             })}
           </div>
+          <div class="ml-auto shrink-0">
+            <Guide storageKey={`server:${user.username}`} steps={guideSteps} />
+          </div>
         </nav>
       </header>
 
-      <Guide steps={tabs.map(({ id }) => ({
-        title: t(`server.tabs.${id}` as "server.tabs.console"),
-        body: t(`guide.${id}` as "guide.console"),
-        enter: () => setTab(id),
-      }))} />
       <ServerActivity status={server.status} progress={progress} />
 
       {!server.eula_accepted && (
         <Banner kind="info">
           <div class="flex flex-wrap items-center justify-between gap-3">
             <span>{t("server.eulaWarning")}</span>
-            <Button disabled={!actions.start} onClick={() => void power("start")}>
+            <Button data-tour="server-eula" disabled={!actions.start} onClick={() => void power("start")}>
               {t("launch.acceptAndStart")}
             </Button>
           </div>
@@ -371,7 +384,7 @@ export function ServerDetail({
         </div>
       )}
 
-      <div class="flex min-h-0 flex-1 flex-col">
+      <div data-tour="server-panel" class="flex min-h-0 flex-1 flex-col">
         <Suspense fallback={<Loading />}>
         {tab === "console" && (
           <Console

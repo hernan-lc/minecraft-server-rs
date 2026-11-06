@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api } from "../api";
 import { useServerPower } from "../useServerPower";
-import { Guide } from "../components/Guide";
+import { Guide, type GuideStep } from "../components/Guide";
 import { Compatibility } from "../components/Compatibility";
 import { Modal } from "../components/Modal";
 import { Button, Card, Field, Input, Select, StatCard, StatusPill, formatUptime } from "../components/ui";
@@ -63,6 +63,21 @@ export function Dashboard({
     ? Math.max(0, Math.min(1, stats.servers_online / Math.max(1, servers.length)))
     : 0;
 
+  const guideSteps: GuideStep[] = [
+    { title: t("guide.welcomeTitle"), body: t("guide.welcomeBody") },
+    ...(user.admin
+      ? [{ title: t("guide.createTitle"), body: t("guide.createBody"), target: '[data-tour="new-server"]' }]
+      : []),
+    { title: t("guide.statsTitle"), body: t("guide.statsBody"), target: '[data-tour="host-stats"]', optional: true },
+    { title: t("guide.serverCardTitle"), body: t("guide.serverCardBody"), target: '[data-tour="server-card"]', optional: true },
+    { title: t("guide.powerTitle"), body: t("guide.powerBody"), target: '[data-tour="server-card-power"]', optional: true },
+    ...(user.admin
+      ? [{ title: t("guide.adminNavTitle"), body: t("guide.adminNavBody"), target: '[data-tour="admin-nav"]', optional: true }]
+      : []),
+    { title: t("guide.languageTitle"), body: t("guide.languageBody"), target: '[data-tour="language"]', optional: true },
+    { title: t("guide.replayTitle"), body: t("guide.replayBody"), target: '[data-tour="guide-help"]' },
+  ];
+
   return (
     <div class="mx-auto flex w-full max-w-6xl flex-col gap-3 px-3 py-3 sm:gap-6 sm:px-6 sm:py-8">
       <header class="flex items-center justify-between gap-3 rounded-2xl border border-ink-700 bg-ink-850 px-3 py-3 sm:items-end sm:border-0 sm:bg-transparent sm:px-0 sm:py-0">
@@ -75,27 +90,25 @@ export function Dashboard({
             })}
           </p>
         </div>
-        {user.admin && (
-          <Button
-            variant="primary"
-            icon={<Icon.Plus size={15} />}
-            class="shrink-0"
-            data-testid="new-server"
-            onClick={() => setCreating(true)}
-          >
-            {t("dashboard.newServer")}
-          </Button>
-        )}
+        <div class="flex shrink-0 items-center gap-1.5">
+          <Guide storageKey={`dashboard:${user.username}`} steps={guideSteps} />
+          {user.admin && (
+            <Button
+              variant="primary"
+              icon={<Icon.Plus size={15} />}
+              class="shrink-0"
+              data-testid="new-server"
+              data-tour="new-server"
+              onClick={() => setCreating(true)}
+            >
+              {t("dashboard.newServer")}
+            </Button>
+          )}
+        </div>
       </header>
 
-      <Guide storageKey={`dashboard:${user.username}`} steps={[
-        { title: t("guide.createTitle"), body: t("guide.createBody") },
-        { title: t("guide.launchTitle"), body: t("guide.launchBody") },
-        { title: t("guide.manageTitle"), body: t("guide.manageBody") },
-      ]} />
-
       {stats && (
-        <div class="grid grid-cols-3 gap-2 sm:gap-4">
+        <div class="grid grid-cols-3 gap-2 sm:gap-4" data-tour="host-stats">
           <StatCard
             compact
             shortLabel={t(stats.cpu_estimated ? "dashboard.hostCpuEstimatedShort" : "dashboard.hostCpuShort")}
@@ -149,6 +162,7 @@ export function Dashboard({
             <article
               key={server.id}
               data-testid="server-card"
+              data-tour="server-card"
               data-server-name={server.name}
               class="rounded-2xl border border-ink-700 bg-ink-850 p-3 sm:px-5 sm:py-4"
             >
@@ -205,7 +219,7 @@ export function Dashboard({
                     </p>
                   )}
 
-                  <div class="mt-3 flex flex-wrap items-center gap-2">
+                  <div class="mt-3 flex flex-wrap items-center gap-2" data-tour="server-card-power">
                     <Button
                       variant="primary"
                       square

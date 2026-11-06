@@ -60,7 +60,7 @@ function makeServer(overrides: Partial<Server>): Server {
 
 function renderDashboard(servers: Server[]) {
   apiMock.servers.mockResolvedValue(servers);
-  localStorage.setItem("mcpanel:guide:v1:dashboard:admin", "seen");
+  localStorage.setItem("mcpanel:guide:v2:dashboard:admin", "seen");
     render(
     <I18nProvider>
       <ToastProvider>

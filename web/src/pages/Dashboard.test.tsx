@@ -44,7 +44,7 @@ describe("Dashboard create server form", () => {
       memory_total_mb: 2,
       servers_online: 0,
     });
-    localStorage.setItem("mcpanel:guide:v1:dashboard:admin", "seen");
+    localStorage.setItem("mcpanel:guide:v2:dashboard:admin", "seen");
     render(
       <I18nProvider>
         <ToastProvider>
@@ -66,7 +66,7 @@ describe("Dashboard create server form", () => {
       memory_total_mb: 4096,
       servers_online: 0,
     });
-    localStorage.setItem("mcpanel:guide:v1:dashboard:admin", "seen");
+    localStorage.setItem("mcpanel:guide:v2:dashboard:admin", "seen");
     render(
       <I18nProvider>
         <ToastProvider>
@@ -82,7 +82,7 @@ describe("Dashboard create server form", () => {
   });
 
   it("sends exactly one create request for one submit button click", async () => {
-    localStorage.setItem("mcpanel:guide:v1:dashboard:admin", "seen");
+    localStorage.setItem("mcpanel:guide:v2:dashboard:admin", "seen");
     render(
       <I18nProvider>
         <ToastProvider>
@@ -104,7 +104,7 @@ describe("Dashboard create server form", () => {
   });
 
   it("keeps focus on the control selected after the modal rerenders", async () => {
-    localStorage.setItem("mcpanel:guide:v1:dashboard:admin", "seen");
+    localStorage.setItem("mcpanel:guide:v2:dashboard:admin", "seen");
     render(
       <I18nProvider>
         <ToastProvider>
@@ -128,7 +128,7 @@ describe("Dashboard create server form", () => {
     apiMock.compatibility.mockResolvedValue({ availability: "available", support: "unsupported", java_minimum: 21 });
     apiMock.versions.mockResolvedValue(["1.21.11"]);
     apiMock.createServer.mockClear();
-    localStorage.setItem("mcpanel:guide:v1:dashboard:admin", "seen");
+    localStorage.setItem("mcpanel:guide:v2:dashboard:admin", "seen");
     render(<I18nProvider><ToastProvider><DialogProvider>
       <Dashboard user={{ username: "admin", admin: true }} onOpen={vi.fn()} />
     </DialogProvider></ToastProvider></I18nProvider>);

@@ -178,7 +178,7 @@ export function App() {
             </Tooltip>
 
             {user.admin && (
-              <div class="flex items-center gap-0.5 rounded-xl border border-ink-700 bg-ink-900/50 p-1">
+              <div data-tour="admin-nav" class="flex items-center gap-0.5 rounded-xl border border-ink-700 bg-ink-900/50 p-1">
                 <HeaderNavButton
                   icon={<Icon.Users size={16} />}
                   label={t("nav.accounts")}
@@ -216,7 +216,9 @@ export function App() {
               </span>
             </Tooltip>
 
-            <LanguagePicker />
+            <div data-tour="language" class="flex items-center">
+              <LanguagePicker />
+            </div>
 
             <Tooltip label={t("nav.signOut")}>
               <Button
