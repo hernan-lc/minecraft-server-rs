@@ -654,7 +654,7 @@ fn extract_zip(
                 name
             )));
         };
-        if !safe_member(&relative) || entry.is_symlink() {
+        if !safe_member(Path::new(&name)) || entry.is_symlink() {
             return Err(ApiError::BadRequest(format!(
                 "archive entry {} is unsafe",
                 name
