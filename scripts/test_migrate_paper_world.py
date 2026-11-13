@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -47,6 +48,8 @@ class MigratePaperWorldTest(unittest.TestCase):
         self.assertTrue((self.source / "adventure_nether/DIM-1/region/r.0.0.mca").is_file())
         self.assertTrue((self.source / "adventure/dimensions/minecraft/overworld/data/minecraft/weather.dat").is_file())
         self.assertFalse((self.target / ".mcpanel-migration-in-progress").exists())
+        record = json.loads((self.target / ".mcpanel-migrated-world.json").read_text())
+        self.assertEqual(record, {"version": 1, "world": "adventure"})
         if os.name == "posix":
             self.assertEqual(stat.S_IMODE(self.target.stat().st_mode), 0o700)
 

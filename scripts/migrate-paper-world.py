@@ -2,6 +2,7 @@
 """Make a separate, vanilla-layout copy of an offline Paper/Spigot server."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 import shutil
@@ -10,6 +11,7 @@ import sys
 
 MARKER = ".mcpanel-migration-in-progress"
 ARCHIVE = ".mcpanel-paper-originals"
+MANIFEST = ".mcpanel-migrated-world.json"
 DATA_FILES = ("game_rules.dat", "scheduled_events.dat", "wandering_trader.dat",
               "weather.dat", "world_gen_settings.dat")
 
@@ -52,6 +54,8 @@ def migrate(source, destination, world):
         raise ValueError("source contains an unfinished migration marker")
     if (source / ARCHIVE).exists() or (source / ARCHIVE).is_symlink():
         raise ValueError(f"source already contains {ARCHIVE}")
+    if (source / MANIFEST).exists() or (source / MANIFEST).is_symlink():
+        raise ValueError(f"source already contains {MANIFEST}")
     try:
         destination.mkdir(mode=0o700)
     except FileExistsError:
@@ -99,6 +103,9 @@ def migrate(source, destination, world):
                 raise ValueError(f"conflicting destination: {target}")
             vanilla_data.mkdir(parents=True, exist_ok=True)
             shutil.move(str(origin), str(target))
+    with (destination / MANIFEST).open("x", encoding="utf-8") as manifest:
+        json.dump({"version": 1, "world": world}, manifest, ensure_ascii=True)
+        manifest.write("\n")
     (destination / MARKER).unlink()
 
 

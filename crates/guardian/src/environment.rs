@@ -537,6 +537,7 @@ pub(crate) async fn prepare_horizon(
     let mut document = text.parse::<toml_edit::DocumentMut>().map_err(|error| {
         Error::InvalidConfiguration(format!("invalid Horizon server.toml: {error}"))
     })?;
+    check_migrated_world(&fs, &directory, &document)?;
     check_paper_world_layout(&fs, &directory, &document)?;
     for (section, key, value) in [
         ("server", "port", toml_edit::value(i64::from(config.port))),
@@ -560,13 +561,8 @@ pub(crate) async fn prepare_horizon(
     })
 }
 
-/// Paper and Spigot can put dimensions where the vanilla-layout engine will
-/// not find them. Refuse to silently create empty dimensions during migration.
-fn check_paper_world_layout(
-    fs: &ScopedFs,
-    directory: &Path,
-    document: &toml_edit::DocumentMut,
-) -> Result<()> {
+/// Read the configured world name, or Horizon's default when omitted.
+fn configured_world(document: &toml_edit::DocumentMut) -> Result<&str> {
     let world = match document.get("world").and_then(|table| table.get("name")) {
         None => "world",
         Some(item) => item.as_str().ok_or_else(|| {
@@ -578,6 +574,86 @@ fn check_paper_world_layout(
             "Horizon world.name must be a folder name".into(),
         ));
     }
+    Ok(world)
+}
+
+/// A converted copy must start the same world that was converted.
+fn check_migrated_world(
+    fs: &ScopedFs,
+    directory: &Path,
+    document: &toml_edit::DocumentMut,
+) -> Result<()> {
+    use std::io::Read;
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        version: u32,
+        world: String,
+    }
+    let path = ".mcpanel-migrated-world.json";
+    match fs.metadata(path) {
+        Ok(metadata) if metadata.is_file && !metadata.is_symlink => {}
+        Ok(_) => {
+            return Err(Error::InvalidConfiguration(
+                "migration world record must be a regular file".into(),
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(Error::io(directory.join(path), error)),
+    }
+    let file = match fs.open_file(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(Error::io(directory.join(path), error)),
+    };
+    let mut bytes = Vec::new();
+    file.take(4097)
+        .read_to_end(&mut bytes)
+        .map_err(|error| Error::io(directory.join(path), error))?;
+    if bytes.len() > 4096 {
+        return Err(Error::InvalidConfiguration(
+            "migration world record exceeds 4 KiB".into(),
+        ));
+    }
+    let manifest: Manifest = serde_json::from_slice(&bytes)
+        .map_err(|_| Error::InvalidConfiguration("invalid migration world record".into()))?;
+    if manifest.version != 1 {
+        return Err(Error::InvalidConfiguration(
+            "unsupported migration world record version".into(),
+        ));
+    }
+    let configured = configured_world(document)?;
+    if manifest.world != configured {
+        return Err(Error::InvalidConfiguration(format!(
+            "converted world {:?} does not match configured world {:?}; correct server.toml or server.properties before starting",
+            manifest.world, configured
+        )));
+    }
+    let level = std::path::Path::new(configured).join("level.dat");
+    match fs.metadata(&level) {
+        Ok(metadata) if metadata.is_file && !metadata.is_symlink => {}
+        Ok(_) => {
+            return Err(Error::InvalidConfiguration(
+                "converted world level.dat is not a regular file".into(),
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Error::InvalidConfiguration(
+                "converted world level.dat is missing".into(),
+            ))
+        }
+        Err(error) => return Err(Error::io(directory.join(&level), error)),
+    }
+    Ok(())
+}
+
+/// Paper and Spigot can put dimensions where the vanilla-layout engine will
+/// not find them. Refuse to silently create empty dimensions during migration.
+fn check_paper_world_layout(
+    fs: &ScopedFs,
+    directory: &Path,
+    document: &toml_edit::DocumentMut,
+) -> Result<()> {
+    let world = configured_world(document)?;
     let exists = |path: &std::path::Path| -> Result<bool> {
         match fs.metadata(path) {
             Ok(_) => Ok(true),
@@ -1047,6 +1123,26 @@ mod tests {
         assert!(error.to_string().contains("migration is incomplete"));
         assert!(!directory.join("eula.txt").exists());
         std::fs::remove_file(directory.join(".mcpanel-migration-in-progress")).unwrap();
+        std::fs::write(
+            directory.join(".mcpanel-migrated-world.json"),
+            r#"{"version":1,"world":"other"}"#,
+        )
+        .unwrap();
+        let error = prepare_horizon(
+            &config,
+            root.path(),
+            crate::sandbox::SandboxPolicy::new(true),
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("does not match"));
+        assert_eq!(
+            std::fs::read_to_string(directory.join("server.toml")).unwrap(),
+            config_text
+        );
+        assert!(!directory.join("eula.txt").exists());
+        std::fs::remove_file(directory.join(".mcpanel-migrated-world.json")).unwrap();
         std::fs::create_dir_all(directory.join("custom_the_end/DIM1")).unwrap();
         let error = prepare_horizon(
             &config,
@@ -1113,6 +1209,39 @@ mod tests {
             std::fs::read(paper_data.join("weather.dat")).unwrap(),
             b"weather"
         );
+    }
+
+    #[test]
+    fn migrated_world_must_match_configuration_and_still_exist() {
+        let root = tempfile::tempdir().unwrap();
+        let fs = ScopedFs::open(root.path()).unwrap();
+        let config = "[world]\nname = 'adventure'\n"
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert!(check_migrated_world(&fs, root.path(), &config).is_ok());
+        std::fs::write(
+            root.path().join(".mcpanel-migrated-world.json"),
+            r#"{"version":1,"world":"other"}"#,
+        )
+        .unwrap();
+        assert!(check_migrated_world(&fs, root.path(), &config)
+            .unwrap_err()
+            .to_string()
+            .contains("does not match"));
+        std::fs::write(
+            root.path().join(".mcpanel-migrated-world.json"),
+            r#"{"version":1,"world":"adventure"}"#,
+        )
+        .unwrap();
+        assert!(check_migrated_world(&fs, root.path(), &config)
+            .unwrap_err()
+            .to_string()
+            .contains("level.dat is missing"));
+        std::fs::create_dir(root.path().join("adventure")).unwrap();
+        std::fs::write(root.path().join("adventure/level.dat"), b"fixture").unwrap();
+        assert!(check_migrated_world(&fs, root.path(), &config).is_ok());
+        std::fs::write(root.path().join(".mcpanel-migrated-world.json"), "invalid").unwrap();
+        assert!(check_migrated_world(&fs, root.path(), &config).is_err());
     }
 
     /// A fake but well-formed JDK home: `bin/java[.exe]` plus a `release`

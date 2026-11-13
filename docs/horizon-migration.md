@@ -63,7 +63,12 @@ the original remains intact. The script refuses symbolic links and existing
 destination data, and leaves a marker that prevents Horizon from starting if a
 copy fails. Inspect a partial destination before retrying. It preserves other
 files from the old split-dimension directories under `.mcpanel-paper-originals`
-in the new server. Java plugins and mods are copied but cannot run in Horizon.
+in the new server. The copy also records the selected world in
+`.mcpanel-migrated-world.json`; Horizon preparation checks that this matches
+`server.toml` and that its `level.dat` is still present. Correct the imported
+settings if they do not match. To deliberately switch to a different world later,
+back up the worlds and remove that record after updating the settings. Java
+plugins and mods are copied but cannot run in Horizon.
 
 For a manual conversion, stop the Java server and make a full backup before
 changing anything. Substitute the configured `level-name` for `world` below.
