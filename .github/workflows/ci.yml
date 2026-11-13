@@ -96,7 +96,7 @@ jobs:
 
       - name: Test Horizon installer
         if: matrix.os == 'ubuntu-latest'
-        run: python3 -m unittest scripts/test_install_horizon.py
+        run: python3 -m unittest scripts/test_install_horizon.py scripts/test_migrate_paper_world.py
 
       - name: Test (Linux desktop tray)
         if: matrix.os == 'ubuntu-latest'

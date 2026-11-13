@@ -505,6 +505,15 @@ pub(crate) async fn prepare_horizon(
         }
     })?;
     let fs = ScopedFs::open(&directory).map_err(|error| Error::io(&directory, error))?;
+    let migration_marker = ".mcpanel-migration-in-progress";
+    match fs.metadata(migration_marker) {
+        Ok(_) => return Err(Error::InvalidConfiguration(
+            "a Paper world migration is incomplete; inspect the server directory before starting"
+                .into(),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(Error::io(directory.join(migration_marker), error)),
+    }
     let path = directory.join("server.toml");
     let bytes = match fs.read_file("server.toml") {
         Ok(bytes) => bytes,
@@ -1022,6 +1031,22 @@ mod tests {
         assert!(!directory.join("server.toml").exists());
         let config_text = "[world]\nname = 'custom'\n";
         std::fs::write(directory.join("server.toml"), config_text).unwrap();
+        std::fs::write(
+            directory.join(".mcpanel-migration-in-progress"),
+            b"incomplete",
+        )
+        .unwrap();
+        let error = prepare_horizon(
+            &config,
+            root.path(),
+            crate::sandbox::SandboxPolicy::new(true),
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("migration is incomplete"));
+        assert!(!directory.join("eula.txt").exists());
+        std::fs::remove_file(directory.join(".mcpanel-migration-in-progress")).unwrap();
         std::fs::create_dir_all(directory.join("custom_the_end/DIM1")).unwrap();
         let error = prepare_horizon(
             &config,

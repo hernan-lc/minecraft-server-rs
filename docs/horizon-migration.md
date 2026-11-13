@@ -48,8 +48,24 @@ arguments do not limit or configure Horizon's native memory usage.
 ### Migrating a Paper or Spigot world
 
 Paper and Spigot may store world data in a different layout from vanilla.
-Horizon preparation stops when it detects the layouts below; it does not yet
-convert them automatically. Stop the Java server and make a full backup before
+Horizon preparation stops when it detects the layouts below. To make a
+converted copy, stop the Java server, create a new Horizon server in the panel
+without starting it, and run:
+
+```sh
+python3 scripts/migrate-paper-world.py --source /path/to/java/server \
+  --destination /path/to/panel/data/servers/NEW_SERVER_ID --world world
+```
+
+Use the exact `level-name` from `server.properties` for `--world`. The
+destination must be new or empty. Keep both servers stopped throughout the copy;
+the original remains intact. The script refuses symbolic links and existing
+destination data, and leaves a marker that prevents Horizon from starting if a
+copy fails. Inspect a partial destination before retrying. It preserves other
+files from the old split-dimension directories under `.mcpanel-paper-originals`
+in the new server. Java plugins and mods are copied but cannot run in Horizon.
+
+For a manual conversion, stop the Java server and make a full backup before
 changing anything. Substitute the configured `level-name` for `world` below.
 
 For older Paper/Spigot worlds, copy `world_nether/DIM-1` to `world/DIM-1` and
