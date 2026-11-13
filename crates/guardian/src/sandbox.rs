@@ -70,6 +70,161 @@ pub fn command(
     }
 }
 
+/// Build a Horizon supervisor command from an administrator-owned installation.
+///
+/// The installation must contain `horizon-server` and `horizon-engine` side by
+/// side. The whole installation is made read-only in the kernel sandbox so
+/// the supervisor can start its engine and read any bundled resources. The
+/// caller must ensure that untrusted server operators cannot modify it.
+/// World data and per-server resources belong in `directory` instead.
+pub fn horizon_command(
+    installation: &Path,
+    directory: &Path,
+    policy: SandboxPolicy,
+) -> Result<(Command, SandboxMode)> {
+    let installation =
+        std::fs::canonicalize(installation).map_err(|error| Error::io(installation, error))?;
+    let directory =
+        std::fs::canonicalize(directory).map_err(|error| Error::io(directory, error))?;
+    if installation.starts_with(&directory) || directory.starts_with(&installation) {
+        return Err(Error::InvalidConfiguration(
+            "the Horizon installation and server directory must be separate".into(),
+        ));
+    }
+    let executable = format!("horizon-server{}", std::env::consts::EXE_SUFFIX);
+    for name in [
+        &executable,
+        &format!("horizon-engine{}", std::env::consts::EXE_SUFFIX),
+    ] {
+        let path = installation.join(name);
+        let resolved = std::fs::canonicalize(&path).map_err(|error| Error::io(&path, error))?;
+        if resolved.parent() != Some(installation.as_path()) || !resolved.is_file() {
+            return Err(Error::InvalidConfiguration(format!(
+                "{name} must be a regular file directly in the Horizon installation"
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if std::fs::metadata(&resolved)
+                .map_err(|error| Error::io(&resolved, error))?
+                .permissions()
+                .mode()
+                & 0o111
+                == 0
+            {
+                return Err(Error::InvalidConfiguration(format!(
+                    "{name} is not executable"
+                )));
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        horizon_linux_command(&installation, &directory, find_in_path("bwrap"), policy)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        horizon_macos_command(
+            &installation,
+            &directory,
+            find_in_path("sandbox-exec"),
+            policy,
+        )
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        unsandboxed_command(
+            &installation.join(executable),
+            &directory,
+            &["run".into()],
+            policy,
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn horizon_linux_command(
+    installation: &Path,
+    directory: &Path,
+    bwrap: Option<PathBuf>,
+    policy: SandboxPolicy,
+) -> Result<(Command, SandboxMode)> {
+    let Some(bwrap) = bwrap else {
+        return unsandboxed_command(
+            &installation.join("horizon-server"),
+            directory,
+            &["run".into()],
+            policy,
+        );
+    };
+    let mut command = crate::hidden::hidden_tokio_command(&bwrap);
+    command.args([
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-pid",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+    ]);
+    for path in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"] {
+        if Path::new(path).exists() {
+            command.args(["--ro-bind", path, path]);
+        }
+    }
+    command
+        .args(["--ro-bind"])
+        .arg(installation)
+        .arg("/opt/mcpanel-horizon")
+        .args(["--bind"])
+        .arg(directory)
+        .arg("/server")
+        .args([
+            "--chdir", "/server", "--setenv", "HOME", "/server", "--setenv", "TMPDIR", "/tmp",
+        ])
+        .arg("/opt/mcpanel-horizon/horizon-server")
+        .arg("run")
+        .current_dir(directory);
+    Ok((command, SandboxMode::KernelSandbox))
+}
+
+#[cfg(target_os = "macos")]
+fn horizon_macos_command(
+    installation: &Path,
+    directory: &Path,
+    sandbox_exec: Option<PathBuf>,
+    policy: SandboxPolicy,
+) -> Result<(Command, SandboxMode)> {
+    let Some(sandbox_exec) = sandbox_exec else {
+        return unsandboxed_command(
+            &installation.join("horizon-server"),
+            directory,
+            &["run".into()],
+            policy,
+        );
+    };
+    let profile = format!(
+        "(version 1) (deny default) (allow process*) \
+         (allow file-read* (subpath \"/usr\") (subpath \"/System\") (subpath \"/Library\")) \
+         (allow file-read* (subpath \"{}\") (subpath \"{}\")) \
+         (allow file-write* (subpath \"{}\") (subpath \"/tmp\")) (allow network*)",
+        profile_path(installation),
+        profile_path(directory),
+        profile_path(directory)
+    );
+    let mut command = crate::hidden::hidden_tokio_command(&sandbox_exec);
+    command
+        .args(["-p", &profile])
+        .arg(installation.join("horizon-server"))
+        .arg("run")
+        .current_dir(directory);
+    Ok((command, SandboxMode::KernelSandbox))
+}
+
 #[cfg(target_os = "linux")]
 fn linux_command(
     java: &Path,
@@ -239,6 +394,112 @@ fn profile_path(path: &Path) -> String {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[cfg(unix)]
+    fn horizon_installation(root: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let installation = root.join("horizon");
+        let directory = root.join("server");
+        std::fs::create_dir(&installation).unwrap();
+        std::fs::create_dir(&directory).unwrap();
+        for name in ["horizon-server", "horizon-engine"] {
+            let path = installation.join(name);
+            std::fs::write(&path, b"test").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (installation, directory)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn horizon_rejects_installation_under_the_writable_server_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let (installation, _) = horizon_installation(root.path());
+        assert!(matches!(
+            horizon_command(&installation, root.path(), SandboxPolicy::new(true)),
+            Err(Error::InvalidConfiguration(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn horizon_rejects_an_engine_symlink_outside_the_installation() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let (installation, directory) = horizon_installation(root.path());
+        let engine = installation.join("horizon-engine");
+        std::fs::remove_file(&engine).unwrap();
+        symlink(installation.join("horizon-server"), &engine).unwrap();
+        // A sibling symlink is allowed; a link into the writable server is not.
+        assert!(horizon_command(&installation, &directory, SandboxPolicy::new(true)).is_ok());
+        std::fs::remove_file(&engine).unwrap();
+        symlink(directory.join("engine"), &engine).unwrap();
+        std::fs::write(directory.join("engine"), b"test").unwrap();
+        assert!(matches!(
+            horizon_command(&installation, &directory, SandboxPolicy::new(true)),
+            Err(Error::InvalidConfiguration(_))
+        ));
+    }
+
+    #[cfg(target_os = "android")]
+    #[tokio::test]
+    async fn horizon_android_launches_the_supervisor_without_java() {
+        let root = tempfile::tempdir().unwrap();
+        let (installation, directory) = horizon_installation(root.path());
+        std::fs::write(directory.join("working-directory-marker"), b"marker").unwrap();
+        std::fs::write(
+            installation.join("horizon-server"),
+            b"#!/data/data/com.termux/files/usr/bin/sh\nprintf '%s\\n' \"$1\"\ntest -f working-directory-marker\n",
+        )
+        .unwrap();
+        let (mut command, mode) =
+            horizon_command(&installation, &directory, SandboxPolicy::new(true)).unwrap();
+        assert_eq!(mode, SandboxMode::Unsandboxed);
+        let output = command.output().await.unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(text.lines().next(), Some("run"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn horizon_linux_mounts_both_programs_read_only_and_runs_foreground() {
+        let root = tempfile::tempdir().unwrap();
+        let (installation, directory) = horizon_installation(root.path());
+        let (command, mode) = horizon_linux_command(
+            &installation,
+            &directory,
+            Some(root.path().join("bwrap")),
+            SandboxPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(mode, SandboxMode::KernelSandbox);
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_os_string())
+            .collect();
+        assert!(args.windows(3).any(|window| window
+            == [
+                OsStr::new("--ro-bind"),
+                installation.as_os_str(),
+                OsStr::new("/opt/mcpanel-horizon")
+            ]));
+        assert!(args.windows(3).any(|window| window
+            == [
+                OsStr::new("--bind"),
+                directory.as_os_str(),
+                OsStr::new("/server")
+            ]));
+        assert!(args.ends_with(&[
+            OsString::from("/opt/mcpanel-horizon/horizon-server"),
+            OsString::from("run")
+        ]));
+        assert!(matches!(
+            horizon_linux_command(&installation, &directory, None, SandboxPolicy::default()),
+            Err(Error::SandboxUnavailable)
+        ));
+    }
 
     fn sample_command(policy: SandboxPolicy) -> Result<(Command, SandboxMode)> {
         unsandboxed_command(
