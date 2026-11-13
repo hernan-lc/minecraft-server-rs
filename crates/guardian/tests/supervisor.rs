@@ -317,10 +317,8 @@ async fn real_horizon_starts_and_stops() {
     let force = ready && std::env::var_os("HORIZON_SMOKE_FORCE_STOP").is_some();
     let supports_force = guardian.snapshot().await.force_kill_available;
     let mut forced_exit = false;
-    if force && supports_force {
-        if guardian.kill().await.is_ok() {
-            forced_exit = guardian.wait_for_exit(Duration::from_secs(20)).await;
-        }
+    if force && supports_force && guardian.kill().await.is_ok() {
+        forced_exit = guardian.wait_for_exit(Duration::from_secs(20)).await;
     }
     if guardian.status().await.is_running() || guardian.status().await == ServerStatus::Preparing {
         guardian.stop().await.unwrap();

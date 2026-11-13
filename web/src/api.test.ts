@@ -154,7 +154,7 @@ describe("downloads", () => {
   it("uses a separate short-lived ticket for the console handshake", async () => {
     const fetchMock = mockFetch(jsonResponse({ ticket: "console-ticket" }));
     const socket = {} as WebSocket;
-    const webSocket = vi.fn(() => socket);
+    const webSocket = vi.fn(function () { return socket; });
     vi.stubGlobal("WebSocket", webSocket);
 
     await expect(openConsole("srv-1")).resolves.toBe(socket);
