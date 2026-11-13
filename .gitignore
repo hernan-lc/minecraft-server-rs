@@ -5,6 +5,7 @@
 # Optional Browserbase recording downloads (see web/demo/recording.ts).
 web/artifacts
 node_modules
+__pycache__/
 web/dist
 *.log
 web/tsconfig.tsbuildinfo

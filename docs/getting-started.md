@@ -2,14 +2,16 @@
 
 ## Install
 
-Download a self-contained binary from [Releases](https://github.com/nglmercer/minecraft-server-rs/releases) — the web UI is embedded, no nginx or Node needed at runtime — or build from source:
+Build the migration branch from the fork. Existing [fork releases](https://github.com/hernan-lc/minecraft-server-rs/releases) predate this branch and do not include its Horizon integration. The web UI is embedded in the panel binary:
 
 ```sh
-git clone --recurse-submodules https://github.com/nglmercer/minecraft-server-rs
+git clone --recurse-submodules --branch migrate/rust-horizon https://github.com/hernan-lc/minecraft-server-rs.git
 cd minecraft-server-rs
 ./build.sh
 ./target/release/mcpanel --data-dir ./data --bind 127.0.0.1:8080
 ```
+
+To install the native server and your prepared game files, follow the [Horizon migration guide](horizon-migration.md).
 
 On Windows run the two steps `build.sh` wraps:
 

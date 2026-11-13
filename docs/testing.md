@@ -30,6 +30,12 @@ cargo test --workspace     # 89 backend tests
 cd web && npm test         # 29 frontend tests
 ```
 
+The native Horizon installer is tested without downloading or compiling the
+game by running `python3 -m unittest scripts/test_install_horizon.py`. Its
+optional real-binary test uses `HORIZON_SMOKE_BUILD` and
+`HORIZON_SMOKE_RESOURCES` to point at binaries and game files prepared locally;
+it makes a temporary copy and does not modify the originals.
+
 `./check.sh` runs everything CI runs, in the same order.
 
 ## CI

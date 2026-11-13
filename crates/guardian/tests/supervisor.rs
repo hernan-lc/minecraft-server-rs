@@ -210,11 +210,14 @@ async fn real_horizon_starts_and_stops() {
             .or_else(|_| std::fs::copy(&source, &target).map(|_| ()))
             .unwrap();
     }
-    std::os::unix::fs::symlink(
-        source("HORIZON_SMOKE_RESOURCES"),
-        directory.join("resources"),
-    )
-    .unwrap();
+    let resource_target = if std::env::var_os("HORIZON_SMOKE_SHARED").is_some() {
+        let shared = installation.join(".local/horizon-client");
+        std::fs::create_dir_all(&shared).unwrap();
+        shared.join("26.3")
+    } else {
+        directory.join("resources")
+    };
+    std::os::unix::fs::symlink(source("HORIZON_SMOKE_RESOURCES"), resource_target).unwrap();
     std::fs::write(directory.join("server.properties"), "server-ip=127.0.0.1\nonline-mode=false\nwhite-list=false\nview-distance=2\nsimulation-distance=2\nlevel-name=smoke-world\nmotd=Imported settings\n").unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();

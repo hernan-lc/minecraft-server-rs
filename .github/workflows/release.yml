@@ -143,8 +143,9 @@ jobs:
           mkdir "$staging"
           cp "target/${{ matrix.target }}/release/mcpanel" "$staging/"
           cp README.md LICENSE "$staging/"
-          mkdir "$staging/docs"
-          cp docs/termux.md "$staging/docs/"
+          mkdir "$staging/docs" "$staging/scripts"
+          cp docs/termux.md docs/horizon-migration.md "$staging/docs/"
+          cp scripts/install-horizon.sh "$staging/scripts/"
           tar czf "${staging}.tar.gz" "$staging"
           echo "ASSET=${staging}.tar.gz" >> "$GITHUB_ENV"
 
@@ -157,6 +158,9 @@ jobs:
           mkdir "$staging"
           cp "target/${{ matrix.target }}/release/mcpanel.exe" "$staging/"
           cp README.md LICENSE "$staging/"
+          mkdir "$staging/docs" "$staging/scripts"
+          cp docs/horizon-migration.md "$staging/docs/"
+          cp scripts/install-horizon.sh "$staging/scripts/"
           7z a "${staging}.zip" "$staging"
           echo "ASSET=${staging}.zip" >> "$GITHUB_ENV"
 

@@ -345,7 +345,7 @@ export const es: Dictionary = {
     javaHint: "Se descarga automáticamente si no está instalada.",
     horizonHint: "Horizon se ejecuta de forma nativa. Un administrador debe instalar sus ejecutables y archivos de juego preparados antes de iniciarlo. La reserva de memoria sirve para planificar la capacidad del panel; no limita el proceso nativo.",
     nativeReservation: "Reserva de memoria (MiB)",
-    nativeSetup: "Instala los ejecutables de Horizon en horizon/ dentro del directorio de datos del panel y los archivos de juego preparados en servers/{id}/resources/. El panel inicializa server.toml al preparar o iniciar.",
+    nativeSetup: "Un administrador puede ejecutar scripts/install-horizon.sh con --data-dir y --resources para instalar Horizon y archivos de juego compartidos, o colocar los archivos preparados en servers/{id}/resources/. El panel inicializa server.toml al preparar o iniciar.",
     nativePrepare: "Preparar Horizon",
     nativeMetricsUnavailable: "Las métricas del motor nativo aún no están disponibles.",
     java: "Java {version}",

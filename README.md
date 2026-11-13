@@ -38,7 +38,7 @@ cd minecraft-server-rs
 ./target/release/mcpanel --data-dir ./data --bind 127.0.0.1:8080
 ```
 
-Or download a self-contained binary from [Releases](https://github.com/nglmercer/minecraft-server-rs/releases) (web UI is embedded). The first run prints a generated `admin` password — shown once.
+Published [fork releases](https://github.com/hernan-lc/minecraft-server-rs/releases) currently predate this migration branch; build the branch above for Horizon support. The web UI is embedded in the panel binary.
 
 Default bind is `127.0.0.1:8080` (loopback). For remote access keep it on loopback behind an HTTPS reverse proxy. Direct non-loopback plaintext HTTP requires `--allow-insecure-http` explicitly and is only for isolated networks. The port can be overridden without flags by writing a file at `<data-dir>/port` (or `<data-dir>/bind`) containing `8081` or `127.0.0.1:8081`; `--bind` / `MCPANEL_BIND` still wins when set. If the requested port is in use, a second launch opens the existing panel and exits, otherwise the next free port `8081-8099` is tried. The active `bind`/`url`/`pid` is written to `<data-dir>/.lock` while running.
 

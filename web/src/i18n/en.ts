@@ -342,7 +342,7 @@ export const en = {
     javaHint: "Downloaded automatically if missing.",
     horizonHint: "Horizon runs natively. An administrator must install its binaries and prepared game files before starting. The memory reservation is used for panel capacity planning; it does not limit the native process.",
     nativeReservation: "Memory reservation (MiB)",
-    nativeSetup: "Install Horizon binaries in the panel data directory under horizon/, and put prepared game files under servers/{id}/resources/. The panel initializes server.toml when preparing or starting.",
+    nativeSetup: "An administrator can run scripts/install-horizon.sh with --data-dir and --resources to install Horizon and shared game files, or put prepared files under servers/{id}/resources/. The panel initializes server.toml when preparing or starting.",
     nativePrepare: "Prepare Horizon",
     nativeMetricsUnavailable: "Native engine metrics are not available yet.",
     java: "Java {version}",

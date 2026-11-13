@@ -1,14 +1,16 @@
 # Termux (Android)
 
 The panel runs natively in Termux without root or a Linux proot distribution.
-It uses the Android browser for its UI and the Termux OpenJDK packages for
-Minecraft. The ARM64 release target is `aarch64-linux-android` (Android 7/API 24
+It uses the Android browser for its UI. Java servers use Termux OpenJDK;
+Horizon runs as a native Rust server. The ARM64 release target is `aarch64-linux-android` (Android 7/API 24
 or newer, subject to your Termux/JDK package requirements). This is a command
 line application, not an APK or an Android foreground service.
 
 ## Install a release
 
-Use a current Termux installation and keep its packages up to date. On an
+The currently published fork releases predate the Horizon migration and have
+no Android asset. Build this branch from source below. When an Android release
+of the migration branch is published, use a current Termux installation on an
 ARM64 device (`uname -m` reports `aarch64`):
 
 ```sh
@@ -17,7 +19,7 @@ pkg upgrade
 pkg install gh tar openjdk-21
 mkdir -p "$HOME/mcpanel"
 cd "$HOME/mcpanel"
-gh release download --repo nglmercer/minecraft-server-rs --pattern '*-android-arm64.tar.gz'
+gh release download --repo hernan-lc/minecraft-server-rs --pattern '*-android-arm64.tar.gz'
 tar -xzf mcpanel-*-android-arm64.tar.gz --strip-components=1
 chmod +x mcpanel
 ./mcpanel --data-dir "$HOME/.local/share/mcpanel" --bind 127.0.0.1:8080 --allow-unsandboxed-servers
@@ -31,7 +33,7 @@ can build from source using Termux's native Rust compiler.
 Keep both the executable and panel data inside Termux's private `$HOME`.
 Do not run from `/sdcard` or shared storage: those filesystems have different
 permission, execution, and symlink behavior. No shared-storage permission is
-needed. The explicit unsandboxed flag acknowledges that every Minecraft JVM
+needed. The explicit unsandboxed flag acknowledges that every Minecraft process
 can access files owned by Termux; Android's app sandbox does not separate the
 servers from one another.
 
@@ -46,7 +48,7 @@ configuration follow the same rules as other platforms.
 
 ```sh
 pkg install git rust clang make pkg-config nodejs-lts openjdk-21
-git clone --recurse-submodules https://github.com/nglmercer/minecraft-server-rs
+git clone --recurse-submodules --branch migrate/rust-horizon https://github.com/hernan-lc/minecraft-server-rs.git
 cd minecraft-server-rs
 CARGO_BUILD_JOBS=2 ./build.sh
 ./target/release/mcpanel --data-dir "$HOME/.local/share/mcpanel" --bind 127.0.0.1:8080 --allow-unsandboxed-servers
@@ -67,6 +69,14 @@ preloads.
 
 Alternatively build `web/dist` on another computer, copy it into this checkout,
 and run `cargo build --release --locked -p panel --bin mcpanel` in Termux.
+
+## Native Horizon
+
+After building the panel, use `scripts/install-horizon.sh` to build the pinned
+Termux-capable Horizon fork and install it into the panel data directory. The
+installer can import game files prepared from your own Minecraft installation.
+See [Horizon migration](horizon-migration.md) for the command and prerequisites.
+The native server runs without Java; Java may still be needed to prepare files.
 
 ## Java versions
 
