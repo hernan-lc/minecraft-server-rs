@@ -203,6 +203,7 @@ export interface Server {
   installed: Installation | null;
   /** Host-managed Horizon programs passed filesystem checks; null for Java. */
   horizon_programs_present?: boolean | null;
+  horizon_programs_bundled?: boolean | null;
   /** True when starting would download a new artifact first. */
   needs_install: boolean;
   /** Bytes on disk in this server's directory. */

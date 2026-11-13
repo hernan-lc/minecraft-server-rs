@@ -456,7 +456,8 @@ export const api = {
   deleteUser: (username: string) =>
     request<{ ok: boolean }>(`/users/${encodeURIComponent(username)}`, { method: "DELETE" }),
 
-  providers: () => request<{ id: string; server: boolean; programs_present?: boolean }[]>("/catalog/providers"),
+  providers: () => request<{ id: string; server: boolean; programs_present?: boolean; programs_bundled?: boolean }[]>("/catalog/providers"),
+  installBundledHorizon: () => request<{ ok: boolean }>("/catalog/horizon/install", { method: "POST" }),
 
   versions: (provider: string) =>
     request<string[]>(`/catalog/${provider}/versions`),

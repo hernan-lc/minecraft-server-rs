@@ -14,6 +14,7 @@ const apiMock = vi.hoisted(() => ({
   openConsole: vi.fn(),
   reinstall: vi.fn(),
   prepare: vi.fn(),
+  installBundledHorizon: vi.fn().mockResolvedValue({ ok: true }),
 }));
 
 vi.mock("../api", () => ({
@@ -91,6 +92,12 @@ describe("ServerDetail installed build", () => {
   it("reports missing Horizon programs", async () => {
     await openSettings(makeServer({ core: "horizon", version: "26.3", horizon_programs_present: false, needs_install: false }));
     expect(screen.getByText("Horizon programs are missing or inaccessible.")).toBeInTheDocument();
+  });
+
+  it("lets administrators install a bundle from server settings", async () => {
+    await openSettings(makeServer({ core: "horizon", version: "26.3", horizon_programs_present: false, horizon_programs_bundled: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Install bundled Horizon" }));
+    await waitFor(() => expect(apiMock.installBundledHorizon).toHaveBeenCalledTimes(1));
   });
   it("opens the EULA acceptance dialog from the warning", async () => {
     await openSettings(makeServer({ eula_accepted: false }));

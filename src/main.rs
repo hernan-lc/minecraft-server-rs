@@ -26,6 +26,7 @@ mod bind;
 mod error;
 mod filesystem;
 mod hidden;
+mod horizon_install;
 mod limits;
 mod metrics;
 mod recovery;

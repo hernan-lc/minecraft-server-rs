@@ -1,6 +1,6 @@
 import { lazy, Suspense } from "preact/compat";
 import { Loading } from "../components/Loading";
-import { useState } from "preact/hooks";
+import { useRef, useState } from "preact/hooks";
 import { api } from "../api";
 import { Compatibility } from "../components/Compatibility";
 import {
@@ -25,13 +25,14 @@ import type {
 
 const ChangeServerVersion = lazy(() => import("../components/ChangeServerVersion").then(m => ({ default: m.ChangeServerVersion })));
 
-function Installed({ server, onChanged }: { server: Server; onChanged: () => void }) {
+function Installed({ server, onChanged, admin }: { server: Server; onChanged: () => void; admin: boolean }) {
   const t = useT();
   const toast = useToast();
   const dialogs = useDialogs();
   const [busy, setBusy] = useState(false);
   const [compatible, setCompatible] = useState(false);
   const [changingVersion, setChangingVersion] = useState(false);
+  const installRef = useRef(false);
 
   const lifecycleBusy = server.status !== "offline" && server.status !== "crashed";
 
@@ -70,6 +71,22 @@ function Installed({ server, onChanged }: { server: Server; onChanged: () => voi
     }
   }
 
+  async function installBundle() {
+    if (busy || installRef.current) return;
+    installRef.current = true;
+    setBusy(true);
+    try {
+      await api.installBundledHorizon();
+      toast.success(t("createServer.nativeProgramsInstalled"));
+      onChanged();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t("errors.actionFailed"));
+    } finally {
+      installRef.current = false;
+      setBusy(false);
+    }
+  }
+
   if (server.core === "horizon") {
     return <Card title={t("settings.installSection")}>
       {server.horizon_programs_present != null && <p class="mb-2 text-sm">
@@ -77,6 +94,8 @@ function Installed({ server, onChanged }: { server: Server; onChanged: () => voi
       </p>}
       <p class="text-sm text-fg-muted">{t("createServer.nativeSetup", { id: server.id })}</p>
       <div class="mt-4 flex flex-col gap-2 sm:flex-row">
+        {admin && server.horizon_programs_present === false && server.horizon_programs_bundled &&
+          <Button disabled={busy} onClick={() => void installBundle()}>{busy ? t("createServer.nativeInstalling") : t("createServer.nativeInstallBundle")}</Button>}
         <Button disabled={busy || lifecycleBusy} onClick={() => setChangingVersion(true)}>{t("settings.changeVersion")}</Button>
         <Button variant="primary" disabled={busy || lifecycleBusy} onClick={prepare}>{busy ? t("settings.updating") : t("createServer.nativePrepare")}</Button>
       </div>
@@ -313,7 +332,7 @@ export function Settings({
         </details>
       )}
 
-      <Installed server={server} onChanged={onSaved} />
+      <Installed server={server} onChanged={onSaved} admin={user.admin} />
 
       <details class="rounded-xl border border-ink-700 p-4">
         <summary class="cursor-pointer font-semibold">{t("settings.recoverySection")}</summary>

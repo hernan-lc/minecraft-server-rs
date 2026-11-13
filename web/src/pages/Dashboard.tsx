@@ -286,7 +286,7 @@ function CreateServer({
 }) {
   const t = useT();
   const toast = useToast();
-  const [providers, setProviders] = useState<{ id: string; server: boolean; programs_present?: boolean }[]>([]);
+  const [providers, setProviders] = useState<{ id: string; server: boolean; programs_present?: boolean; programs_bundled?: boolean }[]>([]);
   const [versions, setVersions] = useState<string[]>([]);
   const [form, setForm] = useState({
     name: "",
@@ -299,6 +299,8 @@ function CreateServer({
     eula_accepted: false,
   });
   const [busy, setBusy] = useState(false);
+  const [installingHorizon, setInstallingHorizon] = useState(false);
+  const horizonInstallRef = useRef(false);
   const [compatible, setCompatible] = useState(false);
   const busyRef = useRef(false);
 
@@ -353,6 +355,23 @@ function CreateServer({
   }
 
   const set = (patch: Partial<typeof form>) => setForm((f) => ({ ...f, ...patch }));
+  const horizon = providers.find((provider) => provider.id === "horizon");
+
+  async function installHorizon() {
+    if (horizonInstallRef.current || installingHorizon) return;
+    horizonInstallRef.current = true;
+    setInstallingHorizon(true);
+    try {
+      await api.installBundledHorizon();
+      setProviders((current) => current.map((provider) => provider.id === "horizon" ? { ...provider, programs_present: true } : provider));
+      toast.success(t("createServer.nativeProgramsInstalled"));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t("errors.generic"));
+    } finally {
+      horizonInstallRef.current = false;
+      setInstallingHorizon(false);
+    }
+  }
 
   return (
     <Modal
@@ -468,8 +487,12 @@ function CreateServer({
         </div>
 
         {form.core === "horizon" && <Banner kind="info">{t("createServer.horizonHint")}</Banner>}
-        {form.core === "horizon" && providers.find((provider) => provider.id === "horizon")?.programs_present === false &&
-          <Banner kind="info">{t("createServer.nativeProgramsMissing")} {t("createServer.nativeInstallBeforeStart")}</Banner>}
+        {form.core === "horizon" && horizon?.programs_present === false &&
+          <Banner kind="info">{t("createServer.nativeProgramsMissing")} {horizon.programs_bundled ? t("createServer.nativeBundleAvailable") : t("createServer.nativeInstallBeforeStart")}</Banner>}
+        {form.core === "horizon" && horizon?.programs_present === false && horizon.programs_bundled &&
+          <Button type="button" disabled={installingHorizon || busy} onClick={() => void installHorizon()}>
+            {installingHorizon ? t("createServer.nativeInstalling") : t("createServer.nativeInstallBundle")}
+          </Button>}
 
         <Compatibility core={form.core} version={form.version} javaMajor={form.java_major} onAllowedChange={setCompatible} />
 

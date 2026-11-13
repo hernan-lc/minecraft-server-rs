@@ -4,13 +4,13 @@
 //! talks to PaperMC or Adoptium directly.
 
 use axum::extract::{Path, State};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use minecraft_core::MinecraftClient;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::auth::Identity;
+use crate::auth::{AdminIdentity, Identity};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
@@ -23,6 +23,9 @@ pub struct ProviderView {
     /// Presence of host-managed programs for the Horizon provider only.
     #[serde(skip_serializing_if = "Option::is_none")]
     programs_present: Option<bool>,
+    /// Whether a trusted Horizon bundle is next to the panel executable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    programs_bundled: Option<bool>,
 }
 
 fn client() -> ApiResult<MinecraftClient> {
@@ -53,6 +56,7 @@ async fn providers(
                 id,
                 server,
                 programs_present: None,
+                programs_bundled: None,
             }
         })
         .collect();
@@ -61,21 +65,41 @@ async fn providers(
             id: "horizon".into(),
             server: true,
             programs_present: None,
+            programs_bundled: None,
         });
     }
-    let installation = state.data_dir.join("horizon");
-    let present = tokio::task::spawn_blocking(move || {
-        guardian::sandbox::horizon_programs_present(&installation)
+    let data_dir = state.data_dir.clone();
+    let (present, bundled) = tokio::task::spawn_blocking(move || {
+        let present = guardian::sandbox::horizon_programs_present(&data_dir.join("horizon"));
+        let bundled = std::env::current_exe()
+            .ok()
+            .is_some_and(|exe| crate::horizon_install::bundled_programs(&exe, &data_dir).is_some());
+        (present, bundled)
     })
     .await
-    .unwrap_or(false);
+    .unwrap_or((false, false));
     if let Some(horizon) = providers
         .iter_mut()
         .find(|provider| provider.id == "horizon")
     {
         horizon.programs_present = Some(present);
+        horizon.programs_bundled = Some(bundled);
     }
     Ok(Json(providers))
+}
+
+async fn install_bundled_horizon(
+    State(state): State<Arc<AppState>>,
+    AdminIdentity(_): AdminIdentity,
+) -> ApiResult<Json<serde_json::Value>> {
+    let data_dir = state.data_dir.clone();
+    let executable = std::env::current_exe().map_err(|e| ApiError::Internal(e.into()))?;
+    tokio::task::spawn_blocking(move || {
+        crate::horizon_install::install_bundled(&executable, &data_dir)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(e.into()))??;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// Whether a provider id is offered in the create-server catalog.
@@ -334,6 +358,7 @@ async fn system(
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/catalog/providers", get(providers))
+        .route("/catalog/horizon/install", post(install_bundled_horizon))
         .route("/catalog/{provider}/versions", get(versions))
         .route("/catalog/{provider}/{version}/builds", get(builds))
         .route(
@@ -349,6 +374,49 @@ mod tests {
     use super::*;
     use java_path::{Architecture, DiscoverySource, JavaKind, JavaVersion, Platform};
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn bundled_install_endpoint_requires_an_administrator() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+        let data = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(data.path(), crate::state::PlayitMode::External)
+            .await
+            .unwrap();
+        let token = state
+            .sessions
+            .create(Identity {
+                username: "operator".into(),
+                admin: false,
+                servers: vec![],
+            })
+            .await;
+        let app = Router::new()
+            .nest("/api", crate::api::router())
+            .with_state(Arc::clone(&state));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/catalog/horizon/install")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/catalog/horizon/install")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert!(!data.path().join("horizon").exists());
+        state.playit.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn horizon_catalog_is_local_and_does_not_require_java() {

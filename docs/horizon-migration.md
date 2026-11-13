@@ -16,6 +16,20 @@ release workflow builds and includes the pinned headless Horizon programs, so
 the same command installs them without a source checkout. Other release packages
 include the installer but not Horizon source or binaries: clone the branch to
 build them, or use `--from-build-dir` with binaries built on the host.
+An administrator can also select **Install bundled Horizon** in the new-server
+form or Horizon server settings when that package is available. This copies the
+bundled programs into the panel data directory; it does not install prepared
+game files. The panel will
+not replace an existing Horizon directory. If copying fails partway, inspect
+that directory before retrying.
+
+The panel-side install action is administrator-only and reads only the bundle
+next to the panel executable. On Unix it requires the bundle and its parent
+directory to share the executable's owner and reject group/other writes.
+From a source checkout, its opt-in HTTP smoke test can be run with
+`MCPANEL_SMOKE_BIN`, `HORIZON_SMOKE_SERVER`, and `HORIZON_SMOKE_ENGINE` set to
+local executable paths: `python3 -m unittest scripts/test_panel_horizon_bundle.py`.
+The test uses a temporary panel data directory and does not start Minecraft.
 
 The script builds the pinned, clean submodule and validates both executables.
 Use `--debug` for a debug build, or `--from-build-dir /path/to/target/debug`
@@ -115,7 +129,7 @@ needs another sample before its CPU usage can be shown.
 Horizon is started as `horizon-server run` and receives console commands and
 `stop` over stdin. Linux and macOS use their platform sandbox when available;
 Android and platforms without a supported sandbox require the existing explicit
-`--allow-unsandboxed-servers` setting. Automated installation through the panel,
+`--allow-unsandboxed-servers` setting. Panel installation of prepared game files,
 full installation validation, enforced resource limits, and cross-platform
 end-to-end validation remain unfinished. The pinned Horizon fork advertises a
 force-stop control protocol: the supervisor kills and reaps its engine before

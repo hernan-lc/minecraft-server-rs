@@ -36,6 +36,8 @@ pub struct ServerView {
     installed: Option<guardian::Installation>,
     /// Whether host-managed Horizon program files pass path/permission checks.
     horizon_programs_present: Option<bool>,
+    /// Whether a trusted Horizon bundle is available beside the panel.
+    horizon_programs_bundled: Option<bool>,
     /// Whether starting would download a new artifact first.
     needs_install: bool,
     /// Bytes on disk in this server's directory.
@@ -99,17 +101,20 @@ async fn view(
     } else {
         guardian.installation().await
     };
-    let horizon_programs_present = if native {
-        let installation = state.data_dir.join("horizon");
-        Some(
-            tokio::task::spawn_blocking(move || {
-                guardian::sandbox::horizon_programs_present(&installation)
-            })
-            .await
-            .unwrap_or(false),
-        )
+    let (horizon_programs_present, horizon_programs_bundled) = if native {
+        let data_dir = state.data_dir.clone();
+        let (present, bundled) = tokio::task::spawn_blocking(move || {
+            let present = guardian::sandbox::horizon_programs_present(&data_dir.join("horizon"));
+            let bundled = std::env::current_exe().ok().is_some_and(|exe| {
+                crate::horizon_install::bundled_programs(&exe, &data_dir).is_some()
+            });
+            (present, bundled)
+        })
+        .await
+        .unwrap_or((false, false));
+        (Some(present), Some(bundled))
     } else {
-        None
+        (None, None)
     };
     // Horizon is host-managed and is never downloaded by the panel.
     let needs_install = !native
@@ -146,6 +151,7 @@ async fn view(
         metrics,
         installed,
         horizon_programs_present,
+        horizon_programs_bundled,
         needs_install,
         disk_bytes,
         playit: record.playit.clone(),
