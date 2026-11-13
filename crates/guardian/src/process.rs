@@ -8,7 +8,7 @@
 //! handlers, WebSocket sessions and the supervisor task without coordination.
 
 use crate::config::{GuardianConfig, ServerConfig, MAX_ARGUMENT_BYTES};
-use crate::environment::{prepare_with_resolver, Provision, ServerEnvironment};
+use crate::environment::{prepare_with_resolver, Provision, ServerEnvironment, ServerRuntime};
 use crate::error::{Error, Result};
 use crate::events::{ConsoleLine, ProgressState, ServerEvent, ServerStatus, Stream};
 use crate::fs::ScopedFs;
@@ -785,50 +785,89 @@ impl Guardian {
                 "the launch directory does not match the configured server directory".into(),
             ));
         }
-        let java_metadata =
-            std::fs::metadata(&env.java).map_err(|error| Error::io(&env.java, error))?;
-        if !java_metadata.is_file() {
-            return Err(Error::InvalidConfiguration(
-                "the Java launcher must be a regular file".into(),
-            ));
+        if config.core.eq_ignore_ascii_case("horizon") {
+            // Native settings may have changed since the environment was
+            // cached. Reapply the panel's port and EULA before every start.
+            crate::environment::prepare_horizon(&config, &self.data_dir, |_, _| {}).await?;
         }
-        #[cfg(unix)]
-        if java_metadata.permissions().mode() & 0o111 == 0 {
-            return Err(Error::InvalidConfiguration(
-                "the Java launcher is not executable".into(),
-            ));
-        }
-        let server_fs =
-            ScopedFs::open(&env.directory).map_err(|error| Error::io(&env.directory, error))?;
-        let jar_relative = env.jar.strip_prefix(&env.directory).map_err(|_| {
-            Error::InvalidConfiguration("the server jar must be inside its server directory".into())
-        })?;
-        let jar_metadata = server_fs
-            .metadata(jar_relative)
-            .map_err(|error| Error::io(&env.jar, error))?;
-        if !jar_metadata.is_file {
-            return Err(Error::InvalidConfiguration(
-                "the server jar must be a regular file".into(),
-            ));
-        }
-        let mut launch_args: Vec<OsString> = config
-            .memory
-            .jvm_flags()
-            .into_iter()
-            .map(OsString::from)
-            .collect();
-        launch_args.extend(config.jvm_args.iter().cloned().map(OsString::from));
-        launch_args.push(OsString::from("-jar"));
-        launch_args.push(env.jar.clone().into_os_string());
-        launch_args.extend(config.server_args.iter().cloned().map(OsString::from));
+        let (mut command, sandbox_mode, executable) = match &env.runtime {
+            ServerRuntime::Java { java, jar, .. }
+                if !config.core.eq_ignore_ascii_case("horizon") =>
+            {
+                let java_metadata =
+                    std::fs::metadata(java).map_err(|error| Error::io(java, error))?;
+                if !java_metadata.is_file() {
+                    return Err(Error::InvalidConfiguration(
+                        "the Java launcher must be a regular file".into(),
+                    ));
+                }
+                #[cfg(unix)]
+                if java_metadata.permissions().mode() & 0o111 == 0 {
+                    return Err(Error::InvalidConfiguration(
+                        "the Java launcher is not executable".into(),
+                    ));
+                }
+                let server_fs = ScopedFs::open(&env.directory)
+                    .map_err(|error| Error::io(&env.directory, error))?;
+                let jar_relative = jar.strip_prefix(&env.directory).map_err(|_| {
+                    Error::InvalidConfiguration(
+                        "the server jar must be inside its server directory".into(),
+                    )
+                })?;
+                let jar_metadata = server_fs
+                    .metadata(jar_relative)
+                    .map_err(|error| Error::io(jar, error))?;
+                if !jar_metadata.is_file {
+                    return Err(Error::InvalidConfiguration(
+                        "the server jar must be a regular file".into(),
+                    ));
+                }
+                let mut launch_args: Vec<OsString> = config
+                    .memory
+                    .jvm_flags()
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect();
+                launch_args.extend(config.jvm_args.iter().cloned().map(OsString::from));
+                launch_args.push(OsString::from("-jar"));
+                launch_args.push(jar.clone().into_os_string());
+                launch_args.extend(config.server_args.iter().cloned().map(OsString::from));
 
-        let (mut command, sandbox_mode) = crate::sandbox::command(
-            &env.java,
-            &env.directory,
-            &env.jar,
-            &launch_args,
-            self.sandbox_policy,
-        )?;
+                let (command, mode) = crate::sandbox::command(
+                    java,
+                    &env.directory,
+                    jar,
+                    &launch_args,
+                    self.sandbox_policy,
+                )?;
+                (command, mode, java.clone())
+            }
+            ServerRuntime::Horizon { installation }
+                if config.core.eq_ignore_ascii_case("horizon") =>
+            {
+                let expected = crate::environment::absolute(self.data_dir.join("horizon"));
+                if *installation != expected {
+                    return Err(Error::InvalidConfiguration(
+                        "Horizon must use the panel's managed installation".into(),
+                    ));
+                }
+                let (command, mode) = crate::sandbox::horizon_command(
+                    installation,
+                    &env.directory,
+                    self.sandbox_policy,
+                )?;
+                (
+                    command,
+                    mode,
+                    installation.join(format!("horizon-server{}", std::env::consts::EXE_SUFFIX)),
+                )
+            }
+            _ => {
+                return Err(Error::InvalidConfiguration(
+                    "prepared runtime does not match server type".into(),
+                ))
+            }
+        };
         if sandbox_mode == crate::sandbox::SandboxMode::Unsandboxed {
             tracing::warn!("Minecraft server is running without OS tenant isolation");
         }
@@ -870,7 +909,7 @@ impl Guardian {
             .env("TMP", &env.directory)
             .env("TMPDIR", &env.directory);
 
-        let mut child = command.spawn().map_err(|e| Error::io(&env.java, e))?;
+        let mut child = command.spawn().map_err(|e| Error::io(&executable, e))?;
 
         let pid = child.id().unwrap_or(0);
         let stdin = child.stdin.take();
@@ -1185,7 +1224,15 @@ impl Guardian {
             tokio::time::sleep(REAP_INTERVAL).await;
         }
 
-        self.say("graceful stop timed out, killing process").await;
+        if self
+            .active_config()
+            .await
+            .is_some_and(|config| config.core.eq_ignore_ascii_case("horizon"))
+        {
+            self.say("graceful stop timed out").await;
+        } else {
+            self.say("graceful stop timed out, killing process").await;
+        }
         self.kill().await?;
         if !self.wait_for_exit(Duration::from_secs(10)).await {
             return Err(Error::Task(
@@ -1233,8 +1280,7 @@ impl Guardian {
             if self.wait_for_exit(deadline).await {
                 Ok(())
             } else {
-                self.say("graceful stop timed out during shutdown, killing process")
-                    .await;
+                self.say("graceful stop timed out during shutdown").await;
                 self.kill().await?;
                 if self.wait_for_exit(Duration::from_secs(10)).await {
                     Ok(())
@@ -1305,6 +1351,15 @@ impl Guardian {
                         current: current.as_str(),
                         action: "kill",
                     });
+                }
+                if state
+                    .active
+                    .as_ref()
+                    .is_some_and(|config| config.core.eq_ignore_ascii_case("horizon"))
+                {
+                    return Err(Error::InvalidConfiguration(
+                        "force-killing Horizon is unavailable because its engine is a separate process; stop it through its console or host tools".into(),
+                    ));
                 }
                 state.intentional = true;
                 let should_emit = current != ServerStatus::Stopping;

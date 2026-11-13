@@ -22,14 +22,29 @@ use uuid::Uuid;
 /// server directory and silently fail to launch.
 #[derive(Debug, Clone)]
 pub struct ServerEnvironment {
-    /// Absolute path to the `java` launcher.
-    pub java: PathBuf,
-    /// Major version of the Java that was selected.
-    pub java_major: u32,
-    /// Absolute path to the server jar.
-    pub jar: PathBuf,
+    /// The executable and artifacts required by this server.
+    pub runtime: ServerRuntime,
     /// Working directory for the process.
     pub directory: PathBuf,
+}
+
+/// A prepared Java or native Horizon server runtime.
+#[derive(Debug, Clone)]
+pub enum ServerRuntime {
+    /// A Java server JAR and the JVM that runs it.
+    Java {
+        /// Absolute path to the Java launcher.
+        java: PathBuf,
+        /// Java feature version selected during provisioning.
+        java_major: u32,
+        /// Absolute path to the server JAR.
+        jar: PathBuf,
+    },
+    /// A host-managed Horizon installation containing supervisor and engine.
+    Horizon {
+        /// Directory containing `horizon-server` and `horizon-engine`.
+        installation: PathBuf,
+    },
 }
 
 /// Resolve `path` against the current working directory when it is relative.
@@ -51,8 +66,15 @@ pub(crate) fn absolute(path: PathBuf) -> PathBuf {
 impl ServerEnvironment {
     /// Rewrite every relative path as an absolute one.
     pub fn absolutize(mut self) -> Self {
-        self.java = absolute(self.java);
-        self.jar = absolute(self.jar);
+        match &mut self.runtime {
+            ServerRuntime::Java { java, jar, .. } => {
+                *java = absolute(std::mem::take(java));
+                *jar = absolute(std::mem::take(jar));
+            }
+            ServerRuntime::Horizon { installation } => {
+                *installation = absolute(std::mem::take(installation));
+            }
+        }
         self.directory = absolute(self.directory);
         self
     }
@@ -359,6 +381,15 @@ pub async fn prepare_with_resolver(
         return Err(Error::EulaNotAccepted);
     }
 
+    if config.core.eq_ignore_ascii_case("horizon") {
+        if mode == Provision::Force {
+            return Err(Error::InvalidConfiguration(
+                "update the host-managed Horizon installation outside the panel".into(),
+            ));
+        }
+        return prepare_horizon(config, data_dir, on_progress).await;
+    }
+
     // Cheap, and it keeps eula.txt and the port in step with the config.
     scaffold(config).await?;
 
@@ -369,9 +400,11 @@ pub async fn prepare_with_resolver(
             match installation.mismatch(config) {
                 None if trusted_installation(installation, config, data_dir) => {
                     return Ok(ServerEnvironment {
-                        java: installation.java.clone(),
-                        java_major: installation.java_major,
-                        jar: installation.jar.clone(),
+                        runtime: ServerRuntime::Java {
+                            java: installation.java.clone(),
+                            java_major: installation.java_major,
+                            jar: installation.jar.clone(),
+                        },
                         directory: config.directory.clone(),
                     }
                     .absolutize())
@@ -393,9 +426,11 @@ pub async fn prepare_with_resolver(
     let (jar, build) = resolve_jar(config, p).await?;
 
     let environment = ServerEnvironment {
-        java: java.java.clone(),
-        java_major: java.major(),
-        jar,
+        runtime: ServerRuntime::Java {
+            java: absolute(java.java.clone()),
+            java_major: java.major(),
+            jar: absolute(jar),
+        },
         directory: config.directory.clone(),
     }
     .absolutize();
@@ -405,18 +440,85 @@ pub async fn prepare_with_resolver(
         version: config.version.clone(),
         // Recorded so an unpinned "latest" stops moving after the first install.
         build,
-        java_major: environment.java_major,
-        java: environment.java.clone(),
+        java_major: java.major(),
+        java: absolute(java.java.clone()),
         // The trust anchor for warm Starts: the launcher must live at exactly
         // this home's `bin/java[.exe]`.
         java_home: java.home.clone(),
-        jar: environment.jar.clone(),
+        jar: match &environment.runtime {
+            ServerRuntime::Java { jar, .. } => jar.clone(),
+            ServerRuntime::Horizon { .. } => unreachable!(),
+        },
         installed_at: now_rfc3339(),
     }
     .save(&config.directory)
     .await?;
 
     Ok(environment)
+}
+
+/// Prepare a previously initialized Horizon server without resolving Java.
+/// The pinned fork targets 26.3. An administrator installs both native
+/// executables under the panel data directory and initializes the server with
+/// Horizon so existing vanilla settings can be imported by Horizon itself.
+pub(crate) async fn prepare_horizon(
+    config: &ServerConfig,
+    data_dir: &Path,
+    on_progress: impl Fn(String, Option<f32>),
+) -> Result<ServerEnvironment> {
+    if !config.eula_accepted {
+        return Err(Error::EulaNotAccepted);
+    }
+    if config.version != "26.3" || config.build.is_some() {
+        return Err(Error::InvalidConfiguration(
+            "the pinned Horizon runtime supports version 26.3 without a build selector".into(),
+        ));
+    }
+    let installation = absolute(data_dir.join("horizon"));
+    let directory = absolute(config.directory.clone());
+    // This also rejects missing executables, unsafe layouts and symlink escapes.
+    crate::sandbox::horizon_command(
+        &installation,
+        &directory,
+        crate::sandbox::SandboxPolicy::new(true),
+    )?;
+    let fs = ScopedFs::open(&directory).map_err(|error| Error::io(&directory, error))?;
+    let path = directory.join("server.toml");
+    let bytes = fs.read_file("server.toml").map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            Error::InvalidConfiguration(
+                "initialize this directory with horizon-server init before starting it in the panel".into(),
+            )
+        } else {
+            Error::io(&path, error)
+        }
+    })?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        Error::InvalidConfiguration("Horizon server.toml must be valid UTF-8".into())
+    })?;
+    let mut document = text.parse::<toml_edit::DocumentMut>().map_err(|error| {
+        Error::InvalidConfiguration(format!("invalid Horizon server.toml: {error}"))
+    })?;
+    for (section, key, value) in [
+        ("server", "port", toml_edit::value(i64::from(config.port))),
+        ("engine", "restart_on_crash", toml_edit::value(false)),
+        ("panel", "bind", toml_edit::value("")),
+    ] {
+        let section = document.entry(section).or_insert(toml_edit::table());
+        let table = section.as_table_like_mut().ok_or_else(|| {
+            Error::InvalidConfiguration("Horizon settings sections must be tables".into())
+        })?;
+        table.insert(key, value);
+    }
+    fs.write_atomic("server.toml", document.to_string().as_bytes())
+        .map_err(|error| Error::io(&path, error))?;
+    fs.write_atomic("eula.txt", b"# Accepted through the panel.\neula=true\n")
+        .map_err(|error| Error::io(directory.join("eula.txt"), error))?;
+    on_progress("Horizon installation ready".into(), Some(1.0));
+    Ok(ServerEnvironment {
+        runtime: ServerRuntime::Horizon { installation },
+        directory,
+    })
 }
 
 /// Installation metadata lives inside a server directory an operator can
@@ -681,16 +783,60 @@ mod tests {
         // with its cwd set to `directory`, so "./data/x/server.jar" would be
         // looked for at "<directory>/data/x/server.jar" and never found.
         let environment = ServerEnvironment {
-            java: PathBuf::from("bin/java"),
-            java_major: 21,
-            jar: PathBuf::from("./data/servers/abc/server.jar"),
+            runtime: ServerRuntime::Java {
+                java: PathBuf::from("bin/java"),
+                java_major: 21,
+                jar: PathBuf::from("./data/servers/abc/server.jar"),
+            },
             directory: PathBuf::from("./data/servers/abc"),
         }
         .absolutize();
 
-        assert!(environment.java.is_absolute());
-        assert!(environment.jar.is_absolute());
+        let ServerRuntime::Java { java, jar, .. } = environment.runtime else {
+            panic!("wrong runtime")
+        };
+        assert!(java.is_absolute());
+        assert!(jar.is_absolute());
         assert!(environment.directory.is_absolute());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn horizon_preparation_requires_acceptance_and_an_initialized_valid_config() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let installation = root.path().join("horizon");
+        let directory = root.path().join("server");
+        std::fs::create_dir(&installation).unwrap();
+        std::fs::create_dir(&directory).unwrap();
+        for name in ["horizon-server", "horizon-engine"] {
+            let path = installation.join(name);
+            std::fs::write(&path, b"binary").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut config = ServerConfig::paper(&directory, "26.3");
+        config.core = "horizon".into();
+        assert!(matches!(
+            prepare_horizon(&config, root.path(), |_, _| {}).await,
+            Err(Error::EulaNotAccepted)
+        ));
+        config.eula_accepted = true;
+        assert!(matches!(
+            prepare_horizon(&config, root.path(), |_, _| {}).await,
+            Err(Error::InvalidConfiguration(_))
+        ));
+        assert!(!directory.join("eula.txt").exists());
+        let invalid = "[server\nport=25565\n";
+        std::fs::write(directory.join("server.toml"), invalid).unwrap();
+        assert!(matches!(
+            prepare_horizon(&config, root.path(), |_, _| {}).await,
+            Err(Error::InvalidConfiguration(_))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(directory.join("server.toml")).unwrap(),
+            invalid
+        );
+        assert!(!directory.join("eula.txt").exists());
     }
 
     #[test]
@@ -774,8 +920,11 @@ mod tests {
 
         assert_eq!(backend.calls(), 0, "warm Start must not discover");
         assert_eq!(resolver.discovery_passes(), 0);
-        assert_eq!(env.java, home.join("bin").join(super::java_exe_name()));
-        assert_eq!(env.jar, server_dir.join("server.jar"));
+        let ServerRuntime::Java { java, jar, .. } = env.runtime else {
+            panic!("wrong runtime")
+        };
+        assert_eq!(java, home.join("bin").join(super::java_exe_name()));
+        assert_eq!(jar, server_dir.join("server.jar"));
     }
 
     #[test]

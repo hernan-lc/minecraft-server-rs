@@ -707,9 +707,9 @@ async fn reinstall(
     authorized(&state, &identity, &id).await?;
 
     let guardian = state.guardian(&id).await?;
-    let installed = guardian.reinstall().await?;
+    guardian.reinstall().await?;
 
-    tracing::info!(server = %id, jar = %installed.jar.display(), "reinstalled");
+    tracing::info!(server = %id, "reinstalled");
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -727,9 +727,9 @@ async fn prepare_install(
     authorized(&state, &identity, &id).await?;
 
     let guardian = state.guardian(&id).await?;
-    let installed = guardian.prefetch().await?;
+    guardian.prefetch().await?;
 
-    tracing::info!(server = %id, jar = %installed.jar.display(), "prepared");
+    tracing::info!(server = %id, "prepared");
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

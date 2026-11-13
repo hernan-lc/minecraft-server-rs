@@ -40,7 +40,7 @@ pub use backup::Backup;
 pub use config::{GuardianConfig, Memory, ServerConfig, MAX_SERVER_MEMORY_MB};
 pub use environment::{
     prepare, prepare_with_resolver, resolve_jar, resolve_java, resolve_java_with, Provision,
-    ServerEnvironment,
+    ServerEnvironment, ServerRuntime,
 };
 pub use error::{Error, Result};
 pub use events::{ConsoleLine, ProgressState, ServerEvent, ServerStatus, Stream};

@@ -4,9 +4,9 @@
 
 A Minecraft server control panel that is one binary, one config file, and no dependencies at runtime.
 
-This branch is preparing a migration to the native Rust Horizon server. The
-panel still provisions and launches Java servers today; the Horizon submodule
-is source for the migration and is not yet integrated into the panel.
+This branch is migrating to the native Rust Horizon server. Guardian can run a
+manually provisioned Horizon server, but the catalog and setup UI still use the
+Java-server workflow. See [Horizon migration](docs/horizon-migration.md).
 
 It does what Pterodactyl does for Minecraft specifically — install Java, download the server, run it, stream the console, edit the files, restart it when it crashes — without PHP, Laravel, MySQL, Redis, Docker or a separate node daemon.
 
