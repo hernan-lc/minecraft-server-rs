@@ -1182,7 +1182,8 @@ mod tests {
         let error = check_paper_world_layout(&fs, root.path(), &config)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("custom_nether/DIM-1"));
+        let expected_path = std::path::Path::new("custom_nether").join("DIM-1");
+        assert!(error.contains(&expected_path.to_string_lossy().to_string()));
         assert_eq!(
             std::fs::read(legacy.join("r.0.0.mca")).unwrap(),
             b"original"
