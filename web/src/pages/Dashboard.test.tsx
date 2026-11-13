@@ -32,8 +32,8 @@ describe("Dashboard create server form", () => {
       memory_total_mb: 2,
       servers_online: 0,
     });
-    apiMock.providers.mockResolvedValue([{ id: "paper", server: true }]);
-    apiMock.versions.mockResolvedValue(["1.21.8"]);
+    apiMock.providers.mockResolvedValue([{ id: "paper", server: true }, { id: "horizon", server: true, programs_present: false }]);
+    apiMock.versions.mockImplementation(async (core: string) => core === "horizon" ? ["26.3"] : ["1.21.8"]);
     apiMock.createServer.mockResolvedValue({});
   });
 
@@ -133,6 +133,8 @@ describe("Dashboard create server form", () => {
       <Dashboard user={{ username: "admin", admin: true }} onOpen={vi.fn()} />
     </DialogProvider></ToastProvider></I18nProvider>);
     fireEvent.click(screen.getByRole("button", { name: "New server" }));
+    await screen.findByRole("option", { name: "paper" });
+    fireEvent.input(screen.getByTestId("server-core"), { target: { value: "paper" } });
     const acknowledgement = await screen.findByRole("checkbox", { name: /Continue without support or fixes/ });
     const create = screen.getByRole("button", { name: "Create server" });
     expect(create).toBeDisabled();
@@ -144,7 +146,7 @@ describe("Dashboard create server form", () => {
   });
 
   it("creates a native Horizon server without asking for a Java runtime", async () => {
-    apiMock.providers.mockResolvedValue([{ id: "paper", server: true }, { id: "horizon", server: true }]);
+    apiMock.providers.mockResolvedValue([{ id: "paper", server: true }, { id: "horizon", server: true, programs_present: false }]);
     apiMock.versions.mockImplementation(async (core: string) => core === "horizon" ? ["26.3"] : ["1.21.8"]);
     apiMock.compatibility.mockImplementation(async (core: string) => ({ availability: "available", support: "unknown", java_minimum: core === "horizon" ? null : 21 }));
     apiMock.createServer.mockClear();
@@ -154,7 +156,9 @@ describe("Dashboard create server form", () => {
     </DialogProvider></ToastProvider></I18nProvider>);
     fireEvent.click(screen.getByRole("button", { name: "New server" }));
     await screen.findByRole("option", { name: "horizon" });
-    fireEvent.input(screen.getByTestId("server-core"), { target: { value: "horizon" } });
+    expect(screen.getByTestId("server-core")).toHaveValue("horizon");
+    expect(screen.getByText(/Horizon programs are missing or inaccessible/)).toBeInTheDocument();
+    expect(screen.getByText(/install-horizon.sh/)).toBeInTheDocument();
     await screen.findByText(/Horizon runs natively/);
     expect(screen.queryByTestId("server-java")).toBeNull();
     const create = screen.getByRole("button", { name: "Create server" });

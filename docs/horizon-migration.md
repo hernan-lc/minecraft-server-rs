@@ -48,7 +48,10 @@ initializer in a private staging directory. For an existing vanilla server, it
 imports `server.properties` and leaves the original file and world in place;
 back up the world before converting. Java plugins and mods cannot run in Horizon.
 
-Select Horizon and version 26.3 when creating a server or changing its version.
+Horizon and version 26.3 are selected by default when creating a server; Java
+providers remain available. The creation form reports when the Horizon programs
+are missing, although their presence alone does not validate the game files.
+Select Horizon and version 26.3 when changing an existing server's version.
 The server directory is `<data-dir>/servers/<id>`. The API also accepts
 `core: "horizon"`, `version: "26.3"`, no build, and an explicit EULA decision.
 The panel's port is applied to `server.toml` on each start, Horizon's own panel

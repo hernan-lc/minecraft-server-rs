@@ -20,16 +20,22 @@ pub struct ProviderView {
     id: String,
     /// Whether this provider produces a server rather than a proxy.
     server: bool,
+    /// Presence of host-managed programs for the Horizon provider only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    programs_present: Option<bool>,
 }
 
 fn client() -> ApiResult<MinecraftClient> {
     MinecraftClient::builder()
-        .user_agent("minecraft-server-rs/0.1 (https://github.com/nglmercer/minecraft-server-rs)")
+        .user_agent("minecraft-server-rs/0.1 (https://github.com/hernan-lc/minecraft-server-rs)")
         .build()
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("minecraft client: {e}")))
 }
 
-async fn providers(_: Identity) -> ApiResult<Json<Vec<ProviderView>>> {
+async fn providers(
+    State(state): State<Arc<AppState>>,
+    _: Identity,
+) -> ApiResult<Json<Vec<ProviderView>>> {
     let ids = client()?.providers();
     let mut providers: Vec<_> = ids
         .into_iter()
@@ -43,14 +49,31 @@ async fn providers(_: Identity) -> ApiResult<Json<Vec<ProviderView>>> {
             // Velocity and Waterfall are proxies: they have no world and
             // the UI should not offer them a "start the world" flow.
             let server = !matches!(id.as_str(), "velocity" | "waterfall");
-            ProviderView { id, server }
+            ProviderView {
+                id,
+                server,
+                programs_present: None,
+            }
         })
         .collect();
     if !providers.iter().any(|provider| provider.id == "horizon") {
         providers.push(ProviderView {
             id: "horizon".into(),
             server: true,
+            programs_present: None,
         });
+    }
+    let installation = state.data_dir.join("horizon");
+    let present = tokio::task::spawn_blocking(move || {
+        guardian::sandbox::horizon_programs_present(&installation)
+    })
+    .await
+    .unwrap_or(false);
+    if let Some(horizon) = providers
+        .iter_mut()
+        .find(|provider| provider.id == "horizon")
+    {
+        horizon.programs_present = Some(present);
     }
     Ok(Json(providers))
 }
@@ -168,7 +191,7 @@ async fn paper_metadata(provider: &str, version: &str) -> Option<PaperVersionRes
         return None;
     }
     let http = reqwest::Client::builder()
-        .user_agent("minecraft-server-rs/0.1 (https://github.com/nglmercer/minecraft-server-rs)")
+        .user_agent("minecraft-server-rs/0.1 (https://github.com/hernan-lc/minecraft-server-rs)")
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .ok()?;
@@ -329,15 +352,53 @@ mod tests {
 
     #[tokio::test]
     async fn horizon_catalog_is_local_and_does_not_require_java() {
+        let data = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(data.path(), crate::state::PlayitMode::External)
+            .await
+            .unwrap();
         let identity = Identity {
             username: "test".into(),
             admin: true,
             servers: vec![],
         };
-        let Json(providers) = providers(identity.clone()).await.unwrap();
-        assert!(providers
+        let Json(list) = providers(State(Arc::clone(&state)), identity.clone())
+            .await
+            .unwrap();
+        assert!(list
             .iter()
             .any(|provider| provider.id == "horizon" && provider.server));
+        assert_eq!(
+            list.iter()
+                .find(|provider| provider.id == "horizon")
+                .unwrap()
+                .programs_present,
+            Some(false)
+        );
+        assert!(list
+            .iter()
+            .filter(|provider| provider.id != "horizon")
+            .all(|provider| provider.programs_present.is_none()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let installation = data.path().join("horizon");
+            std::fs::create_dir(&installation).unwrap();
+            for name in ["horizon-server", "horizon-engine"] {
+                let file = installation.join(name);
+                std::fs::write(&file, b"test").unwrap();
+                std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let Json(list) = providers(State(Arc::clone(&state)), identity.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                list.iter()
+                    .find(|provider| provider.id == "horizon")
+                    .unwrap()
+                    .programs_present,
+                Some(true)
+            );
+        }
         let Json(versions) = versions(identity.clone(), Path("horizon".into()))
             .await
             .unwrap();
@@ -356,6 +417,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(other.availability, "unavailable");
+        state.playit.shutdown().await.unwrap();
     }
 
     #[test]

@@ -286,11 +286,11 @@ function CreateServer({
 }) {
   const t = useT();
   const toast = useToast();
-  const [providers, setProviders] = useState<{ id: string; server: boolean }[]>([]);
+  const [providers, setProviders] = useState<{ id: string; server: boolean; programs_present?: boolean }[]>([]);
   const [versions, setVersions] = useState<string[]>([]);
   const [form, setForm] = useState({
     name: "",
-    core: "paper",
+    core: "horizon",
     version: "",
     java_major: 21,
     port: 25565,
@@ -468,6 +468,8 @@ function CreateServer({
         </div>
 
         {form.core === "horizon" && <Banner kind="info">{t("createServer.horizonHint")}</Banner>}
+        {form.core === "horizon" && providers.find((provider) => provider.id === "horizon")?.programs_present === false &&
+          <Banner kind="info">{t("createServer.nativeProgramsMissing")} {t("createServer.nativeInstallBeforeStart")}</Banner>}
 
         <Compatibility core={form.core} version={form.version} javaMajor={form.java_major} onAllowedChange={setCompatible} />
 
