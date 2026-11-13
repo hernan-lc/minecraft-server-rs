@@ -214,6 +214,52 @@ class InstallHorizonTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.data / "horizon/horizon-server").is_file())
 
+    def test_packaged_installer_uses_bundled_programs_without_source(self):
+        package = self.root / "release"
+        package_scripts = package / "scripts"
+        bundled = package / "runtime/horizon"
+        package_scripts.mkdir(parents=True)
+        bundled.mkdir(parents=True)
+        packaged = package_scripts / "install-horizon.sh"
+        shutil.copyfile(SCRIPT, packaged)
+        shutil.copy2(self.build / "horizon-server", bundled / "horizon-server")
+        shutil.copy2(self.build / "horizon-client", bundled / "horizon-engine")
+        result = subprocess.run(
+            ["bash", str(packaged), "--data-dir", str(self.data), "--resources", str(self.resources)],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(os.access(self.data / "horizon/horizon-engine", os.X_OK))
+        self.assertEqual((self.data / "horizon/.local/horizon-client/26.3/marker").read_text(), "personal game data")
+        self.assert_no_staging()
+
+    @unittest.skipUnless(
+        os.environ.get("HORIZON_SMOKE_SERVER") and os.environ.get("HORIZON_SMOKE_ENGINE"),
+        "requires locally built Horizon programs",
+    )
+    def test_real_bundled_programs_install_without_source(self):
+        package = self.root / "release"
+        scripts = package / "scripts"
+        bundled = package / "runtime/horizon"
+        scripts.mkdir(parents=True)
+        bundled.mkdir(parents=True)
+        packaged = scripts / "install-horizon.sh"
+        shutil.copyfile(SCRIPT, packaged)
+        for env, name in [("HORIZON_SMOKE_SERVER", "horizon-server"), ("HORIZON_SMOKE_ENGINE", "horizon-engine")]:
+            source = Path(os.environ[env])
+            try:
+                os.link(source, bundled / name)
+            except (AttributeError, OSError):
+                shutil.copy2(source, bundled / name)
+        result = subprocess.run(
+            ["bash", str(packaged), "--data-dir", str(self.data)],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ["horizon-server", "horizon-engine"]:
+            self.assertTrue(os.access(self.data / "horizon" / name, os.X_OK))
+        self.assert_no_staging()
+
     @unittest.skipUnless(
         os.environ.get("HORIZON_SMOKE_BUILD") and os.environ.get("HORIZON_SMOKE_RESOURCES"),
         "requires real Horizon binaries and prepared game files",

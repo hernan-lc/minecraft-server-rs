@@ -13,6 +13,7 @@ Build the pinned Horizon source, or use binaries already built for this host,
 and install horizon-server and horizon-engine under DIR/horizon. The optional
 resources directory must have been prepared from your own Minecraft installation.
 An existing DIR/horizon is never replaced.
+Release packages with bundled Horizon programs use those programs automatically.
 EOF
 }
 
@@ -105,6 +106,13 @@ fi
 if [[ -e "$destination" || -L "$destination" ]]; then
   echo "Horizon is already installed at $destination; stop servers and manage updates explicitly." >&2
   exit 1
+fi
+
+# A release may contain host-built programs, but no source checkout. Explicit
+# --from-build-dir still takes precedence over the bundled pair.
+bundled="$repo_root/runtime/horizon"
+if [[ -z "$build_dir" && ! -e "$repo_root/.git" && -f "$bundled/horizon-server$suffix" && -f "$bundled/horizon-engine$suffix" ]]; then
+  build_dir="$bundled"
 fi
 
 if [[ -z "$build_dir" ]]; then

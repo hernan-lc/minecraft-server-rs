@@ -11,9 +11,11 @@ Build and install `horizon-server` and the headless engine from the pinned
 ./scripts/install-horizon.sh --data-dir ./data --resources /path/to/prepared/26.3
 ```
 
-Run this from a recursive clone of the migration branch. A downloaded panel
-release includes the installer but not Horizon source: clone the branch to build
-it, or use `--from-build-dir` with binaries built on the host.
+Run this from a recursive clone of the migration branch. The Linux x86-64 panel
+release workflow builds and includes the pinned headless Horizon programs, so
+the same command installs them without a source checkout. Other release packages
+include the installer but not Horizon source or binaries: clone the branch to
+build them, or use `--from-build-dir` with binaries built on the host.
 
 The script builds the pinned, clean submodule and validates both executables.
 Use `--debug` for a debug build, or `--from-build-dir /path/to/target/debug`
