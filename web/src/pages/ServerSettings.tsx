@@ -72,6 +72,9 @@ function Installed({ server, onChanged }: { server: Server; onChanged: () => voi
 
   if (server.core === "horizon") {
     return <Card title={t("settings.installSection")}>
+      {server.horizon_programs_present != null && <p class="mb-2 text-sm">
+        {t(server.horizon_programs_present ? "createServer.nativeProgramsPresent" : "createServer.nativeProgramsMissing")}
+      </p>}
       <p class="text-sm text-fg-muted">{t("createServer.nativeSetup", { id: server.id })}</p>
       <div class="mt-4 flex flex-col gap-2 sm:flex-row">
         <Button disabled={busy || lifecycleBusy} onClick={() => setChangingVersion(true)}>{t("settings.changeVersion")}</Button>

@@ -34,6 +34,8 @@ pub struct ServerView {
     metrics: Option<crate::metrics::ProcessMetrics>,
     /// What is actually installed on disk, which may lag the config.
     installed: Option<guardian::Installation>,
+    /// Whether host-managed Horizon program files pass path/permission checks.
+    horizon_programs_present: Option<bool>,
     /// Whether starting would download a new artifact first.
     needs_install: bool,
     /// Bytes on disk in this server's directory.
@@ -97,10 +99,24 @@ async fn view(
     } else {
         guardian.installation().await
     };
-    let needs_install = installed
-        .as_ref()
-        .map(|i| !i.satisfies(&record.config))
-        .unwrap_or(true);
+    let horizon_programs_present = if native {
+        let installation = state.data_dir.join("horizon");
+        Some(
+            tokio::task::spawn_blocking(move || {
+                guardian::sandbox::horizon_programs_present(&installation)
+            })
+            .await
+            .unwrap_or(false),
+        )
+    } else {
+        None
+    };
+    // Horizon is host-managed and is never downloaded by the panel.
+    let needs_install = !native
+        && installed
+            .as_ref()
+            .map(|i| !i.satisfies(&record.config))
+            .unwrap_or(true);
     Ok(ServerView {
         id: record.id.clone(),
         name: record.name.clone(),
@@ -129,6 +145,7 @@ async fn view(
         live,
         metrics,
         installed,
+        horizon_programs_present,
         needs_install,
         disk_bytes,
         playit: record.playit.clone(),
@@ -920,6 +937,47 @@ mod tests {
         assert_eq!(updated.config.core, "horizon");
         assert_eq!(updated.config.version, "26.3");
         assert_eq!(updated.config.build, None);
+        state.playit.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn horizon_view_reports_host_programs_without_claiming_a_download() {
+        use std::os::unix::fs::PermissionsExt;
+        let data_dir = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(data_dir.path(), PlayitMode::External)
+            .await
+            .unwrap();
+        let mut record = record("server-1", 25565, 1024);
+        record.config.directory = state.server_dir(&record.id);
+        record.config.core = "horizon".into();
+        record.config.version = "26.3".into();
+        state.insert_guardian(&record).await;
+        let missing = view(&state, &record, true).await.unwrap();
+        assert_eq!(missing.horizon_programs_present, Some(false));
+        assert!(!missing.needs_install);
+        let installation = data_dir.path().join("horizon");
+        std::fs::create_dir_all(&installation).unwrap();
+        for program in ["horizon-server", "horizon-engine"] {
+            let path = installation.join(program);
+            std::fs::write(&path, b"placeholder").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let found = view(&state, &record, true).await.unwrap();
+        assert_eq!(found.horizon_programs_present, Some(true));
+        assert!(!found.needs_install);
+        std::fs::set_permissions(
+            installation.join("horizon-engine"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(
+            view(&state, &record, true)
+                .await
+                .unwrap()
+                .horizon_programs_present,
+            Some(false)
+        );
         state.playit.shutdown().await.unwrap();
     }
 

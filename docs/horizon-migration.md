@@ -24,6 +24,8 @@ that installation read-only when available. The script never
 replaces an existing installation. Stop any running servers and manage updates
 explicitly. The installation directory must be administrator-owned and outside
 every writable server directory. The panel does not download these executables.
+Server settings report whether both programs pass filesystem checks; this does
+not validate their compatibility or the prepared game files.
 
 Prepare Horizon's game files from your own Minecraft installation as described
 in `vendor/horizon/docs/hosting.md`. Supply the prepared directory to the
@@ -55,7 +57,7 @@ Horizon is started as `horizon-server run` and receives console commands and
 `stop` over stdin. Linux and macOS use their platform sandbox when available;
 Android and platforms without a supported sandbox require the existing explicit
 `--allow-unsandboxed-servers` setting. Automated installation through the panel,
-installation status, enforced resource limits, and cross-platform
+full installation validation, enforced resource limits, and cross-platform
 end-to-end validation remain unfinished. The pinned Horizon fork advertises a
 force-stop control protocol: the supervisor kills and reaps its engine before
 exiting. Older binaries without this protocol cannot be force-stopped by the

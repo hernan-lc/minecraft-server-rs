@@ -344,6 +344,8 @@ export const en = {
     nativeReservation: "Memory reservation (MiB)",
     nativeSetup: "An administrator can run scripts/install-horizon.sh with --data-dir and --resources to install Horizon and shared game files, or put prepared files under servers/{id}/resources/. The panel initializes server.toml when preparing or starting.",
     nativePrepare: "Prepare Horizon",
+    nativeProgramsPresent: "Horizon programs found. Game files and program compatibility are checked when the server starts.",
+    nativeProgramsMissing: "Horizon programs are missing or inaccessible.",
     nativeMetricsUnavailable: "Native process metrics are unavailable on this host.",
     nativeMemoryDetail: "Summed process RSS; shared memory may be counted more than once.",
     java: "Java {version}",

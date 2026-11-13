@@ -347,6 +347,8 @@ export const es: Dictionary = {
     nativeReservation: "Reserva de memoria (MiB)",
     nativeSetup: "Un administrador puede ejecutar scripts/install-horizon.sh con --data-dir y --resources para instalar Horizon y archivos de juego compartidos, o colocar los archivos preparados en servers/{id}/resources/. El panel inicializa server.toml al preparar o iniciar.",
     nativePrepare: "Preparar Horizon",
+    nativeProgramsPresent: "Se encontraron los programas de Horizon. Los archivos del juego y la compatibilidad de los programas se comprueban al iniciar el servidor.",
+    nativeProgramsMissing: "Los programas de Horizon faltan o no son accesibles.",
     nativeMetricsUnavailable: "Las métricas del proceso nativo no están disponibles en este equipo.",
     nativeMemoryDetail: "Suma de la memoria residente de los procesos; la memoria compartida puede contarse más de una vez.",
     java: "Java {version}",

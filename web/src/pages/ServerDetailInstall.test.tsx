@@ -82,6 +82,16 @@ async function openSettings(server: Server) {
 
 describe("ServerDetail installed build", () => {
   beforeEach(() => { apiMock.compatibility.mockResolvedValue({ availability: "available", support: "supported", java_minimum: 21 }); });
+  it("reports the presence of host-managed Horizon programs", async () => {
+    await openSettings(makeServer({ core: "horizon", version: "26.3", horizon_programs_present: true, needs_install: false }));
+    expect(screen.getByText(/Horizon programs found/)).toBeInTheDocument();
+    expect(screen.getByText(/compatibility are checked/)).toBeInTheDocument();
+  });
+
+  it("reports missing Horizon programs", async () => {
+    await openSettings(makeServer({ core: "horizon", version: "26.3", horizon_programs_present: false, needs_install: false }));
+    expect(screen.getByText("Horizon programs are missing or inaccessible.")).toBeInTheDocument();
+  });
   it("opens the EULA acceptance dialog from the warning", async () => {
     await openSettings(makeServer({ eula_accepted: false }));
     fireEvent.click(screen.getByRole("button", { name: "Accept EULA and start" }));

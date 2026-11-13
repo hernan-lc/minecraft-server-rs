@@ -201,6 +201,8 @@ export interface Server {
   progress: ProgressState | null;
   metrics: ProcessMetrics | null;
   installed: Installation | null;
+  /** Host-managed Horizon programs passed filesystem checks; null for Java. */
+  horizon_programs_present?: boolean | null;
   /** True when starting would download a new artifact first. */
   needs_install: boolean;
   /** Bytes on disk in this server's directory. */

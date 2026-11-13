@@ -8,9 +8,7 @@
 
 use crate::error::{Error, Result};
 use std::ffi::OsString;
-use std::path::Path;
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 /// The isolation level applied to a Minecraft child process.
@@ -108,8 +106,7 @@ fn horizon_command_with_args(
     args: &[OsString],
     policy: SandboxPolicy,
 ) -> Result<(Command, SandboxMode)> {
-    let installation =
-        std::fs::canonicalize(installation).map_err(|error| Error::io(installation, error))?;
+    let installation = validate_horizon_installation(installation)?;
     let directory =
         std::fs::canonicalize(directory).map_err(|error| Error::io(directory, error))?;
     if installation.starts_with(&directory) || directory.starts_with(&installation) {
@@ -117,6 +114,43 @@ fn horizon_command_with_args(
             "the Horizon installation and server directory must be separate".into(),
         ));
     }
+    #[cfg(target_os = "linux")]
+    {
+        horizon_linux_command(
+            &installation,
+            &directory,
+            args,
+            find_in_path("bwrap"),
+            policy,
+        )
+    }
+    #[cfg(target_os = "macos")]
+    {
+        horizon_macos_command(
+            &installation,
+            &directory,
+            args,
+            find_in_path("sandbox-exec"),
+            policy,
+        )
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let executable =
+            installation.join(format!("horizon-server{}", std::env::consts::EXE_SUFFIX));
+        unsandboxed_command(&executable, &directory, args, policy)
+    }
+}
+
+/// Whether the two host-managed Horizon programs pass the launcher's path and
+/// permission checks. This does not execute them or validate game resources.
+pub fn horizon_programs_present(installation: &Path) -> bool {
+    validate_horizon_installation(installation).is_ok()
+}
+
+fn validate_horizon_installation(installation: &Path) -> Result<PathBuf> {
+    let installation =
+        std::fs::canonicalize(installation).map_err(|error| Error::io(installation, error))?;
     let executable = format!("horizon-server{}", std::env::consts::EXE_SUFFIX);
     for name in [
         &executable,
@@ -146,30 +180,7 @@ fn horizon_command_with_args(
         }
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        horizon_linux_command(
-            &installation,
-            &directory,
-            args,
-            find_in_path("bwrap"),
-            policy,
-        )
-    }
-    #[cfg(target_os = "macos")]
-    {
-        horizon_macos_command(
-            &installation,
-            &directory,
-            args,
-            find_in_path("sandbox-exec"),
-            policy,
-        )
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        unsandboxed_command(&installation.join(executable), &directory, args, policy)
-    }
+    Ok(installation)
 }
 
 #[cfg(target_os = "linux")]
