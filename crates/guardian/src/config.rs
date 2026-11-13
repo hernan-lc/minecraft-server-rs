@@ -29,6 +29,8 @@ pub const MAX_ARGUMENTS: usize = 128;
 pub const MAX_ARGUMENT_BYTES: usize = 16 * 1024;
 /// Java feature versions above this are not meaningful configuration values.
 pub const MAX_JAVA_MAJOR: u32 = 100;
+/// Minecraft version implemented by the pinned Horizon fork.
+pub const HORIZON_VERSION: &str = "26.3";
 
 /// How much heap the JVM gets.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -156,6 +158,11 @@ impl ServerConfig {
         if self.core.contains(['\0', '\r', '\n']) || self.version.contains(['\0', '\r', '\n']) {
             return Err("server core and version may not contain control characters".into());
         }
+        if self.core.eq_ignore_ascii_case("horizon")
+            && (self.version != HORIZON_VERSION || self.build.is_some())
+        {
+            return Err(format!("the pinned Horizon runtime supports version {HORIZON_VERSION} without a build selector"));
+        }
         if self.java_major == 0 || self.java_major > MAX_JAVA_MAJOR {
             return Err(format!("java_major must be between 1 and {MAX_JAVA_MAJOR}"));
         }
@@ -262,6 +269,18 @@ fn validate_arguments(arguments: &[String], field: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn horizon_only_accepts_the_pinned_game_version_without_a_build() {
+        let mut config = ServerConfig::paper("/srv/mc", HORIZON_VERSION);
+        config.core = "horizon".into();
+        assert!(config.validate().is_ok());
+        config.version = "1.21.8".into();
+        assert!(config.validate().is_err());
+        config.version = HORIZON_VERSION.into();
+        config.build = Some("paper-build".into());
+        assert!(config.validate().is_err());
+    }
 
     #[test]
     fn only_artifact_defining_fields_are_part_of_the_key() {

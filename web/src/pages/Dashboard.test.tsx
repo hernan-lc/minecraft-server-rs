@@ -143,4 +143,28 @@ describe("Dashboard create server form", () => {
     expect(apiMock.createServer.mock.calls[0][0]).toMatchObject({ version: "1.21.11", java_major: 21, eula_accepted: false });
   });
 
+  it("creates a native Horizon server without asking for a Java runtime", async () => {
+    apiMock.providers.mockResolvedValue([{ id: "paper", server: true }, { id: "horizon", server: true }]);
+    apiMock.versions.mockImplementation(async (core: string) => core === "horizon" ? ["26.3"] : ["1.21.8"]);
+    apiMock.compatibility.mockImplementation(async (core: string) => ({ availability: "available", support: "unknown", java_minimum: core === "horizon" ? null : 21 }));
+    apiMock.createServer.mockClear();
+    localStorage.setItem("mcpanel:guide:v2:dashboard:admin", "seen");
+    render(<I18nProvider><ToastProvider><DialogProvider>
+      <Dashboard user={{ username: "admin", admin: true }} onOpen={vi.fn()} />
+    </DialogProvider></ToastProvider></I18nProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "New server" }));
+    await screen.findByRole("option", { name: "horizon" });
+    fireEvent.input(screen.getByTestId("server-core"), { target: { value: "horizon" } });
+    await screen.findByText(/Horizon runs natively/);
+    expect(screen.queryByTestId("server-java")).toBeNull();
+    const create = screen.getByRole("button", { name: "Create server" });
+    await waitFor(() => expect(create).not.toBeDisabled());
+    fireEvent.input(screen.getByTestId("server-name"), { target: { value: "Native world" } });
+    fireEvent.input(screen.getByLabelText("Memory reservation (MiB)"), { target: { value: "512" } });
+    fireEvent.click(screen.getByTestId("server-eula"));
+    fireEvent.click(create);
+    await waitFor(() => expect(apiMock.createServer).toHaveBeenCalledTimes(1));
+    expect(apiMock.createServer.mock.calls[0][0]).toMatchObject({ core: "horizon", version: "26.3", eula_accepted: true, memory: { min_mb: 512, max_mb: 512 } });
+  });
+
 });

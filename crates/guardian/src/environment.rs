@@ -377,6 +377,25 @@ pub async fn prepare_with_resolver(
     resolver: &JavaResolver,
     on_progress: impl Fn(String, Option<f32>) + Send + Sync + Clone + 'static,
 ) -> Result<ServerEnvironment> {
+    prepare_with_resolver_and_sandbox(
+        config,
+        data_dir,
+        mode,
+        resolver,
+        crate::sandbox::SandboxPolicy::default(),
+        on_progress,
+    )
+    .await
+}
+
+pub(crate) async fn prepare_with_resolver_and_sandbox(
+    config: &ServerConfig,
+    data_dir: &Path,
+    mode: Provision,
+    resolver: &JavaResolver,
+    policy: crate::sandbox::SandboxPolicy,
+    on_progress: impl Fn(String, Option<f32>) + Send + Sync + Clone + 'static,
+) -> Result<ServerEnvironment> {
     if !config.eula_accepted {
         return Err(Error::EulaNotAccepted);
     }
@@ -387,7 +406,7 @@ pub async fn prepare_with_resolver(
                 "update the host-managed Horizon installation outside the panel".into(),
             ));
         }
-        return prepare_horizon(config, data_dir, on_progress).await;
+        return prepare_horizon(config, data_dir, policy, on_progress).await;
     }
 
     // Cheap, and it keeps eula.txt and the port in step with the config.
@@ -457,42 +476,52 @@ pub async fn prepare_with_resolver(
     Ok(environment)
 }
 
-/// Prepare a previously initialized Horizon server without resolving Java.
+/// Prepare a Horizon server without resolving Java.
 /// The pinned fork targets 26.3. An administrator installs both native
-/// executables under the panel data directory and initializes the server with
-/// Horizon so existing vanilla settings can be imported by Horizon itself.
+/// executables under the panel data directory; Horizon itself imports existing
+/// vanilla settings in a private staging directory on first preparation.
 pub(crate) async fn prepare_horizon(
     config: &ServerConfig,
     data_dir: &Path,
+    policy: crate::sandbox::SandboxPolicy,
     on_progress: impl Fn(String, Option<f32>),
 ) -> Result<ServerEnvironment> {
     if !config.eula_accepted {
         return Err(Error::EulaNotAccepted);
     }
-    if config.version != "26.3" || config.build.is_some() {
-        return Err(Error::InvalidConfiguration(
-            "the pinned Horizon runtime supports version 26.3 without a build selector".into(),
-        ));
+    if config.version != crate::config::HORIZON_VERSION || config.build.is_some() {
+        return Err(Error::InvalidConfiguration(format!(
+            "the pinned Horizon runtime supports version {} without a build selector",
+            crate::config::HORIZON_VERSION
+        )));
     }
     let installation = absolute(data_dir.join("horizon"));
     let directory = absolute(config.directory.clone());
     // This also rejects missing executables, unsafe layouts and symlink escapes.
-    crate::sandbox::horizon_command(
-        &installation,
-        &directory,
-        crate::sandbox::SandboxPolicy::new(true),
-    )?;
-    let fs = ScopedFs::open(&directory).map_err(|error| Error::io(&directory, error))?;
-    let path = directory.join("server.toml");
-    let bytes = fs.read_file("server.toml").map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            Error::InvalidConfiguration(
-                "initialize this directory with horizon-server init before starting it in the panel".into(),
-            )
-        } else {
-            Error::io(&path, error)
+    crate::sandbox::horizon_command(&installation, &directory, policy).map_err(|error| {
+        match error {
+            Error::Io { ref source, .. } if source.kind() == std::io::ErrorKind::NotFound => Error::InvalidConfiguration("Horizon installation is missing; place horizon-server and horizon-engine in the panel data directory's horizon folder".into()),
+            other => other,
         }
     })?;
+    let fs = ScopedFs::open(&directory).map_err(|error| Error::io(&directory, error))?;
+    let path = directory.join("server.toml");
+    let bytes = match fs.read_file("server.toml") {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            on_progress("initializing Horizon configuration".into(), None);
+            initialize_horizon(
+                &fs,
+                &directory,
+                &installation,
+                data_dir,
+                config.port,
+                policy,
+            )
+            .await?
+        }
+        Err(error) => return Err(Error::io(&path, error)),
+    };
     let text = std::str::from_utf8(&bytes).map_err(|_| {
         Error::InvalidConfiguration("Horizon server.toml must be valid UTF-8".into())
     })?;
@@ -519,6 +548,65 @@ pub(crate) async fn prepare_horizon(
         runtime: ServerRuntime::Horizon { installation },
         directory,
     })
+}
+
+/// Run Horizon's importer in a private scratch directory, so it cannot modify
+/// an existing world or replace operator files while translating properties.
+async fn initialize_horizon(
+    server_fs: &ScopedFs,
+    directory: &Path,
+    installation: &Path,
+    data_dir: &Path,
+    port: u16,
+    policy: crate::sandbox::SandboxPolicy,
+) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let scratch = tempfile::Builder::new()
+        .prefix(".horizon-init-")
+        .tempdir_in(data_dir)
+        .map_err(|error| Error::io(data_dir, error))?;
+    match server_fs.open_file("server.properties") {
+        Ok(file) => {
+            let mut bytes = Vec::new();
+            file.take(1_048_577)
+                .read_to_end(&mut bytes)
+                .map_err(|error| Error::io(directory.join("server.properties"), error))?;
+            if bytes.len() > 1_048_576 {
+                return Err(Error::InvalidConfiguration(
+                    "server.properties exceeds 1 MiB".into(),
+                ));
+            }
+            std::fs::write(scratch.path().join("server.properties"), bytes)
+                .map_err(|error| Error::io(scratch.path().join("server.properties"), error))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(Error::io(directory.join("server.properties"), error)),
+    }
+    let (mut command, _) =
+        crate::sandbox::horizon_init_command(installation, scratch.path(), port, policy)?;
+    command
+        .env_clear()
+        .envs(crate::process::sanitized_environment(std::env::vars_os()))
+        .env("HOME", scratch.path())
+        .env("USERPROFILE", scratch.path())
+        .env("TMPDIR", scratch.path())
+        .env("TMP", scratch.path())
+        .env("TEMP", scratch.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let status = tokio::time::timeout(std::time::Duration::from_secs(60), command.status())
+        .await
+        .map_err(|_| Error::Task("Horizon initialization timed out".into()))?
+        .map_err(|error| Error::io(installation.join("horizon-server"), error))?;
+    if !status.success() {
+        return Err(Error::InvalidConfiguration(
+            "Horizon initialization failed; check the installation and server.properties".into(),
+        ));
+    }
+    std::fs::read(scratch.path().join("server.toml"))
+        .map_err(|error| Error::io(scratch.path().join("server.toml"), error))
 }
 
 /// Installation metadata lives inside a server directory an operator can
@@ -802,7 +890,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn horizon_preparation_requires_acceptance_and_an_initialized_valid_config() {
+    async fn horizon_preparation_preserves_inputs_on_failure() {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let installation = root.path().join("horizon");
@@ -817,19 +905,46 @@ mod tests {
         let mut config = ServerConfig::paper(&directory, "26.3");
         config.core = "horizon".into();
         assert!(matches!(
-            prepare_horizon(&config, root.path(), |_, _| {}).await,
+            prepare_horizon(
+                &config,
+                root.path(),
+                crate::sandbox::SandboxPolicy::new(true),
+                |_, _| {}
+            )
+            .await,
             Err(Error::EulaNotAccepted)
         ));
         config.eula_accepted = true;
-        assert!(matches!(
-            prepare_horizon(&config, root.path(), |_, _| {}).await,
-            Err(Error::InvalidConfiguration(_))
-        ));
+        let original = "level-name=kept-world\nmotd=Original\n";
+        std::fs::write(directory.join("server.properties"), original).unwrap();
+        assert!(prepare_horizon(
+            &config,
+            root.path(),
+            crate::sandbox::SandboxPolicy::new(true),
+            |_, _| {}
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            std::fs::read_to_string(directory.join("server.properties")).unwrap(),
+            original
+        );
+        assert!(!std::fs::read_dir(root.path()).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".horizon-init-")));
         assert!(!directory.join("eula.txt").exists());
         let invalid = "[server\nport=25565\n";
         std::fs::write(directory.join("server.toml"), invalid).unwrap();
         assert!(matches!(
-            prepare_horizon(&config, root.path(), |_, _| {}).await,
+            prepare_horizon(
+                &config,
+                root.path(),
+                crate::sandbox::SandboxPolicy::new(true),
+                |_, _| {}
+            )
+            .await,
             Err(Error::InvalidConfiguration(_))
         ));
         assert_eq!(
@@ -837,6 +952,21 @@ mod tests {
             invalid
         );
         assert!(!directory.join("eula.txt").exists());
+        std::fs::remove_file(directory.join("server.toml")).unwrap();
+        std::fs::remove_file(directory.join("server.properties")).unwrap();
+        let outside = root.path().join("outside-properties");
+        std::fs::write(&outside, "do not import").unwrap();
+        std::os::unix::fs::symlink(&outside, directory.join("server.properties")).unwrap();
+        assert!(prepare_horizon(
+            &config,
+            root.path(),
+            crate::sandbox::SandboxPolicy::new(true),
+            |_, _| {}
+        )
+        .await
+        .is_err());
+        assert_eq!(std::fs::read_to_string(outside).unwrap(), "do not import");
+        assert!(!directory.join("server.toml").exists());
     }
 
     #[test]

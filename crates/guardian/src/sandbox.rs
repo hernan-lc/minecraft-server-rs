@@ -82,6 +82,32 @@ pub fn horizon_command(
     directory: &Path,
     policy: SandboxPolicy,
 ) -> Result<(Command, SandboxMode)> {
+    horizon_command_with_args(installation, directory, &["run".into()], policy)
+}
+
+/// Build a noninteractive Horizon initialization command in the same sandbox.
+pub fn horizon_init_command(
+    installation: &Path,
+    directory: &Path,
+    port: u16,
+    policy: SandboxPolicy,
+) -> Result<(Command, SandboxMode)> {
+    let args = [
+        "init".into(),
+        "--yes".into(),
+        "--eula".into(),
+        "--port".into(),
+        port.to_string().into(),
+    ];
+    horizon_command_with_args(installation, directory, &args, policy)
+}
+
+fn horizon_command_with_args(
+    installation: &Path,
+    directory: &Path,
+    args: &[OsString],
+    policy: SandboxPolicy,
+) -> Result<(Command, SandboxMode)> {
     let installation =
         std::fs::canonicalize(installation).map_err(|error| Error::io(installation, error))?;
     let directory =
@@ -122,25 +148,27 @@ pub fn horizon_command(
 
     #[cfg(target_os = "linux")]
     {
-        horizon_linux_command(&installation, &directory, find_in_path("bwrap"), policy)
+        horizon_linux_command(
+            &installation,
+            &directory,
+            args,
+            find_in_path("bwrap"),
+            policy,
+        )
     }
     #[cfg(target_os = "macos")]
     {
         horizon_macos_command(
             &installation,
             &directory,
+            args,
             find_in_path("sandbox-exec"),
             policy,
         )
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        unsandboxed_command(
-            &installation.join(executable),
-            &directory,
-            &["run".into()],
-            policy,
-        )
+        unsandboxed_command(&installation.join(executable), &directory, args, policy)
     }
 }
 
@@ -148,6 +176,7 @@ pub fn horizon_command(
 fn horizon_linux_command(
     installation: &Path,
     directory: &Path,
+    args: &[OsString],
     bwrap: Option<PathBuf>,
     policy: SandboxPolicy,
 ) -> Result<(Command, SandboxMode)> {
@@ -155,7 +184,7 @@ fn horizon_linux_command(
         return unsandboxed_command(
             &installation.join("horizon-server"),
             directory,
-            &["run".into()],
+            args,
             policy,
         );
     };
@@ -187,7 +216,7 @@ fn horizon_linux_command(
             "--chdir", "/server", "--setenv", "HOME", "/server", "--setenv", "TMPDIR", "/tmp",
         ])
         .arg("/opt/mcpanel-horizon/horizon-server")
-        .arg("run")
+        .args(args)
         .current_dir(directory);
     Ok((command, SandboxMode::KernelSandbox))
 }
@@ -196,6 +225,7 @@ fn horizon_linux_command(
 fn horizon_macos_command(
     installation: &Path,
     directory: &Path,
+    args: &[OsString],
     sandbox_exec: Option<PathBuf>,
     policy: SandboxPolicy,
 ) -> Result<(Command, SandboxMode)> {
@@ -203,7 +233,7 @@ fn horizon_macos_command(
         return unsandboxed_command(
             &installation.join("horizon-server"),
             directory,
-            &["run".into()],
+            args,
             policy,
         );
     };
@@ -220,7 +250,7 @@ fn horizon_macos_command(
     command
         .args(["-p", &profile])
         .arg(installation.join("horizon-server"))
-        .arg("run")
+        .args(args)
         .current_dir(directory);
     Ok((command, SandboxMode::KernelSandbox))
 }
@@ -469,6 +499,7 @@ mod tests {
         let (command, mode) = horizon_linux_command(
             &installation,
             &directory,
+            &["run".into()],
             Some(root.path().join("bwrap")),
             SandboxPolicy::default(),
         )
@@ -496,7 +527,13 @@ mod tests {
             OsString::from("run")
         ]));
         assert!(matches!(
-            horizon_linux_command(&installation, &directory, None, SandboxPolicy::default()),
+            horizon_linux_command(
+                &installation,
+                &directory,
+                &["run".into()],
+                None,
+                SandboxPolicy::default()
+            ),
             Err(Error::SandboxUnavailable)
         ));
     }

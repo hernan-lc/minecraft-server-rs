@@ -4,7 +4,7 @@ import { useServerPower } from "../useServerPower";
 import { Guide, type GuideStep } from "../components/Guide";
 import { Compatibility } from "../components/Compatibility";
 import { Modal } from "../components/Modal";
-import { Button, Card, Field, Input, Select, StatCard, StatusPill, formatUptime } from "../components/ui";
+import { Banner, Button, Card, Field, Input, Select, StatCard, StatusPill, formatUptime } from "../components/ui";
 import * as Icon from "../components/icons";
 import { tileColour } from "../components/serverTile";
 import { useToast } from "../components/Toast";
@@ -201,8 +201,8 @@ export function Dashboard({
                   </div>
 
                   <p class="mt-2 truncate text-xs text-fg-muted">
-                    {server.core} {server.version} · {t("createServer.port").toLowerCase()} {server.port} ·
-                    Java {server.java_major} · {server.memory.max_mb} MiB
+                    {server.core} {server.version} · {t("createServer.port").toLowerCase()} {server.port}
+                    {server.core !== "horizon" && <> · Java {server.java_major} · {server.memory.max_mb} MiB</>}
                   </p>
                   {server.uptime_secs !== null && (
                     <p class="mt-1 truncate text-xs text-fg-muted/80">
@@ -340,7 +340,7 @@ function CreateServer({
         version: form.version,
         java_major: form.java_major,
         port: form.port,
-        memory: { min_mb: form.min_mb, max_mb: form.max_mb },
+        memory: { min_mb: form.core === "horizon" ? Math.min(form.min_mb, form.max_mb) : form.min_mb, max_mb: form.max_mb },
         eula_accepted: form.eula_accepted,
       });
       onCreated();
@@ -400,7 +400,7 @@ function CreateServer({
             <Select
               value={form.core}
               data-testid="server-core"
-              onChange={(e) => set({ core: (e.target as HTMLSelectElement).value })}
+              onInput={(e) => set({ core: (e.target as HTMLSelectElement).value })}
             >
               {providers.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -435,7 +435,7 @@ function CreateServer({
             </Select>
           </Field>
 
-          <Field label={t("createServer.javaVersion")} hint={t("createServer.javaHint")}>
+          {form.core !== "horizon" && <Field label={t("createServer.javaVersion")} hint={t("createServer.javaHint")}>
             <Select
               value={String(form.java_major)}
               data-testid="server-java"
@@ -447,17 +447,17 @@ function CreateServer({
                 </option>
               ))}
             </Select>
-          </Field>
+          </Field>}
 
           <div class="grid grid-cols-2 gap-3">
-            <Field label={t("createServer.minRam")}>
+            {form.core !== "horizon" && <Field label={t("createServer.minRam")}>
               <Input
                 type="number"
                 value={form.min_mb}
                 onInput={(e) => set({ min_mb: Number((e.target as HTMLInputElement).value) })}
               />
-            </Field>
-            <Field label={t("createServer.maxRam")}>
+            </Field>}
+            <Field label={t(form.core === "horizon" ? "createServer.nativeReservation" : "createServer.maxRam")}>
               <Input
                 type="number"
                 value={form.max_mb}
@@ -466,6 +466,8 @@ function CreateServer({
             </Field>
           </div>
         </div>
+
+        {form.core === "horizon" && <Banner kind="info">{t("createServer.horizonHint")}</Banner>}
 
         <Compatibility core={form.core} version={form.version} javaMajor={form.java_major} onAllowedChange={setCompatible} />
 

@@ -17,10 +17,11 @@ beforeEach(() => {
   api.installedMods.mockResolvedValue([
     { filename: "Example.jar", path: "plugins/Example.jar", size: 100 },
   ]);
+  api.installedMods.mockClear();
   api.searchMods.mockResolvedValue([]);
   api.searchMods.mockClear();
 });
-function mount() {
+function mount(core = "paper") {
   render(
     <I18nProvider>
       <ToastProvider>
@@ -30,7 +31,7 @@ function mount() {
               server={
                 {
                   id: "one",
-                  core: "paper",
+                  core,
                   version: "1.21.11",
                   status: "offline",
                 } as Server
@@ -43,6 +44,11 @@ function mount() {
   );
 }
 describe("add-on sections", () => {
+  it("explains Horizon's Java add-on limitation without requesting plugins", () => {
+    mount("horizon");
+    expect(screen.getByText(/Horizon cannot load Java plugins or mods/)).toBeInTheDocument();
+    expect(api.installedMods).not.toHaveBeenCalled();
+  });
   it("opens the installed inventory without fetching the marketplace", async () => {
     mount();
     expect(await screen.findByText("Example.jar")).toBeInTheDocument();

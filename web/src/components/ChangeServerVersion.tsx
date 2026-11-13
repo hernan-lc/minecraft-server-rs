@@ -80,11 +80,12 @@ export function ChangeServerVersion({ server, onClose, onSaved }: {
             {versions.map(v => <option key={v} value={v}>{v}</option>)}
           </Select>
         </Field>
-        <Field label={t("settings.javaVersion")}>
+        {core === "horizon" && <Banner kind="info">{t("createServer.horizonHint")}</Banner>}
+        {core !== "horizon" && <Field label={t("settings.javaVersion")}>
           <Select value={java} disabled={busy} onInput={e => setJava(Number(e.currentTarget.value))}>
             {[...new Set([8, 11, 17, 21, 25, java])].sort((a, b) => a - b).map(v => <option key={v} value={v}>Java {v}</option>)}
           </Select>
-        </Field>
+        </Field>}
         <Compatibility core={core} version={version} javaMajor={java} onAllowedChange={setAllowed} />
       </div>
     </Modal>

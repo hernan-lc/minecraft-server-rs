@@ -8,7 +8,9 @@
 //! handlers, WebSocket sessions and the supervisor task without coordination.
 
 use crate::config::{GuardianConfig, ServerConfig, MAX_ARGUMENT_BYTES};
-use crate::environment::{prepare_with_resolver, Provision, ServerEnvironment, ServerRuntime};
+use crate::environment::{
+    prepare_with_resolver_and_sandbox, Provision, ServerEnvironment, ServerRuntime,
+};
 use crate::error::{Error, Result};
 use crate::events::{ConsoleLine, ProgressState, ServerEvent, ServerStatus, Stream};
 use crate::fs::ScopedFs;
@@ -621,8 +623,15 @@ impl Guardian {
             });
         };
 
-        let env =
-            prepare_with_resolver(&config, &self.data_dir, mode, &self.java, progress).await?;
+        let env = prepare_with_resolver_and_sandbox(
+            &config,
+            &self.data_dir,
+            mode,
+            &self.java,
+            self.sandbox_policy,
+            progress,
+        )
+        .await?;
         *self.environment.write().await = Some(env.clone());
         Ok(env)
     }
@@ -788,7 +797,13 @@ impl Guardian {
         if config.core.eq_ignore_ascii_case("horizon") {
             // Native settings may have changed since the environment was
             // cached. Reapply the panel's port and EULA before every start.
-            crate::environment::prepare_horizon(&config, &self.data_dir, |_, _| {}).await?;
+            crate::environment::prepare_horizon(
+                &config,
+                &self.data_dir,
+                self.sandbox_policy,
+                |_, _| {},
+            )
+            .await?;
         }
         let (mut command, sandbox_mode, executable) = match &env.runtime {
             ServerRuntime::Java { java, jar, .. }

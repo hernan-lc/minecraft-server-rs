@@ -62,14 +62,28 @@ async fn view(
 ) -> ApiResult<ServerView> {
     let guardian = state.guardian(&record.id).await?;
     let live = guardian.snapshot().await;
-    let metrics = live.pid.and_then(|pid| state.metrics.of(pid));
+    let running_config = guardian.active_config().await;
+    // Horizon's PID is its supervisor; reporting that process alone as the
+    // server would omit the separate engine's CPU and memory.
+    let native = record.config.core.eq_ignore_ascii_case("horizon");
+    let native_running = running_config
+        .as_ref()
+        .map_or(native, |config| config.core.eq_ignore_ascii_case("horizon"));
+    let metrics = if native_running {
+        None
+    } else {
+        live.pid.and_then(|pid| state.metrics.of(pid))
+    };
 
     let disk_bytes = state.metrics.disk_usage(&record.config.directory).await;
-    let pending_restart = guardian
-        .active_config()
-        .await
-        .is_some_and(|running| differs_at_launch(&running, &record.config));
-    let installed = guardian.installation().await;
+    let pending_restart = running_config
+        .as_ref()
+        .is_some_and(|running| differs_at_launch(running, &record.config));
+    let installed = if native {
+        None
+    } else {
+        guardian.installation().await
+    };
     let needs_install = installed
         .as_ref()
         .map(|i| !i.satisfies(&record.config))
@@ -77,7 +91,11 @@ async fn view(
     Ok(ServerView {
         id: record.id.clone(),
         name: record.name.clone(),
-        core: record.config.core.clone(),
+        core: if native {
+            "horizon".into()
+        } else {
+            record.config.core.clone()
+        },
         version: record.config.version.clone(),
         port: record.config.port,
         java_major: record.config.java_major,
@@ -265,6 +283,11 @@ async fn create(
 ) -> ApiResult<Json<ServerView>> {
     let _server_lock = state.server_mutation_lock.lock().await;
     let name = validate_name(&body.name)?;
+    let core = if body.core.eq_ignore_ascii_case("horizon") {
+        "horizon".to_owned()
+    } else {
+        body.core
+    };
 
     let id = Uuid::new_v4().to_string();
     let directory = state.server_dir(&id);
@@ -273,7 +296,7 @@ async fn create(
         id: id.clone(),
         name,
         config: ServerConfig {
-            core: body.core,
+            core,
             version: body.version,
             build: body.build,
             java_major: body.java_major,
@@ -390,9 +413,20 @@ async fn update(
                 next.name = validate_name(&name)?;
             }
             if let Some(core) = body.core {
+                let core = if core.eq_ignore_ascii_case("horizon") {
+                    "horizon".to_owned()
+                } else {
+                    core
+                };
+                if next.config.core != core {
+                    next.config.build = None;
+                }
                 next.config.core = core;
             }
             if let Some(version) = body.version {
+                if next.config.version != version {
+                    next.config.build = None;
+                }
                 next.config.version = version;
             }
             if let Some(build) = body.build {
@@ -840,6 +874,40 @@ mod tests {
     #[tokio::test]
     async fn api_kill_can_cancel_preparation_behind_a_resource_lock() {
         power_cancels_preparation(PowerAction::Kill).await;
+    }
+
+    #[tokio::test]
+    async fn changing_to_horizon_clears_the_previous_java_build_pin() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(data_dir.path(), PlayitMode::External)
+            .await
+            .unwrap();
+        let mut record = record("server-1", 25565, 1024);
+        record.config.directory = state.server_dir(&record.id);
+        record.config.build = Some("old-paper-build".into());
+        state
+            .store
+            .update(|data| data.servers.push(record.clone()))
+            .await
+            .unwrap();
+        state.insert_guardian(&record).await;
+        let body: UpdateServer =
+            serde_json::from_value(serde_json::json!({ "core": "HORIZON", "version": "26.3" }))
+                .unwrap();
+        let Json(view) = update(
+            State(Arc::clone(&state)),
+            operator(),
+            Path(record.id.clone()),
+            Json(body),
+        )
+        .await
+        .unwrap();
+        assert_eq!(view.core, "horizon");
+        let updated = state.store.server(&record.id).await.unwrap();
+        assert_eq!(updated.config.core, "horizon");
+        assert_eq!(updated.config.version, "26.3");
+        assert_eq!(updated.config.build, None);
+        state.playit.shutdown().await.unwrap();
     }
 
     fn record(id: &str, port: u16, max_mb: u32) -> ServerRecord {

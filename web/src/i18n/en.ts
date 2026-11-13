@@ -340,6 +340,11 @@ export const en = {
     version: "Version",
     javaVersion: "Java version",
     javaHint: "Downloaded automatically if missing.",
+    horizonHint: "Horizon runs natively. An administrator must install its binaries and prepared game files before starting. The memory reservation is used for panel capacity planning; it does not limit the native process.",
+    nativeReservation: "Memory reservation (MiB)",
+    nativeSetup: "Install Horizon binaries in the panel data directory under horizon/, and put prepared game files under servers/{id}/resources/. The panel initializes server.toml when preparing or starting.",
+    nativePrepare: "Prepare Horizon",
+    nativeMetricsUnavailable: "Native engine metrics are not available yet.",
     java: "Java {version}",
     minRam: "Min RAM (MiB)",
     maxRam: "Max RAM (MiB)",
@@ -437,6 +442,7 @@ export const en = {
     installedOk: "Installed {name} {version} to {path}. Restart the server to load it.",
     unsupported:
       "A vanilla server cannot load plugins or mods. Switch this server to Paper (for plugins) or Fabric (for mods) under Settings — the world carries over.",
+    horizonUnsupported: "Horizon cannot load Java plugins or mods. Native Horizon add-ons are not supported by this panel yet.",
     deleteTitle: "Delete {name}?",
   },
 

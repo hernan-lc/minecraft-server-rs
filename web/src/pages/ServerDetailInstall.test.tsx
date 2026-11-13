@@ -98,6 +98,16 @@ describe("ServerDetail installed build", () => {
     expect(screen.getAllByRole("button", { name: "Install" })).toHaveLength(1);
   });
 
+  it("offers Horizon preparation and explains where game files belong", async () => {
+    apiMock.prepare.mockResolvedValue({ ok: true });
+    apiMock.prepare.mockClear();
+    await openSettings(makeServer({ core: "horizon", version: "26.3" }));
+    expect(screen.getByText(/servers\/server-1\/resources/)).toBeInTheDocument();
+    expect(screen.queryByText("Java version")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Prepare Horizon" }));
+    await waitFor(() => expect(apiMock.prepare).toHaveBeenCalledWith("server-1"));
+  });
+
   it("renders no Install button once the install matches the config", async () => {
     await openSettings(
       makeServer({

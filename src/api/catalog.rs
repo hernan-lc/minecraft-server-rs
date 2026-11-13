@@ -31,22 +31,28 @@ fn client() -> ApiResult<MinecraftClient> {
 
 async fn providers(_: Identity) -> ApiResult<Json<Vec<ProviderView>>> {
     let ids = client()?.providers();
-    Ok(Json(
-        ids.into_iter()
-            // Installer-backed providers (Forge) are hidden until an explicit
-            // installer-provisioning flow exists: advertising them would let
-            // provisioning publish an installer jar as `server.jar`, which can
-            // never boot.
-            .filter(|id| is_advertised_provider(&id.to_string()))
-            .map(|id| {
-                let id = id.to_string();
-                // Velocity and Waterfall are proxies: they have no world and
-                // the UI should not offer them a "start the world" flow.
-                let server = !matches!(id.as_str(), "velocity" | "waterfall");
-                ProviderView { id, server }
-            })
-            .collect(),
-    ))
+    let mut providers: Vec<_> = ids
+        .into_iter()
+        // Installer-backed providers (Forge) are hidden until an explicit
+        // installer-provisioning flow exists: advertising them would let
+        // provisioning publish an installer jar as `server.jar`, which can
+        // never boot.
+        .filter(|id| is_advertised_provider(&id.to_string()))
+        .map(|id| {
+            let id = id.to_string();
+            // Velocity and Waterfall are proxies: they have no world and
+            // the UI should not offer them a "start the world" flow.
+            let server = !matches!(id.as_str(), "velocity" | "waterfall");
+            ProviderView { id, server }
+        })
+        .collect();
+    if !providers.iter().any(|provider| provider.id == "horizon") {
+        providers.push(ProviderView {
+            id: "horizon".into(),
+            server: true,
+        });
+    }
+    Ok(Json(providers))
 }
 
 /// Whether a provider id is offered in the create-server catalog.
@@ -60,6 +66,9 @@ fn is_advertised_provider(id: &str) -> bool {
 }
 
 async fn versions(_: Identity, Path(provider): Path<String>) -> ApiResult<Json<Vec<String>>> {
+    if provider == "horizon" {
+        return Ok(Json(vec![guardian::config::HORIZON_VERSION.into()]));
+    }
     let versions = client()?.versions(&provider).await.map_err(|error| {
         tracing::warn!(provider = %provider, error = ?error, "failed to load provider versions");
         ApiError::BadRequest("unable to load provider versions".into())
@@ -82,6 +91,12 @@ async fn builds(
     _: Identity,
     Path((provider, version)): Path<(String, String)>,
 ) -> ApiResult<Json<Vec<BuildView>>> {
+    if provider == "horizon" {
+        if version != guardian::config::HORIZON_VERSION {
+            return Err(ApiError::BadRequest("unsupported Horizon version".into()));
+        }
+        return Ok(Json(Vec::new()));
+    }
     let builds = client()?
         .builds(&provider, &version)
         .await
@@ -186,6 +201,17 @@ async fn compatibility(
     _: Identity,
     Path((provider, version)): Path<(String, String)>,
 ) -> ApiResult<Json<CompatibilityView>> {
+    if provider == "horizon" {
+        return Ok(Json(CompatibilityView {
+            availability: if version == guardian::config::HORIZON_VERSION {
+                "available"
+            } else {
+                "unavailable"
+            },
+            support: "unknown",
+            java_minimum: None,
+        }));
+    }
     let client = client()?;
     // Validate the provider before doing any upstream I/O.
     client
@@ -300,6 +326,37 @@ mod tests {
     use super::*;
     use java_path::{Architecture, DiscoverySource, JavaKind, JavaVersion, Platform};
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn horizon_catalog_is_local_and_does_not_require_java() {
+        let identity = Identity {
+            username: "test".into(),
+            admin: true,
+            servers: vec![],
+        };
+        let Json(providers) = providers(identity.clone()).await.unwrap();
+        assert!(providers
+            .iter()
+            .any(|provider| provider.id == "horizon" && provider.server));
+        let Json(versions) = versions(identity.clone(), Path("horizon".into()))
+            .await
+            .unwrap();
+        assert_eq!(versions, ["26.3"]);
+        let Json(builds) = builds(identity.clone(), Path(("horizon".into(), "26.3".into())))
+            .await
+            .unwrap();
+        assert!(builds.is_empty());
+        let Json(available) =
+            compatibility(identity.clone(), Path(("horizon".into(), "26.3".into())))
+                .await
+                .unwrap();
+        assert_eq!(available.availability, "available");
+        assert_eq!(available.java_minimum, None);
+        let Json(other) = compatibility(identity, Path(("horizon".into(), "1.21".into())))
+            .await
+            .unwrap();
+        assert_eq!(other.availability, "unavailable");
+    }
 
     #[test]
     fn maintenance_status_is_not_download_availability() {

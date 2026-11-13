@@ -343,6 +343,11 @@ export const es: Dictionary = {
     version: "Versión",
     javaVersion: "Versión de Java",
     javaHint: "Se descarga automáticamente si no está instalada.",
+    horizonHint: "Horizon se ejecuta de forma nativa. Un administrador debe instalar sus ejecutables y archivos de juego preparados antes de iniciarlo. La reserva de memoria sirve para planificar la capacidad del panel; no limita el proceso nativo.",
+    nativeReservation: "Reserva de memoria (MiB)",
+    nativeSetup: "Instala los ejecutables de Horizon en horizon/ dentro del directorio de datos del panel y los archivos de juego preparados en servers/{id}/resources/. El panel inicializa server.toml al preparar o iniciar.",
+    nativePrepare: "Preparar Horizon",
+    nativeMetricsUnavailable: "Las métricas del motor nativo aún no están disponibles.",
     java: "Java {version}",
     minRam: "RAM mínima (MiB)",
     maxRam: "RAM máxima (MiB)",
@@ -441,6 +446,7 @@ export const es: Dictionary = {
     installedOk: "Se instaló {name} {version} en {path}. Reinicia el servidor para cargarlo.",
     unsupported:
       "Un servidor vanilla no puede cargar plugins ni mods. Cambia este servidor a Paper (para plugins) o Fabric (para mods) en Ajustes — el mundo se conserva.",
+    horizonUnsupported: "Horizon no puede cargar plugins ni mods de Java. Este panel aún no admite complementos nativos de Horizon.",
     deleteTitle: "¿Eliminar {name}?",
   },
 

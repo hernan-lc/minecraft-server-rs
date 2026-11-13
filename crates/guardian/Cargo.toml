@@ -30,8 +30,8 @@ flate2 = "1"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 uuid = { version = "1", features = ["v4"] }
 toml_edit = "0.25"
+tempfile = "3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
 futures-util = "0.3"
-tempfile = "3"

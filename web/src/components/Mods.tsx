@@ -9,7 +9,7 @@ import * as Icon from "./icons";
 import type { Installed, Project, Server } from "../types";
 
 /** Flavours that cannot load anything, so the tab explains itself instead. */
-const UNSUPPORTED = ["vanilla"];
+const UNSUPPORTED = ["vanilla", "horizon"];
 
 /** Flavours whose add-ons are mods rather than plugins. */
 const MODDED = ["fabric", "forge", "mohist", "arclight"];
@@ -124,7 +124,7 @@ export function Mods({ server }: { server: Server }) {
   if (!supported) {
     return (
       <div class="min-h-0 flex-1 overflow-y-auto">
-        <Banner kind="info">{t("plugins.unsupported")}</Banner>
+        <Banner kind="info">{t(server.core === "horizon" ? "plugins.horizonUnsupported" : "plugins.unsupported")}</Banner>
       </div>
     );
   }

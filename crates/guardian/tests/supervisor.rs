@@ -215,7 +215,7 @@ async fn real_horizon_starts_and_stops() {
         directory.join("resources"),
     )
     .unwrap();
-    std::fs::write(directory.join("server.toml"), "[server]\nbind = '127.0.0.1'\nonline_mode = false\nwhitelist = false\nview_distance = 2\nsimulation_distance = 2\n[engine]\nlow_memory = true\n[backups]\nevery = '0'\n").unwrap();
+    std::fs::write(directory.join("server.properties"), "server-ip=127.0.0.1\nonline-mode=false\nwhite-list=false\nview-distance=2\nsimulation-distance=2\nlevel-name=smoke-world\nmotd=Imported settings\n").unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
@@ -259,6 +259,10 @@ async fn real_horizon_starts_and_stops() {
     let lines = guardian.console().await;
     assert!(ready, "Horizon did not become ready: {lines:?}");
     assert!(listening, "Horizon did not listen on the configured port");
+    let text = std::fs::read_to_string(directory.join("server.toml")).unwrap();
+    let config = text.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(config["world"]["name"].as_str(), Some("smoke-world"));
+    assert_eq!(config["server"]["motd"].as_str(), Some("Imported settings"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
