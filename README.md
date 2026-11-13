@@ -4,6 +4,10 @@
 
 A Minecraft server control panel that is one binary, one config file, and no dependencies at runtime.
 
+This branch is preparing a migration to the native Rust Horizon server. The
+panel still provisions and launches Java servers today; the Horizon submodule
+is source for the migration and is not yet integrated into the panel.
+
 It does what Pterodactyl does for Minecraft specifically — install Java, download the server, run it, stream the console, edit the files, restart it when it crashes — without PHP, Laravel, MySQL, Redis, Docker or a separate node daemon.
 
 ```
@@ -28,7 +32,7 @@ It does what Pterodactyl does for Minecraft specifically — install Java, downl
 ## Quick start
 
 ```sh
-git clone --recurse-submodules https://github.com/nglmercer/minecraft-server-rs
+git clone --recurse-submodules --branch migrate/rust-horizon https://github.com/hernan-lc/minecraft-server-rs.git
 cd minecraft-server-rs
 ./build.sh
 ./target/release/mcpanel --data-dir ./data --bind 127.0.0.1:8080
@@ -85,6 +89,7 @@ Browse all guides in [`docs/`](docs/README.md). Security disclosure policy is in
 | `web` | Vite + Preact + TypeScript + Tailwind v4 frontend. |
 | `vendor/java-path-rs` | Submodule: Java discovery and provisioning. |
 | `vendor/minecraft-core-rs` | Submodule: server artifact resolution and download. |
+| `vendor/horizon` | Pinned Horizon fork, including the Termux dedicated-server changes. |
 
 Runtime lives under `--data-dir` (`panel.json`, `playit/secret.toml`, `jdks/`, `servers/<uuid>/`, `backups/<uuid>/`). Details in [Getting Started](docs/getting-started.md) and [Architecture](docs/architecture.md).
 
