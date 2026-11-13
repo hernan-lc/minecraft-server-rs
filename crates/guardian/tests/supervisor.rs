@@ -349,6 +349,98 @@ async fn real_horizon_starts_and_stops() {
     let config = text.parse::<toml_edit::DocumentMut>().unwrap();
     assert_eq!(config["world"]["name"].as_str(), Some("smoke-world"));
     assert_eq!(config["server"]["motd"].as_str(), Some("Imported settings"));
+    if std::env::var_os("HORIZON_SMOKE_PAPER_COPY").is_some() {
+        assert!(
+            std::env::var_os("HORIZON_SMOKE_SHARED").is_some(),
+            "the migration test requires shared resources"
+        );
+        let world = directory.join("smoke-world");
+        let level_before = std::fs::read(world.join("level.dat")).unwrap();
+        let legacy = directory.join("smoke-world_nether/DIM-1");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        if world.join("DIM-1").exists() {
+            std::fs::rename(world.join("DIM-1"), &legacy).unwrap();
+        }
+        std::fs::create_dir_all(legacy.join("region")).unwrap();
+        // An idle server may never generate chunks. An Anvil region with an
+        // empty location and timestamp table is a valid 8192-byte region.
+        let region = legacy.join("region/r.0.0.mca");
+        if !region.exists() {
+            std::fs::write(&region, vec![0u8; 8192]).unwrap();
+        }
+        let original = std::fs::read(&region).unwrap();
+        let converted = root.path().join("servers/converted");
+        let script =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/migrate-paper-world.py");
+        let output = tokio::process::Command::new("python3")
+            .arg(script)
+            .arg("--source")
+            .arg(&directory)
+            .arg("--destination")
+            .arg(&converted)
+            .args(["--world", "smoke-world"])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "migration failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let copied_region = converted
+            .join("smoke-world/DIM-1/region")
+            .join(region.file_name().unwrap());
+        assert_eq!(std::fs::read(copied_region).unwrap(), original);
+        let mut migrated_config = ServerConfig::paper(&converted, "26.3");
+        migrated_config.core = "horizon".into();
+        migrated_config.port = port;
+        migrated_config.eula_accepted = true;
+        let migrated = Guardian::new_with_sandbox_policy(
+            migrated_config,
+            GuardianConfig {
+                stop_timeout_secs: 120,
+                ..Default::default()
+            },
+            root.path(),
+            SandboxPolicy::new(true),
+        );
+        let mut events = migrated.subscribe();
+        migrated.start().await.unwrap();
+        let migrated_ready = tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match events.recv().await.unwrap() {
+                    ServerEvent::Status {
+                        status: ServerStatus::Online,
+                    } => return true,
+                    ServerEvent::Status {
+                        status: ServerStatus::Offline | ServerStatus::Crashed,
+                    } => return false,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        if migrated.status().await.is_running()
+            || migrated.status().await == ServerStatus::Preparing
+        {
+            migrated.stop().await.unwrap();
+        }
+        assert!(
+            migrated_ready,
+            "converted world did not start: {:?}",
+            migrated.console().await
+        );
+        assert_eq!(
+            std::fs::read(region).unwrap(),
+            original,
+            "source world was modified"
+        );
+        assert_eq!(
+            std::fs::read(world.join("level.dat")).unwrap(),
+            level_before
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
