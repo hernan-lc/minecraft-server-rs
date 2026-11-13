@@ -7,4 +7,4 @@
 [submodule "vendor/horizon"]
 	path = vendor/horizon
 	url = https://github.com/hernan-lc/horizon.git
-	branch = fix/termux-dedicated-server
+	branch = migrate/panel-force-stop

@@ -196,6 +196,7 @@ export interface Server {
   pid: number | null;
   uptime_secs: number | null;
   crashes: number;
+  force_kill_available?: boolean;
   /** Current provisioning activity, present while the server is preparing. */
   progress: ProgressState | null;
   metrics: ProcessMetrics | null;
@@ -221,6 +222,7 @@ export interface ServerSnapshot {
   pid: number | null;
   uptime_secs: number | null;
   crashes: number;
+  force_kill_available?: boolean;
   progress: ProgressState | null;
 }
 

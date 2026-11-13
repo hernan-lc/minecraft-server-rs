@@ -135,6 +135,8 @@ struct RunState {
     /// Quota and port accounting has to reason about this value, not the
     /// pending one, for as long as the process exists.
     active: Option<ServerConfig>,
+    /// The current Horizon supervisor advertised the force-stop protocol.
+    horizon_force_stop: bool,
     /// Set by `stop`/`kill` so the supervisor knows the exit was requested.
     intentional: bool,
     /// Handle to the in-flight provisioning task, so it can be abandoned.
@@ -173,6 +175,8 @@ pub struct Snapshot {
     pub crashes: u32,
     /// Current provisioning activity, when the server is preparing.
     pub progress: Option<ProgressState>,
+    /// Whether the running process supports a safe force stop.
+    pub force_kill_available: bool,
 }
 
 /// Supervises exactly one Minecraft server.
@@ -344,6 +348,12 @@ impl Guardian {
             uptime_secs: state.started_at.map(|t| t.elapsed().as_secs()),
             crashes: self.crashes.load(Ordering::Relaxed),
             progress: state.progress.clone(),
+            force_kill_available: state.child.is_some()
+                && (!state
+                    .active
+                    .as_ref()
+                    .is_some_and(|c| c.core.eq_ignore_ascii_case("horizon"))
+                    || state.horizon_force_stop),
         }
     }
 
@@ -942,6 +952,7 @@ impl Guardian {
                 return Err(Error::StartCancelled);
             }
             state.generation += 1;
+            state.horizon_force_stop = false;
             state.pid = Some(pid);
             state.stdin = stdin;
             state.started_at = Some(Instant::now());
@@ -1000,6 +1011,17 @@ impl Guardian {
                 let Some(guardian) = this.upgrade() else {
                     return;
                 };
+
+                if stream == Stream::Stdout
+                    && core.eq_ignore_ascii_case("horizon")
+                    && line == "[mcpanel] force-stop-v1"
+                {
+                    let mut state = guardian.state.lock().await;
+                    if state.generation == generation && state.child.is_some() {
+                        state.horizon_force_stop = true;
+                    }
+                    continue;
+                }
 
                 if stream == Stream::Stdout && line_means_online(&core, &line) {
                     // A drained pipe can outlive its process, so the promotion
@@ -1372,17 +1394,36 @@ impl Guardian {
                     .as_ref()
                     .is_some_and(|config| config.core.eq_ignore_ascii_case("horizon"))
                 {
-                    return Err(Error::InvalidConfiguration(
-                        "force-killing Horizon is unavailable because its engine is a separate process; stop it through its console or host tools".into(),
-                    ));
+                    if !state.horizon_force_stop {
+                        return Err(Error::InvalidConfiguration(
+                            "this Horizon supervisor does not support safe force-stop; stop it through its console or host tools".into(),
+                        ));
+                    }
+                    let input = state.stdin.as_mut().ok_or_else(|| {
+                        Error::InvalidConfiguration(
+                            "Horizon supervisor stdin is unavailable".into(),
+                        )
+                    })?;
+                    input
+                        .write_all(b"mcpanel:force-stop\n")
+                        .await
+                        .map_err(|e| {
+                            Error::InvalidConfiguration(format!(
+                                "could not send Horizon force-stop: {e}"
+                            ))
+                        })?;
+                    input.flush().await.map_err(|e| {
+                        Error::InvalidConfiguration(format!(
+                            "could not send Horizon force-stop: {e}"
+                        ))
+                    })?;
+                } else if let Some(child) = state.child.as_mut() {
+                    let _ = child.start_kill();
                 }
                 state.intentional = true;
                 let should_emit = current != ServerStatus::Stopping;
                 clear_progress(&mut state);
                 state.status = Some(ServerStatus::Stopping);
-                if let Some(child) = state.child.as_mut() {
-                    let _ = child.start_kill();
-                }
                 drop(state);
                 if should_emit {
                     self.emit(ServerEvent::Status {

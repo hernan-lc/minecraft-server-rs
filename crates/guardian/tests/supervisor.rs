@@ -101,6 +101,45 @@ async fn a_server_that_logs_done_becomes_online_and_stops_gracefully() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
+async fn horizon_force_stop_uses_advertised_supervisor_protocol() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let install = root.path().join("horizon");
+    let server = root.path().join("servers/world");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::create_dir_all(&server).unwrap();
+    std::fs::write(server.join("server.toml"), "[server]\nport = 25565\n").unwrap();
+    let shell = if cfg!(target_os = "android") {
+        "/data/data/com.termux/files/usr/bin/sh"
+    } else {
+        "/bin/sh"
+    };
+    let script = format!("#!{shell}\nprintf '%s\\n' '[mcpanel] force-stop-v1' '[Server thread/INFO]: Done (0.1s)! For help, type help'\nwhile IFS= read -r line; do\n  [ \"$line\" = mcpanel:force-stop ] && exit 0\ndone\n");
+    for name in ["horizon-server", "horizon-engine"] {
+        let path = install.join(name);
+        std::fs::write(&path, script.as_bytes()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut config = ServerConfig::paper(&server, "26.3");
+    config.core = "horizon".into();
+    config.eula_accepted = true;
+    let guardian = Guardian::new_with_sandbox_policy(
+        config,
+        GuardianConfig::default(),
+        root.path(),
+        SandboxPolicy::new(true),
+    );
+    let mut events = guardian.subscribe();
+    guardian.start().await.unwrap();
+    await_status(&mut events, ServerStatus::Online).await;
+    assert!(guardian.snapshot().await.force_kill_available);
+    guardian.kill().await.unwrap();
+    await_status(&mut events, ServerStatus::Offline).await;
+    assert!(!guardian.snapshot().await.force_kill_available);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
 async fn horizon_is_prepared_and_supervised_without_java() {
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();

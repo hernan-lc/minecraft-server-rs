@@ -56,6 +56,7 @@ Horizon is started as `horizon-server run` and receives console commands and
 Android and platforms without a supported sandbox require the existing explicit
 `--allow-unsandboxed-servers` setting. Automated installation through the panel,
 installation status, enforced resource limits, and cross-platform
-end-to-end validation remain unfinished. Guardian currently refuses to force-kill
-a Horizon supervisor because the engine is a separate process. If a graceful stop
-times out, use Horizon or host tools to stop both processes before restarting.
+end-to-end validation remain unfinished. The pinned Horizon fork advertises a
+force-stop control protocol: the supervisor kills and reaps its engine before
+exiting. Older binaries without this protocol cannot be force-stopped by the
+panel; use Horizon or host tools if their graceful stop times out.

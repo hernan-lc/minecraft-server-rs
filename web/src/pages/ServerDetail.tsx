@@ -286,7 +286,7 @@ export function ServerDetail({
                       label: t("dashboard.kill"),
                       danger: true,
                       onSelect: () => power("kill"),
-                      disabled: !actions.kill || server.core === "horizon",
+                      disabled: !actions.kill || (server.core === "horizon" && !server.force_kill_available),
                     },
                   ],
                   server.name,
