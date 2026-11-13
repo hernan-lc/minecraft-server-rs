@@ -49,6 +49,12 @@ class InstallHorizonTests(unittest.TestCase):
     def assert_no_staging(self):
         self.assertEqual(list(self.data.glob(".horizon-install.*")), [])
 
+    def import_resources(self, resources):
+        return subprocess.run(
+            ["bash", str(SCRIPT), "--data-dir", str(self.data), "--import-resources", str(resources)],
+            text=True, capture_output=True, check=False,
+        )
+
     def test_installs_both_programs_and_validated_shared_resources(self):
         result = self.run_installer("--resources", self.resources)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -100,6 +106,61 @@ class InstallHorizonTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((existing / "keep").read_text(), "existing")
         self.assertEqual([path.name for path in existing.iterdir()], ["keep"])
+        self.assert_no_staging()
+
+    def test_adds_shared_resources_to_existing_installation_without_changing_programs(self):
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        horizon = self.data / "horizon"
+        server = (horizon / "horizon-server").read_bytes()
+        engine = (horizon / "horizon-engine").read_bytes()
+        result = self.import_resources(self.resources)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        shared = horizon / ".local/horizon-client/26.3"
+        self.assertEqual((shared / "marker").read_text(), "personal game data")
+        self.assertTrue((shared / "horizon-resources.json").is_file())
+        self.assertEqual((horizon / "horizon-server").read_bytes(), server)
+        self.assertEqual((horizon / "horizon-engine").read_bytes(), engine)
+        self.assert_no_staging()
+        (self.resources / "marker").write_text("different")
+        self.assertNotEqual(self.import_resources(self.resources).returncode, 0)
+        self.assertEqual((shared / "marker").read_text(), "personal game data")
+        self.assert_no_staging()
+
+    def test_import_rejects_invalid_resources_and_symlinked_parents(self):
+        self.assertEqual(self.run_installer().returncode, 0)
+        (self.resources / "horizon-resources.json").unlink()
+        self.assertNotEqual(self.import_resources(self.resources).returncode, 0)
+        self.assertFalse((self.data / "horizon/.local").exists())
+        (self.resources / "horizon-resources.json").write_text('{}')
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.data / "horizon/.local").symlink_to(outside, target_is_directory=True)
+        self.assertNotEqual(self.import_resources(self.resources).returncode, 0)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assert_no_staging()
+
+    def test_interrupted_import_never_publishes_the_manifest(self):
+        self.assertEqual(self.run_installer().returncode, 0)
+        tools = self.root / "failing tools"
+        tools.mkdir()
+        cp = tools / "cp"
+        cp.write_text(
+            f"#!{shutil.which('sh')}\n"
+            'case "$*" in *"/.local/horizon-client/26.3/"*) exit 1;; esac\n'
+            f'exec "{shutil.which("cp")}" "$@"\n'
+        )
+        cp.chmod(0o700)
+        environment = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"])
+        result = subprocess.run(
+            ["bash", str(SCRIPT), "--data-dir", str(self.data), "--import-resources", str(self.resources)],
+            env=environment, text=True, capture_output=True, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("resource import is incomplete", result.stderr)
+        shared = self.data / "horizon/.local/horizon-client/26.3"
+        self.assertTrue(shared.is_dir())
+        self.assertFalse((shared / "horizon-resources.json").exists())
         self.assert_no_staging()
 
     def test_builds_the_pinned_submodule_with_headless_engine_options(self):
@@ -160,7 +221,9 @@ class InstallHorizonTests(unittest.TestCase):
     def test_real_binaries_import_the_prepared_game_files(self):
         self.build = Path(os.environ["HORIZON_SMOKE_BUILD"])
         source = Path(os.environ["HORIZON_SMOKE_RESOURCES"])
-        result = self.run_installer("--resources", source)
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.import_resources(source)
         self.assertEqual(result.returncode, 0, result.stderr)
         installed = self.data / "horizon/.local/horizon-client/26.3"
         self.assertTrue((installed / "registries.json").is_file())

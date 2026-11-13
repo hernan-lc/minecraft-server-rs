@@ -27,6 +27,17 @@ every writable server directory. The panel does not download these executables.
 Server settings report whether both programs pass filesystem checks; this does
 not validate their compatibility or the prepared game files.
 
+If Horizon is already installed without shared game files, add them without
+replacing either program:
+
+```sh
+./scripts/install-horizon.sh --data-dir ./data --import-resources /path/to/prepared/26.3
+```
+
+Horizon validates the supplied files before they are copied. Existing shared
+files are not replaced; if an interrupted copy leaves an incomplete directory,
+inspect it before retrying. Restart servers to use newly added shared files.
+
 Prepare Horizon's game files from your own Minecraft installation as described
 in `vendor/horizon/docs/hosting.md`. Supply the prepared directory to the
 installer, or place a copy in an individual server's `resources/` directory.
