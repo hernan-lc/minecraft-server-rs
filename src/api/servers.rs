@@ -63,14 +63,27 @@ async fn view(
     let guardian = state.guardian(&record.id).await?;
     let live = guardian.snapshot().await;
     let running_config = guardian.active_config().await;
-    // Horizon's PID is its supervisor; reporting that process alone as the
-    // server would omit the separate engine's CPU and memory.
+    // Horizon's PID is its supervisor; sample its engine and descendants too.
     let native = record.config.core.eq_ignore_ascii_case("horizon");
     let native_running = running_config
         .as_ref()
         .map_or(native, |config| config.core.eq_ignore_ascii_case("horizon"));
     let metrics = if native_running {
-        None
+        if let Some(pid) = live.pid {
+            let metrics = Arc::clone(&state.metrics);
+            let result = tokio::task::spawn_blocking(move || metrics.of_horizon_tree(pid))
+                .await
+                .ok()
+                .flatten();
+            // The child may have exited while the process scan was running.
+            if guardian.snapshot().await.pid == Some(pid) {
+                result
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     } else {
         live.pid.and_then(|pid| state.metrics.of(pid))
     };

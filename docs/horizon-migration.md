@@ -43,11 +43,19 @@ is disabled, and Horizon's internal crash restart is disabled so Guardian owns
 restart policy. Other Horizon settings are retained. Existing Java heap and JVM
 arguments do not limit or configure Horizon's native memory usage.
 
+When the operating system exposes the relevant processes, the panel reports
+CPU and the summed resident memory of the supervisor, engine and descendants.
+Shared pages may be counted more than once. Metrics are unavailable when the
+engine cannot be identified; CPU can also be unavailable separately.
+On Android, when host CPU counters are restricted, CPU is estimated from the
+visible processes' tick deltas over elapsed time. A new or changed process tree
+needs another sample before its CPU usage can be shown.
+
 Horizon is started as `horizon-server run` and receives console commands and
 `stop` over stdin. Linux and macOS use their platform sandbox when available;
 Android and platforms without a supported sandbox require the existing explicit
 `--allow-unsandboxed-servers` setting. Automated installation through the panel,
-installation status, enforced resource limits, live engine metrics, and cross-platform
+installation status, enforced resource limits, and cross-platform
 end-to-end validation remain unfinished. Guardian currently refuses to force-kill
 a Horizon supervisor because the engine is a separate process. If a graceful stop
 times out, use Horizon or host tools to stop both processes before restarting.

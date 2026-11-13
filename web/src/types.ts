@@ -231,7 +231,7 @@ export interface ProcessMetrics {
   /** Process CPU normalized against the panel host's logical CPU capacity. */
   cpu_host_percent: number | null;
   logical_cpu_count: number;
-  /** Resident memory (RSS), in MiB. */
+  /** RSS in MiB; Horizon sums process RSS and may count shared pages twice. */
   memory_mb: number;
 }
 

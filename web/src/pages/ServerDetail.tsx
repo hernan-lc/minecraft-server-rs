@@ -157,7 +157,7 @@ export function ServerDetail({
   const hasCpuMetric = cpuHostPercent !== null && cpuCores !== null && logicalCpuCount !== null;
   const memoryMb = server.metrics?.memory_mb;
   const memoryFraction =
-    typeof memoryMb === "number" && server.memory.max_mb > 0
+    server.core !== "horizon" && typeof memoryMb === "number" && server.memory.max_mb > 0
       ? Math.max(0, Math.min(1, memoryMb / server.memory.max_mb))
       : undefined;
 
@@ -371,7 +371,7 @@ export function ServerDetail({
             detail={
               memoryMb === undefined
                 ? t(server.core === "horizon" ? "createServer.nativeMetricsUnavailable" : "server.notRunning")
-                : t("server.heapMax", { memory: server.memory.max_mb })
+                : server.core === "horizon" ? t("createServer.nativeMemoryDetail") : t("server.heapMax", { memory: server.memory.max_mb })
             }
           />
           <StatCard

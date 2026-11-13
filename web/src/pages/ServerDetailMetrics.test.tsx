@@ -73,6 +73,20 @@ function renderDetail(server: Server) {
 }
 
 describe("server process metric semantics", () => {
+  it("describes native process-tree RSS without claiming a JVM heap limit", async () => {
+    const server = makeServer({
+      cpu_percent: 150, cpu_cores: 1.5, cpu_host_percent: 18.75,
+      logical_cpu_count: 8, memory_mb: 750,
+    });
+    server.core = "horizon";
+    server.status = "online";
+    renderDetail(server);
+    const memory = (await screen.findByText("Process memory (RSS)")).closest("section");
+    expect(memory).toHaveTextContent("750 MiB");
+    expect(memory).toHaveTextContent("Summed process RSS");
+    expect(memory).not.toHaveTextContent("Heap max");
+  });
+
   it("renders unknown process metrics instead of fake zeroes", async () => {
     renderDetail(makeServer(null));
 

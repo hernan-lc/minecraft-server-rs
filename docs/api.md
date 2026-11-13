@@ -68,6 +68,11 @@ Everything is under `/api`. Browser sessions use an `HttpOnly` session cookie an
 
 Deleting a server removes it from the panel and leaves its files on disk. That is deliberate: a world should not be destroyable by a misclick in a browser.
 
+Server views include `metrics` when a process can be measured. Horizon metrics
+sum the supervisor, engine, and visible descendants; summed RSS can count shared
+pages more than once. `metrics` is null if the engine cannot be identified, and
+its CPU fields can be null when a baseline or CPU counters are unavailable.
+
 ## Playit
 
 See [Playit](playit.md) for the embedded vs external mode distinction. Playit endpoints above are admin-only.

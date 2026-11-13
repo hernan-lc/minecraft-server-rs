@@ -1,10 +1,10 @@
-//! Per-process resource usage.
+//! Per-process and native server process-tree resource usage.
 //!
 //! Host-level numbers say nothing useful when several servers share a box, so
-//! the panel reports each JVM's own CPU and memory.
+//! the panel reports each JVM or Horizon process tree's CPU and memory.
 
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -16,6 +16,8 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, MINIMUM_CPU_UP
 /// seconds; without this the panel would spend more effort measuring the server
 /// than running it.
 const DISK_TTL: Duration = Duration::from_secs(60);
+/// Share one process scan across simultaneous server and dashboard requests.
+const TREE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// What the machine as a whole is doing.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -28,19 +30,19 @@ pub struct HostMetrics {
     pub memory_total_mb: u64,
 }
 
-/// What one JVM is currently costing.
+/// What a server process or native process tree is currently costing.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct ProcessMetrics {
     /// Existing sysinfo value: 100 means one fully occupied logical CPU, so a
     /// multi-threaded process can legitimately exceed 100.
-    pub cpu_percent: f32,
+    pub cpu_percent: Option<f32>,
     /// Approximate number of logical CPUs consumed.
-    pub cpu_cores: f32,
+    pub cpu_cores: Option<f32>,
     /// Process CPU normalized against the whole panel host, in 0..=100.
-    pub cpu_host_percent: f32,
+    pub cpu_host_percent: Option<f32>,
     /// Logical CPUs available to the panel host.
     pub logical_cpu_count: usize,
-    /// Resident memory (RSS) in mebibytes.
+    /// Resident memory (RSS) in mebibytes; tree sums may count shared pages twice.
     pub memory_mb: u64,
 }
 
@@ -50,6 +52,7 @@ pub struct Metrics {
     // the same System instance has to survive between calls. Building a fresh
     // one per request is the classic way to get a number that never moves.
     system: Mutex<System>,
+    tree: Mutex<TreeSampler>,
     disk: Mutex<HashMap<PathBuf, (Instant, u64)>>,
     /// Last host CPU reading, and when it was taken.
     host_cpu: Mutex<(Instant, f32)>,
@@ -57,8 +60,33 @@ pub struct Metrics {
     logical_cpu_count: usize,
 }
 
+struct TreeSampler {
+    system: System,
+    refreshed_at: Option<Instant>,
+    cpu_ready: HashSet<Pid>,
+    #[cfg(target_os = "android")]
+    android_cpu: HashMap<Pid, AndroidTreeCpu>,
+}
+
+#[cfg(target_os = "android")]
+struct AndroidTreeCpu {
+    at: Instant,
+    counters: HashMap<Pid, ProcCpuCounters>,
+    value: Option<f32>,
+}
+
+#[cfg(any(target_os = "android", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcCpuCounters {
+    start_ticks: u64,
+    cpu_ticks: u64,
+}
+
 impl Default for Metrics {
     fn default() -> Self {
+        // A tree scan indexes every visible process. Do not let sysinfo retain
+        // one /proc descriptor per process and consume the panel's file budget.
+        let _ = sysinfo::set_open_files_limit(0);
         let mut system = System::new();
 
         // Establish the baseline the first real reading is measured against.
@@ -66,9 +94,18 @@ impl Default for Metrics {
         let logical_cpu_count = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or_else(|_| system.cpus().len().max(1));
+        let mut tree_system = System::new();
+        tree_system.refresh_cpu_usage();
 
         Metrics {
             system: Mutex::new(system),
+            tree: Mutex::new(TreeSampler {
+                system: tree_system,
+                refreshed_at: None,
+                cpu_ready: HashSet::new(),
+                #[cfg(target_os = "android")]
+                android_cpu: HashMap::new(),
+            }),
             disk: Mutex::new(HashMap::new()),
             host_cpu: Mutex::new((Instant::now(), 0.0)),
             logical_cpu_count,
@@ -96,11 +133,109 @@ impl Metrics {
         let (cpu_cores, cpu_host_percent) =
             normalize_process_cpu(cpu_percent, self.logical_cpu_count);
         Some(ProcessMetrics {
-            cpu_percent,
-            cpu_cores,
-            cpu_host_percent,
+            cpu_percent: Some(cpu_percent),
+            cpu_cores: Some(cpu_cores),
+            cpu_host_percent: Some(cpu_host_percent),
             logical_cpu_count: self.logical_cpu_count,
             memory_mb: process.memory() / 1024 / 1024,
+        })
+    }
+
+    /// Sample the Horizon supervisor, engine, and their descendants.
+    ///
+    /// A full process scan is cached briefly. Only descendants of the panel's
+    /// own live child are considered, and no value is returned until an engine
+    /// is visible. RSS is summed, so shared pages can be counted more than once.
+    pub fn of_horizon_tree(&self, pid: u32) -> Option<ProcessMetrics> {
+        let mut sampler = self.tree.lock().ok()?;
+        if sampler
+            .refreshed_at
+            .is_none_or(|at| at.elapsed() >= TREE_REFRESH_INTERVAL)
+        {
+            let previous: HashMap<_, _> = sampler
+                .system
+                .processes()
+                .iter()
+                .map(|(pid, process)| (*pid, process.start_time()))
+                .collect();
+            sampler.system.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                ProcessRefreshKind::nothing().with_cpu().with_memory(),
+            );
+            sampler.cpu_ready = sampler
+                .system
+                .processes()
+                .iter()
+                .filter_map(|(pid, process)| {
+                    (previous.get(pid) == Some(&process.start_time())).then_some(*pid)
+                })
+                .collect();
+            #[cfg(target_os = "android")]
+            {
+                let live: HashSet<_> = sampler.system.processes().keys().copied().collect();
+                sampler.android_cpu.retain(|pid, _| live.contains(pid));
+            }
+            sampler.refreshed_at = Some(Instant::now());
+        }
+        let root = Pid::from_u32(pid);
+        if sampler.system.process(root)?.parent() != Some(Pid::from_u32(std::process::id())) {
+            return None;
+        }
+        let nodes = descendant_pids(&sampler.system, root);
+        let engine = nodes
+            .iter()
+            .filter(|pid| **pid != root)
+            .filter_map(|pid| sampler.system.process(*pid))
+            .any(|process| {
+                let name = process.name().to_string_lossy();
+                [
+                    "horizon-engine",
+                    "horizon-client",
+                    "horizon-engine.exe",
+                    "horizon-client.exe",
+                ]
+                .iter()
+                .any(|expected| name.eq_ignore_ascii_case(expected))
+            });
+        if !engine {
+            return None;
+        }
+        let mut memory_bytes = 0_u64;
+        let mut cpu = 0_f32;
+        let mut cpu_valid = true;
+        for process in nodes.iter().filter_map(|pid| sampler.system.process(*pid)) {
+            // An unreadable RSS must not be presented as an accurate total.
+            if process.memory() == 0 {
+                return None;
+            }
+            memory_bytes = memory_bytes.saturating_add(process.memory());
+            let usage = process.cpu_usage();
+            if !usage.is_finite() || usage < 0.0 {
+                cpu_valid = false;
+            } else {
+                cpu += usage;
+            }
+        }
+        let cpu_available = cpu_valid
+            && cpu.is_finite()
+            && !sampler.system.cpus().is_empty()
+            && nodes.iter().all(|pid| sampler.cpu_ready.contains(pid));
+        #[cfg(target_os = "android")]
+        let cpu_value = sampler
+            .android_cpu_value(root, &nodes, self.logical_cpu_count)
+            .or_else(|| {
+                (cpu_available && std::fs::File::open("/proc/stat").is_ok()).then_some(cpu)
+            });
+        #[cfg(not(target_os = "android"))]
+        let cpu_value = cpu_available.then_some(cpu);
+        let (cores, host) = normalize_process_cpu(cpu_value.unwrap_or(0.0), self.logical_cpu_count);
+        Some(ProcessMetrics {
+            cpu_percent: cpu_value,
+            cpu_cores: cpu_value.map(|_| cores),
+            cpu_host_percent: cpu_value.map(|_| host),
+            logical_cpu_count: self.logical_cpu_count,
+            memory_mb: memory_bytes / 1024 / 1024,
         })
     }
 
@@ -162,6 +297,125 @@ impl Metrics {
     }
 }
 
+/// Linux sysinfo also lists individual threads. Exclude them to avoid counting
+/// a multithreaded engine's shared RSS and CPU repeatedly.
+fn descendant_pids(system: &System, root: Pid) -> Vec<Pid> {
+    let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
+    for (pid, process) in system.processes() {
+        if process.thread_kind().is_some() {
+            continue;
+        }
+        if let Some(parent) = process.parent() {
+            children.entry(parent).or_default().push(*pid);
+        }
+    }
+    let mut result = Vec::new();
+    let mut visited = HashSet::new();
+    let mut pending = VecDeque::from([root]);
+    while let Some(pid) = pending.pop_front() {
+        if !visited.insert(pid) {
+            continue;
+        }
+        result.push(pid);
+        if let Some(next) = children.get(&pid) {
+            pending.extend(next.iter().copied());
+        }
+    }
+    result
+}
+
+#[cfg(any(target_os = "android", test))]
+fn parse_proc_cpu_stat(text: &str) -> Option<ProcCpuCounters> {
+    // The process name is parenthesized and may itself contain spaces or ')'.
+    // The first token after the final ')' is field 3 (state).
+    let (_, fields) = text.rsplit_once(')')?;
+    let fields: Vec<_> = fields.split_whitespace().collect();
+    let user: u64 = fields.get(11)?.parse().ok()?;
+    let system: u64 = fields.get(12)?.parse().ok()?;
+    Some(ProcCpuCounters {
+        start_ticks: fields.get(19)?.parse().ok()?,
+        cpu_ticks: user.checked_add(system)?,
+    })
+}
+
+#[cfg(any(target_os = "android", test))]
+fn proc_tree_cpu_percent(
+    previous: &HashMap<Pid, ProcCpuCounters>,
+    current: &HashMap<Pid, ProcCpuCounters>,
+    elapsed: Duration,
+    ticks_per_second: u64,
+    logical_cpu_count: usize,
+) -> Option<f32> {
+    if ticks_per_second == 0
+        || elapsed.is_zero()
+        || previous.len() != current.len()
+        || current.is_empty()
+    {
+        return None;
+    }
+    let ticks = current.iter().try_fold(0_u64, |sum, (pid, value)| {
+        let old = previous.get(pid)?;
+        if old.start_ticks != value.start_ticks {
+            return None;
+        }
+        sum.checked_add(value.cpu_ticks.checked_sub(old.cpu_ticks)?)
+    })?;
+    let percent = ticks as f64 / ticks_per_second as f64 / elapsed.as_secs_f64() * 100.0;
+    if !percent.is_finite() {
+        return None;
+    }
+    Some((percent as f32).clamp(0.0, logical_cpu_count.max(1) as f32 * 100.0))
+}
+
+#[cfg(target_os = "android")]
+impl TreeSampler {
+    /// Android often denies `/proc/stat` while allowing the panel to read its
+    /// own child processes. Derive CPU usage from their tick deltas and elapsed
+    /// monotonic time instead of treating denied host counters as zero.
+    fn android_cpu_value(
+        &mut self,
+        root: Pid,
+        nodes: &[Pid],
+        logical_cpu_count: usize,
+    ) -> Option<f32> {
+        let now = Instant::now();
+        if let Some(sample) = self.android_cpu.get(&root) {
+            if now.duration_since(sample.at) < TREE_REFRESH_INTERVAL {
+                return sample.value;
+            }
+        }
+        let counters: Option<HashMap<_, _>> = nodes
+            .iter()
+            .map(|pid| {
+                let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid.as_u32())).ok()?;
+                Some((*pid, parse_proc_cpu_stat(&stat)?))
+            })
+            .collect();
+        let Some(counters) = counters else {
+            self.android_cpu.remove(&root);
+            return None;
+        };
+        let value = self.android_cpu.get(&root).and_then(|previous| {
+            proc_tree_cpu_percent(
+                &previous.counters,
+                &counters,
+                now.duration_since(previous.at),
+                rustix::param::clock_ticks_per_second(),
+                logical_cpu_count,
+            )
+        });
+        self.android_cpu.insert(
+            root,
+            AndroidTreeCpu {
+                at: now,
+                counters,
+                value,
+            },
+        );
+        value
+    }
+}
+
 /// Convert sysinfo's one-logical-core percentage to both useful display forms.
 ///
 /// Keeping this pure makes the semantics independently testable without
@@ -188,6 +442,272 @@ fn directory_size(root: &Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proc_cpu_parser_handles_names_with_spaces_and_parentheses() {
+        let mut fields = vec!["0"; 20];
+        fields[0] = "S";
+        fields[11] = "25";
+        fields[12] = "7";
+        fields[19] = "987";
+        let line = format!("123 (name ) with spaces) {}", fields.join(" "));
+        assert_eq!(
+            parse_proc_cpu_stat(&line),
+            Some(ProcCpuCounters {
+                start_ticks: 987,
+                cpu_ticks: 32
+            })
+        );
+        assert_eq!(parse_proc_cpu_stat("123 (truncated) S"), None);
+    }
+
+    #[test]
+    fn proc_cpu_delta_rejects_reused_or_changed_processes() {
+        let a = Pid::from_u32(1);
+        let b = Pid::from_u32(2);
+        let previous = HashMap::from([
+            (
+                a,
+                ProcCpuCounters {
+                    start_ticks: 5,
+                    cpu_ticks: 100,
+                },
+            ),
+            (
+                b,
+                ProcCpuCounters {
+                    start_ticks: 9,
+                    cpu_ticks: 200,
+                },
+            ),
+        ]);
+        let mut current = HashMap::from([
+            (
+                a,
+                ProcCpuCounters {
+                    start_ticks: 5,
+                    cpu_ticks: 150,
+                },
+            ),
+            (
+                b,
+                ProcCpuCounters {
+                    start_ticks: 9,
+                    cpu_ticks: 225,
+                },
+            ),
+        ]);
+        assert_eq!(
+            proc_tree_cpu_percent(&previous, &current, Duration::from_secs(2), 100, 8),
+            Some(37.5)
+        );
+        current.get_mut(&b).unwrap().start_ticks = 10;
+        assert_eq!(
+            proc_tree_cpu_percent(&previous, &current, Duration::from_secs(2), 100, 8),
+            None
+        );
+        current.get_mut(&b).unwrap().start_ticks = 9;
+        current.get_mut(&a).unwrap().cpu_ticks = 99;
+        assert_eq!(
+            proc_tree_cpu_percent(&previous, &current, Duration::from_secs(2), 100, 8),
+            None
+        );
+        current.remove(&b);
+        assert_eq!(
+            proc_tree_cpu_percent(&previous, &current, Duration::from_secs(2), 100, 8),
+            None
+        );
+    }
+
+    #[test]
+    fn unavailable_cpu_serializes_as_null_without_hiding_rss() {
+        let value = serde_json::to_value(ProcessMetrics {
+            cpu_percent: None,
+            cpu_cores: None,
+            cpu_host_percent: None,
+            logical_cpu_count: 8,
+            memory_mb: 321,
+        })
+        .unwrap();
+        assert!(value["cpu_percent"].is_null());
+        assert!(value["cpu_host_percent"].is_null());
+        assert_eq!(value["memory_mb"], 321);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn horizon_metrics_require_a_visible_engine_in_the_owned_tree() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let root = tempfile::tempdir().unwrap();
+        let shell = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|path| path.join("sh"))
+            .find(|path| path.is_file())
+            .expect("a shell is required for the process-tree test");
+        let engine = root.path().join("horizon-engine");
+        std::fs::copy(&shell, &engine).unwrap();
+        let mut supervisor = Command::new(&shell)
+            .args([
+                "-c",
+                "\"$1\" -c 'while :; do :; done' & engine=$!; IFS= read -r line; kill \"$engine\"; wait \"$engine\" || :",
+                "supervisor",
+            ])
+            .arg(&engine)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let metrics = Metrics::default();
+        // The panel process itself is not its own child, even if it has an
+        // engine somewhere below it.
+        let own_pid_rejected = metrics.of_horizon_tree(std::process::id()).is_none();
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let result = loop {
+            if let Some(sample) = metrics.of_horizon_tree(supervisor.id()) {
+                break Some(sample);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        #[cfg(target_os = "android")]
+        let cpu_sample = {
+            std::thread::sleep(TREE_REFRESH_INTERVAL + Duration::from_millis(100));
+            metrics.of_horizon_tree(supervisor.id())
+        };
+        let diagnostic = {
+            let sampler = metrics.tree.lock().unwrap();
+            let root = Pid::from_u32(supervisor.id());
+            let owner = Pid::from_u32(std::process::id());
+            sampler
+                .system
+                .processes()
+                .iter()
+                .filter(|(pid, p)| {
+                    **pid == root || p.parent() == Some(root) || p.parent() == Some(owner)
+                })
+                .map(|(pid, p)| {
+                    format!(
+                        "pid={pid} parent={:?} name={:?} thread={:?} rss={}",
+                        p.parent(),
+                        p.name(),
+                        p.thread_kind(),
+                        p.memory()
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        if let Some(mut stdin) = supervisor.stdin.take() {
+            let _ = stdin.write_all(b"stop\n");
+        }
+        let status = supervisor.wait().unwrap();
+        assert!(own_pid_rejected);
+        assert!(status.success());
+        let sample = result.unwrap_or_else(|| {
+            panic!("the owned supervisor and engine should be visible: {diagnostic:?}")
+        });
+        assert!(sample.memory_mb > 0, "engine RSS should be included");
+        #[cfg(target_os = "android")]
+        assert!(
+            cpu_sample
+                .and_then(|sample| sample.cpu_percent)
+                .is_some_and(|value| value > 0.0),
+            "owned process CPU counters should produce a nonzero delta"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires HORIZON_SMOKE_SERVER, HORIZON_SMOKE_ENGINE and HORIZON_SMOKE_RESOURCES"]
+    async fn real_horizon_engine_is_included_in_process_metrics() {
+        use guardian::{Guardian, GuardianConfig, ServerConfig, ServerStatus};
+        let root = tempfile::tempdir().unwrap();
+        let installation = root.path().join("horizon");
+        let directory = root.path().join("servers/metrics");
+        std::fs::create_dir_all(&installation).unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        for (variable, name) in [
+            ("HORIZON_SMOKE_SERVER", "horizon-server"),
+            ("HORIZON_SMOKE_ENGINE", "horizon-engine"),
+        ] {
+            let source = std::env::var_os(variable).expect(variable);
+            let destination = installation.join(name);
+            std::fs::hard_link(&source, &destination)
+                .or_else(|_| std::fs::copy(&source, &destination).map(|_| ()))
+                .unwrap();
+        }
+        std::os::unix::fs::symlink(
+            std::env::var_os("HORIZON_SMOKE_RESOURCES").unwrap(),
+            directory.join("resources"),
+        )
+        .unwrap();
+        std::fs::write(directory.join("server.toml"), "[server]\nbind = '127.0.0.1'\nonline_mode = false\nwhitelist = false\nview_distance = 2\nsimulation_distance = 2\n[engine]\nlow_memory = true\n[backups]\nevery = '0'\n").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut config = ServerConfig::paper(&directory, "26.3");
+        config.core = "horizon".into();
+        config.port = port;
+        config.eula_accepted = true;
+        let guardian = Guardian::new_with_sandbox_policy(
+            config,
+            GuardianConfig {
+                stop_timeout_secs: 120,
+                ..Default::default()
+            },
+            root.path(),
+            guardian::sandbox::SandboxPolicy::new(true),
+        );
+        let mut events = guardian.subscribe();
+        guardian.start().await.unwrap();
+        let ready = tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match events.recv().await.unwrap() {
+                    guardian::ServerEvent::Status {
+                        status: ServerStatus::Online,
+                    } => return true,
+                    guardian::ServerEvent::Status {
+                        status: ServerStatus::Offline | ServerStatus::Crashed,
+                    } => return false,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        let metrics = Metrics::default();
+        let pid = guardian.snapshot().await.pid;
+        let sample = pid.and_then(|pid| metrics.of_horizon_tree(pid));
+        let supervisor_only = pid.and_then(|pid| metrics.of(pid));
+        tokio::time::sleep(TREE_REFRESH_INTERVAL + Duration::from_millis(100)).await;
+        let second_sample = pid.and_then(|pid| metrics.of_horizon_tree(pid));
+        if guardian.status().await.is_running()
+            || guardian.status().await == ServerStatus::Preparing
+        {
+            guardian.stop().await.unwrap();
+        }
+        let lines = guardian.console().await;
+        assert!(ready, "Horizon did not become ready: {lines:?}");
+        let sample = sample.expect("the native engine and supervisor should be visible");
+        assert!(
+            sample.memory_mb > 16,
+            "native engine memory is missing: {sample:?}"
+        );
+        if let Some(supervisor) = supervisor_only {
+            assert!(
+                sample.memory_mb > supervisor.memory_mb,
+                "engine RSS must be included"
+            );
+        }
+        let second = second_sample.expect("the native process tree should remain visible");
+        assert!(second.memory_mb > 16);
+        #[cfg(target_os = "android")]
+        assert!(
+            second.cpu_percent.is_some(),
+            "per-process CPU counters should be available"
+        );
+        eprintln!("Horizon process-tree sample: {second:?}");
+    }
 
     /// Occupy every core for `duration`.
     fn saturate(duration: Duration) {
