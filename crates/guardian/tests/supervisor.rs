@@ -295,12 +295,56 @@ async fn real_horizon_starts_and_stops() {
         && tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_ok();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let engine_pids: Vec<u32> = if ready && std::env::var_os("HORIZON_SMOKE_FORCE_STOP").is_some() {
+        let pid = guardian.snapshot().await.pid.unwrap();
+        // Android can omit task/*/children even for our own processes.
+        std::fs::read_dir("/proc")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let child: u32 = entry.file_name().to_str()?.parse().ok()?;
+                let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
+                let fields = stat.rsplit_once(')')?.1;
+                let parent: u32 = fields.split_whitespace().nth(1)?.parse().ok()?;
+                (parent == pid).then_some(child)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let force = ready && std::env::var_os("HORIZON_SMOKE_FORCE_STOP").is_some();
+    let supports_force = guardian.snapshot().await.force_kill_available;
+    let mut forced_exit = false;
+    if force && supports_force {
+        if guardian.kill().await.is_ok() {
+            forced_exit = guardian.wait_for_exit(Duration::from_secs(20)).await;
+        }
+    }
     if guardian.status().await.is_running() || guardian.status().await == ServerStatus::Preparing {
         guardian.stop().await.unwrap();
     }
     let lines = guardian.console().await;
     assert!(ready, "Horizon did not become ready: {lines:?}");
     assert!(listening, "Horizon did not listen on the configured port");
+    if force {
+        assert!(
+            supports_force,
+            "supervisor did not advertise force-stop support"
+        );
+        assert!(forced_exit, "force-stop did not terminate the supervisor");
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            assert!(!engine_pids.is_empty(), "supervisor had no engine child");
+            for pid in engine_pids {
+                assert!(
+                    !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                    "engine process {pid} was not reaped"
+                );
+            }
+        }
+    }
     let text = std::fs::read_to_string(directory.join("server.toml")).unwrap();
     let config = text.parse::<toml_edit::DocumentMut>().unwrap();
     assert_eq!(config["world"]["name"].as_str(), Some("smoke-world"));

@@ -60,3 +60,16 @@ end-to-end validation remain unfinished. The pinned Horizon fork advertises a
 force-stop control protocol: the supervisor kills and reaps its engine before
 exiting. Older binaries without this protocol cannot be force-stopped by the
 panel; use Horizon or host tools if their graceful stop times out.
+
+To run the isolated native integration test with locally built programs and
+your prepared game files, set `HORIZON_SMOKE_SERVER`, `HORIZON_SMOKE_ENGINE`,
+and `HORIZON_SMOKE_RESOURCES` to their absolute paths, then run:
+
+```sh
+HORIZON_SMOKE_FORCE_STOP=1 cargo test -p guardian --test supervisor \
+  real_horizon_starts_and_stops -- --ignored --nocapture
+```
+
+The test creates a temporary server world and checks the force-stop protocol;
+on Linux and Android it also checks that the engine process was reaped. Omit
+`HORIZON_SMOKE_FORCE_STOP` to test a graceful stop instead.
