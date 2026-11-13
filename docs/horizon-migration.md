@@ -45,6 +45,28 @@ is disabled, and Horizon's internal crash restart is disabled so Guardian owns
 restart policy. Other Horizon settings are retained. Existing Java heap and JVM
 arguments do not limit or configure Horizon's native memory usage.
 
+### Migrating a Paper or Spigot world
+
+Paper and Spigot may store world data in a different layout from vanilla.
+Horizon preparation stops when it detects the layouts below; it does not yet
+convert them automatically. Stop the Java server and make a full backup before
+changing anything. Substitute the configured `level-name` for `world` below.
+
+For older Paper/Spigot worlds, copy `world_nether/DIM-1` to `world/DIM-1` and
+`world_the_end/DIM1` to `world/DIM1`. If either destination exists, compare it
+with the source and resolve the conflict using your backup; do not overwrite
+it blindly. Preserve the original `world_nether` and `world_the_end` folders
+outside the server directory after copying so Horizon can start.
+
+For newer Paper worlds, move the following files, when present, from
+`world/dimensions/minecraft/overworld/data/minecraft/` to
+`world/data/minecraft/`: `game_rules.dat`, `scheduled_events.dat`,
+`wandering_trader.dat`, `weather.dat`, and `world_gen_settings.dat`. Resolve
+any existing destination files against the backup before replacing anything.
+The panel does not validate plugin data or perform a complete compatibility
+conversion. Refer to [Paper's migration guide](https://docs.papermc.io/paper/migration/)
+for the source layouts and additional limitations.
+
 When the operating system exposes the relevant processes, the panel reports
 CPU and the summed resident memory of the supervisor, engine and descendants.
 Shared pages may be counted more than once. Metrics are unavailable when the

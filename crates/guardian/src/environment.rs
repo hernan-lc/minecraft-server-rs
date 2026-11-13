@@ -528,6 +528,7 @@ pub(crate) async fn prepare_horizon(
     let mut document = text.parse::<toml_edit::DocumentMut>().map_err(|error| {
         Error::InvalidConfiguration(format!("invalid Horizon server.toml: {error}"))
     })?;
+    check_paper_world_layout(&fs, &directory, &document)?;
     for (section, key, value) in [
         ("server", "port", toml_edit::value(i64::from(config.port))),
         ("engine", "restart_on_crash", toml_edit::value(false)),
@@ -548,6 +549,58 @@ pub(crate) async fn prepare_horizon(
         runtime: ServerRuntime::Horizon { installation },
         directory,
     })
+}
+
+/// Paper and Spigot can put dimensions where the vanilla-layout engine will
+/// not find them. Refuse to silently create empty dimensions during migration.
+fn check_paper_world_layout(
+    fs: &ScopedFs,
+    directory: &Path,
+    document: &toml_edit::DocumentMut,
+) -> Result<()> {
+    let world = match document.get("world").and_then(|table| table.get("name")) {
+        None => "world",
+        Some(item) => item.as_str().ok_or_else(|| {
+            Error::InvalidConfiguration("Horizon world.name must be a string".into())
+        })?,
+    };
+    if world.is_empty() || world.contains(['/', '\\']) || world == "." || world == ".." {
+        return Err(Error::InvalidConfiguration(
+            "Horizon world.name must be a folder name".into(),
+        ));
+    }
+    let exists = |path: &std::path::Path| -> Result<bool> {
+        match fs.metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(Error::io(directory.join(path), error)),
+        }
+    };
+    for (suffix, dimension) in [("_nether", "DIM-1"), ("_the_end", "DIM1")] {
+        let source = std::path::PathBuf::from(format!("{world}{suffix}")).join(dimension);
+        if exists(&source)? {
+            return Err(Error::InvalidConfiguration(format!(
+                "Paper/Spigot dimension {} is separate from {world}; migrate it before starting Horizon (see docs/horizon-migration.md)",
+                source.display()
+            )));
+        }
+    }
+    let modern = std::path::Path::new(world).join("dimensions/minecraft/overworld/data/minecraft");
+    for file in [
+        "game_rules.dat",
+        "scheduled_events.dat",
+        "wandering_trader.dat",
+        "weather.dat",
+        "world_gen_settings.dat",
+    ] {
+        if exists(&modern.join(file))? {
+            return Err(Error::InvalidConfiguration(format!(
+                "Paper world data {} is not in its vanilla location; migrate it before starting Horizon (see docs/horizon-migration.md)",
+                modern.join(file).display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Run Horizon's importer in a private scratch directory, so it cannot modify
@@ -967,6 +1020,23 @@ mod tests {
         .is_err());
         assert_eq!(std::fs::read_to_string(outside).unwrap(), "do not import");
         assert!(!directory.join("server.toml").exists());
+        let config_text = "[world]\nname = 'custom'\n";
+        std::fs::write(directory.join("server.toml"), config_text).unwrap();
+        std::fs::create_dir_all(directory.join("custom_the_end/DIM1")).unwrap();
+        let error = prepare_horizon(
+            &config,
+            root.path(),
+            crate::sandbox::SandboxPolicy::new(true),
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("custom_the_end/DIM1"));
+        assert_eq!(
+            std::fs::read_to_string(directory.join("server.toml")).unwrap(),
+            config_text
+        );
+        assert!(!directory.join("eula.txt").exists());
     }
 
     #[test]
@@ -975,6 +1045,49 @@ mod tests {
 
         assert_eq!(stage, "downloading paper 26.2");
         assert!(!stage.contains('%'));
+    }
+
+    #[test]
+    fn paper_world_layout_requires_explicit_migration_without_modifying_data() {
+        let root = tempfile::tempdir().unwrap();
+        let fs = ScopedFs::open(root.path()).unwrap();
+        let config = "[world]\nname = 'custom'\n"
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert!(check_paper_world_layout(&fs, root.path(), &config).is_ok());
+        let legacy = root.path().join("custom_nether/DIM-1/region");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("r.0.0.mca"), b"original").unwrap();
+        let error = check_paper_world_layout(&fs, root.path(), &config)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("custom_nether/DIM-1"));
+        assert_eq!(
+            std::fs::read(legacy.join("r.0.0.mca")).unwrap(),
+            b"original"
+        );
+        // Existing vanilla dimensions may have already been regenerated; they
+        // must not make the split Paper dimension silently disappear.
+        std::fs::create_dir_all(root.path().join("custom/DIM-1")).unwrap();
+        assert!(check_paper_world_layout(&fs, root.path(), &config).is_err());
+        std::fs::rename(
+            root.path().join("custom_nether"),
+            root.path().join("preserved-nether"),
+        )
+        .unwrap();
+        let paper_data = root
+            .path()
+            .join("custom/dimensions/minecraft/overworld/data/minecraft");
+        std::fs::create_dir_all(&paper_data).unwrap();
+        std::fs::write(paper_data.join("weather.dat"), b"weather").unwrap();
+        let error = check_paper_world_layout(&fs, root.path(), &config)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("weather.dat"));
+        assert_eq!(
+            std::fs::read(paper_data.join("weather.dat")).unwrap(),
+            b"weather"
+        );
     }
 
     /// A fake but well-formed JDK home: `bin/java[.exe]` plus a `release`
