@@ -22,8 +22,8 @@ const TREE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 /// What the machine as a whole is doing.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct HostMetrics {
-    /// Busy percentage across all cores, 0..=100.
-    pub cpu_percent: f32,
+    /// Busy percentage across all cores, or unavailable when counters cannot be read.
+    pub cpu_percent: Option<f32>,
     /// Physical memory in use, in mebibytes.
     pub memory_used_mb: u64,
     /// Physical memory installed, in mebibytes.
@@ -55,7 +55,7 @@ pub struct Metrics {
     tree: Mutex<TreeSampler>,
     disk: Mutex<HashMap<PathBuf, (Instant, u64)>>,
     /// Last host CPU reading, and when it was taken.
-    host_cpu: Mutex<(Instant, f32)>,
+    host_cpu: Mutex<(Instant, Option<f32>)>,
     /// The host capacity against which per-process CPU is normalized.
     logical_cpu_count: usize,
 }
@@ -107,7 +107,7 @@ impl Default for Metrics {
                 android_cpu: HashMap::new(),
             }),
             disk: Mutex::new(HashMap::new()),
-            host_cpu: Mutex::new((Instant::now(), 0.0)),
+            host_cpu: Mutex::new((Instant::now(), None)),
             logical_cpu_count,
         }
     }
@@ -252,15 +252,22 @@ impl Metrics {
 
         system.refresh_memory();
 
+        #[cfg(target_os = "android")]
+        let counters_available = std::fs::File::open("/proc/stat").is_ok();
+        #[cfg(not(target_os = "android"))]
+        let counters_available = true;
+        let read_cpu = |system: &System| {
+            (counters_available && !system.cpus().is_empty()).then(|| system.global_cpu_usage())
+        };
         let cpu_percent = match self.host_cpu.lock() {
             Ok(mut last) => {
                 if last.0.elapsed() >= MINIMUM_CPU_UPDATE_INTERVAL {
                     system.refresh_cpu_usage();
-                    *last = (Instant::now(), system.global_cpu_usage());
+                    *last = (Instant::now(), read_cpu(&system));
                 }
                 last.1
             }
-            Err(_) => system.global_cpu_usage(),
+            Err(_) => read_cpu(&system),
         };
 
         HostMetrics {
@@ -738,10 +745,18 @@ mod tests {
         // Establish a baseline, then read again after an idle gap.
         metrics.host();
         std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL * 2);
-        let idle = metrics.host().cpu_percent;
+        let Some(idle) = metrics.host().cpu_percent else {
+            #[cfg(target_os = "android")]
+            return;
+            #[cfg(not(target_os = "android"))]
+            panic!("host CPU counters are unavailable");
+        };
 
         saturate(MINIMUM_CPU_UPDATE_INTERVAL * 3);
-        let busy = metrics.host().cpu_percent;
+        let busy = metrics
+            .host()
+            .cpu_percent
+            .expect("host CPU counters disappeared");
 
         // Asserting `busy > 0` would not catch anything: a freshly built System
         // reports an average since boot, which is non-zero and never moves. What
@@ -753,6 +768,16 @@ mod tests {
             busy > idle + delta || busy > 90.0,
             "idle {idle}% then saturated {busy}%: the reading is not tracking load"
         );
+    }
+
+    #[cfg(target_os = "android")]
+    #[test]
+    fn restricted_host_cpu_is_reported_as_unavailable() {
+        if std::fs::File::open("/proc/stat").is_err() {
+            let metrics = Metrics::default();
+            std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL * 2);
+            assert!(metrics.host().cpu_percent.is_none());
+        }
     }
 
     #[test]

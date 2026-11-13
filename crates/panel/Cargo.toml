@@ -39,7 +39,7 @@ password-hash = { version = "0.5", features = ["std"] }
 sysinfo = "0.33"
 mime_guess = "2"
 tokio-util = { version = "0.7", features = ["io"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }

@@ -94,6 +94,9 @@ jobs:
         # differ between platforms — so it is the part least worth assuming.
         run: npm run rust:test
 
+      - name: Test Java compatibility dependency
+        run: cargo test --locked --manifest-path vendor/java-path-rs/Cargo.toml --all-features
+
       - name: Test Horizon installer
         if: matrix.os == 'ubuntu-latest'
         run: python3 -m unittest scripts/test_install_horizon.py scripts/test_migrate_paper_world.py

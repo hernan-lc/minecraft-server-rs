@@ -1,10 +1,11 @@
 [submodule "vendor/java-path-rs"]
 	path = vendor/java-path-rs
-	url = https://github.com/nglmercer/java-path-rs
+	url = https://github.com/hernan-lc/java-path-rs.git
+	branch = migrate/secure-zip
 [submodule "vendor/minecraft-core-rs"]
 	path = vendor/minecraft-core-rs
 	url = https://github.com/nglmercer/minecraft-core-rs
 [submodule "vendor/horizon"]
 	path = vendor/horizon
 	url = https://github.com/hernan-lc/horizon.git
-	branch = migrate/panel-force-stop
+	branch = migrate/security-dependencies

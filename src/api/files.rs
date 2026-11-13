@@ -643,17 +643,21 @@ fn extract_zip(
         let mut entry = zip
             .by_index(index)
             .map_err(|error| ApiError::BadRequest(format!("corrupt zip entry: {error}")))?;
+        let name = entry
+            .name()
+            .map_err(|error| ApiError::BadRequest(format!("corrupt zip entry name: {error}")))?
+            .into_owned();
         extraction.count()?;
         let Some(relative) = entry.enclosed_name() else {
             return Err(ApiError::BadRequest(format!(
                 "archive entry {} would escape the destination",
-                entry.name()
+                name
             )));
         };
         if !safe_member(&relative) || entry.is_symlink() {
             return Err(ApiError::BadRequest(format!(
                 "archive entry {} is unsafe",
-                entry.name()
+                name
             )));
         }
         let Some(relative) = normalise_member(&relative) else {
@@ -879,6 +883,51 @@ mod tests {
         assert!(!safe_member(Path::new("/etc/passwd")));
         assert!(!safe_member(Path::new("C:/Windows/win.ini")));
         assert!(!safe_member(Path::new("plugins\\escape")));
+    }
+
+    #[test]
+    fn zip_extraction_reads_regular_files_and_rejects_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("archive.zip");
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("folder/item.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"content").unwrap();
+        writer.finish().unwrap();
+        let fs = ScopedFs::open(root.path()).unwrap();
+        let count = extract_zip(
+            &fs,
+            Path::new("archive.zip"),
+            Path::new("out"),
+            ResourceLimits::default(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            std::fs::read(root.path().join("out/folder/item.txt")).unwrap(),
+            b"content"
+        );
+
+        let mut bytes = std::fs::read(&archive).unwrap();
+        let central = bytes
+            .windows(4)
+            .position(|bytes| bytes == b"PK\x01\x02")
+            .unwrap();
+        bytes[central + 5] = 3;
+        bytes[central + 38..central + 42].copy_from_slice(&(0o120777u32 << 16).to_le_bytes());
+        std::fs::write(&archive, bytes).unwrap();
+        assert!(extract_zip(
+            &fs,
+            Path::new("archive.zip"),
+            Path::new("unsafe"),
+            ResourceLimits::default(),
+            0
+        )
+        .is_err());
+        assert!(!root.path().join("unsafe/folder/item.txt").exists());
     }
 
     #[test]
