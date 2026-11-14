@@ -105,9 +105,10 @@ async fn view(
         let data_dir = state.data_dir.clone();
         let (present, bundled) = tokio::task::spawn_blocking(move || {
             let present = guardian::sandbox::horizon_programs_present(&data_dir.join("horizon"));
-            let bundled = std::env::current_exe().ok().is_some_and(|exe| {
-                crate::horizon_install::bundled_programs(&exe, &data_dir).is_some()
-            });
+            let bundled = crate::horizon_install::embedded_programs()
+                || std::env::current_exe().ok().is_some_and(|exe| {
+                    crate::horizon_install::bundled_programs(&exe, &data_dir).is_some()
+                });
             (present, bundled)
         })
         .await
@@ -327,6 +328,14 @@ async fn create(
 
     let id = Uuid::new_v4().to_string();
     let directory = state.server_dir(&id);
+    let policy = if core == "horizon" {
+        GuardianConfig {
+            prepare_timeout_secs: 2 * 60 * 60,
+            ..GuardianConfig::default()
+        }
+    } else {
+        GuardianConfig::default()
+    };
 
     let record = ServerRecord {
         id: id.clone(),
@@ -343,7 +352,7 @@ async fn create(
             port: body.port,
             eula_accepted: body.eula_accepted,
         },
-        policy: GuardianConfig::default(),
+        policy,
         playit: None,
         created_at: now(),
         backup_policy: None,
@@ -724,6 +733,39 @@ pub enum PowerAction {
     Kill,
 }
 
+async fn prepare_horizon_runtime(
+    state: &AppState,
+    identity: &Identity,
+    record: &ServerRecord,
+) -> ApiResult<()> {
+    if !record.config.core.eq_ignore_ascii_case("horizon") {
+        return Ok(());
+    }
+    let installation = state.data_dir.join("horizon");
+    if !identity.admin {
+        let shared = installation
+            .join(".local/horizon-client")
+            .join(guardian::config::HORIZON_VERSION);
+        let local = record.config.directory.join("resources");
+        if !guardian::sandbox::horizon_programs_present(&installation)
+            || (!shared.exists()
+                && !local.exists()
+                && !guardian::horizon_prepare::has_custom_resources(&record.config.directory))
+        {
+            return Err(ApiError::Forbidden);
+        }
+    } else {
+        let data_dir = state.data_dir.clone();
+        let executable = std::env::current_exe().map_err(|e| ApiError::Internal(e.into()))?;
+        tokio::task::spawn_blocking(move || {
+            crate::horizon_install::install_if_bundled(&executable, &data_dir)
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))??;
+    }
+    Ok(())
+}
+
 async fn power(
     State(state): State<Arc<AppState>>,
     identity: Identity,
@@ -734,17 +776,8 @@ async fn power(
     let record = authorized(&state, &identity, &id).await?;
     let guardian = state.guardian(&id).await?;
 
-    if identity.admin
-        && record.config.core.eq_ignore_ascii_case("horizon")
-        && matches!(body.action, PowerAction::Start | PowerAction::Restart)
-    {
-        let data_dir = state.data_dir.clone();
-        let executable = std::env::current_exe().map_err(|e| ApiError::Internal(e.into()))?;
-        tokio::task::spawn_blocking(move || {
-            crate::horizon_install::install_if_bundled(&executable, &data_dir)
-        })
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))??;
+    if matches!(body.action, PowerAction::Start | PowerAction::Restart) {
+        prepare_horizon_runtime(&state, &identity, &record).await?;
     }
 
     match body.action {
@@ -806,11 +839,15 @@ async fn prepare_install(
     identity: Identity,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let _server_lock = state.server_mutation_lock.lock().await;
-    authorized(&state, &identity, &id).await?;
+    let server_lock = state.server_mutation_lock.lock().await;
+    let record = authorized(&state, &identity, &id).await?;
+    prepare_horizon_runtime(&state, &identity, &record).await?;
 
     let guardian = state.guardian(&id).await?;
-    guardian.prefetch().await?;
+    let task = guardian.begin_prefetch().await?;
+    drop(server_lock);
+    task.await
+        .map_err(|error| ApiError::Internal(error.into()))??;
 
     tracing::info!(server = %id, "prepared");
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -923,6 +960,61 @@ mod tests {
     #[tokio::test]
     async fn api_kill_can_cancel_preparation_behind_a_resource_lock() {
         power_cancels_preparation(PowerAction::Kill).await;
+    }
+
+    #[tokio::test]
+    async fn api_stop_can_cancel_prefetch_while_the_request_waits() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let state = crate::state::AppState::bootstrap(data_dir.path(), PlayitMode::External)
+            .await
+            .unwrap();
+        let record = ServerRecord {
+            id: "server-1".into(),
+            name: "Server".into(),
+            config: ServerConfig::paper(state.server_dir("server-1"), "1.21.8"),
+            policy: GuardianConfig::default(),
+            playit: None,
+            created_at: "2026-08-29T00:00:00Z".into(),
+            backup_policy: None,
+        };
+        state
+            .store
+            .update(|data| data.servers.push(record.clone()))
+            .await
+            .unwrap();
+        let guardian = state.insert_guardian(&record).await;
+        let resource_lock = guardian.lock_resources().await;
+        let task_state = Arc::clone(&state);
+        let id = record.id.clone();
+        let task =
+            tokio::spawn(
+                async move { prepare_install(State(task_state), operator(), Path(id)).await },
+            );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while guardian.status().await != guardian::ServerStatus::Preparing {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let stopped = tokio::time::timeout(
+            Duration::from_secs(2),
+            power(
+                State(Arc::clone(&state)),
+                operator(),
+                Path(record.id),
+                Json(PowerRequest {
+                    action: PowerAction::Stop,
+                }),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(stopped.0.status, guardian::ServerStatus::Offline);
+        drop(resource_lock);
+        assert!(task.await.unwrap().is_err());
+        state.playit.shutdown().await.unwrap();
     }
 
     #[tokio::test]

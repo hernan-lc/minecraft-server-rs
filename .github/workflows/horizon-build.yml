@@ -31,6 +31,12 @@ jobs:
           sudo rm -f /etc/apt/sources.list.d/microsoft*.list
           sudo apt-get update
           sudo apt-get install -y musl-tools
+      - name: Install LLVM linker
+        if: runner.os == 'Windows'
+        run: |
+          choco install llvm --no-progress -y
+          echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link" >> $env:GITHUB_ENV
       - name: Build and stage runtime
         shell: bash
         run: ./scripts/build-horizon-runtime.sh '${{ matrix.target }}' "$RUNNER_TEMP/horizon"
@@ -48,3 +54,21 @@ jobs:
             test -s "$RUNNER_TEMP/horizon/horizon-engine"
             test -s "$RUNNER_TEMP/horizon/prepare/horizon-prepare"
           fi
+      - name: Build a standalone panel with the runtime embedded
+        shell: bash
+        run: |
+          export MCPANEL_HORIZON_EMBED="$RUNNER_TEMP/horizon"
+          if [[ '${{ matrix.target }}' == aarch64-linux-android ]]; then
+            ./scripts/cargo-android.sh build --locked -p panel --bin mcpanel
+          else
+            cargo build --locked --target '${{ matrix.target }}' -p panel --bin mcpanel
+          fi
+      - name: Verify the panel installs its embedded runtime
+        if: matrix.target != 'aarch64-linux-android' && matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          binary="$PWD/target/${{ matrix.target }}/debug/mcpanel"
+          if [[ '${{ matrix.target }}' == *windows* ]]; then
+            binary="$(cygpath -w "$binary.exe")"
+          fi
+          MCPANEL_EMBED_SMOKE_BIN="$binary" python -m unittest scripts/test_panel_horizon_embedded.py

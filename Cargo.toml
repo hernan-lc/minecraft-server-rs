@@ -31,7 +31,7 @@ axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
-rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+rust-embed = { version = "8", features = ["interpolate-folder-path", "debug-embed"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.9"
 argon2 = "0.5"

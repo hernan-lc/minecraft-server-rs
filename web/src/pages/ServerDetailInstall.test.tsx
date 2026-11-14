@@ -119,7 +119,7 @@ describe("ServerDetail installed build", () => {
     apiMock.prepare.mockResolvedValue({ ok: true });
     apiMock.prepare.mockClear();
     await openSettings(makeServer({ core: "horizon", version: "26.3" }));
-    expect(screen.getByText(/servers\/server-1\/resources/)).toBeInTheDocument();
+    expect(screen.getByText(/panel prepares Horizon and the official Minecraft files/)).toBeInTheDocument();
     expect(screen.queryByText("Java version")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Prepare Horizon" }));
     await waitFor(() => expect(apiMock.prepare).toHaveBeenCalledWith("server-1"));

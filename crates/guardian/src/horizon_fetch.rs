@@ -248,6 +248,17 @@ async fn fetch_one(client: &reqwest::Client, fs: &ScopedFs, item: &Artifact) -> 
     result
 }
 
+async fn fetch_with_retry(client: &reqwest::Client, fs: &ScopedFs, item: &Artifact) -> Result<()> {
+    for attempt in 0..3 {
+        match fetch_one(client, fs, item).await {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt == 2 => return Err(error),
+            Err(_) => tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await,
+        }
+    }
+    unreachable!("the final attempt returns")
+}
+
 /// Fetch the Minecraft inputs expected by Horizon into a private launcher-like directory.
 /// The supplied callback receives a human-readable phase and completed/total item counts.
 pub async fn download_inputs(root: &Path, progress: impl Fn(&str, usize, usize)) -> Result<()> {
@@ -282,25 +293,29 @@ pub async fn download_inputs(root: &Path, progress: impl Fn(&str, usize, usize))
         size: None,
     };
     progress("Minecraft version manifest", 0, 1);
-    fetch_one(&client, &fs, &manifest).await?;
+    fetch_with_retry(&client, &fs, &manifest).await?;
     if fs.metadata(&manifest.path)?.len > MAX_METADATA {
         bail!("Minecraft version manifest is too large");
     }
     let bytes = fs.read_file(&manifest.path)?;
     let (files, index) = manifest_plan(&bytes)?;
-    fetch_one(&client, &fs, &index).await?;
+    fetch_with_retry(&client, &fs, &index).await?;
     if fs.metadata(&index.path)?.len > MAX_METADATA {
         bail!("Minecraft asset index is too large");
     }
     let bytes = fs.read_file(&index.path)?;
-    let assets = assets_plan(&bytes, &index.sha1)?;
-    let total = files.len() + assets.len();
-    let downloads =
-        futures_util::stream::iter(files.iter().chain(assets.iter()).map(|item| async {
-            fetch_one(&client, &fs, item)
-                .await
-                .with_context(|| format!("downloading {}", item.path.display()))
-        }));
+    // A dedicated server needs the client JAR's data, but not the launcher's
+    // optional sound, font and panorama objects (hundreds of megabytes).
+    // The preparer can still read the verified index and omit those extras.
+    let _assets = assets_plan(&bytes, &index.sha1)?;
+    let total = files.len();
+    let client_ref = &client;
+    let fs_ref = &fs;
+    let downloads = futures_util::stream::iter(files.into_iter().map(|item| async move {
+        fetch_with_retry(client_ref, fs_ref, &item)
+            .await
+            .with_context(|| format!("downloading {}", item.path.display()))
+    }));
     let mut downloads = downloads.buffer_unordered(8);
     let mut completed = 0;
     while let Some(result) = downloads.next().await {

@@ -72,11 +72,12 @@ and run `cargo build --release --locked -p panel --bin mcpanel` in Termux.
 
 ## Native Horizon
 
-After building the panel, use `scripts/install-horizon.sh` to build the pinned
-Termux-capable Horizon fork and install it into the panel data directory. The
-installer can import game files prepared from your own Minecraft installation.
-See [Horizon migration](horizon-migration.md) for the command and prerequisites.
-The native server runs without Java; Java may still be needed to prepare files.
+A current release includes Horizon. When started from a recursive source checkout,
+the panel builds its pinned Horizon fork on first start. It then downloads and
+verifies the official Minecraft files and prepares the resources automatically.
+This can take a while and use several hundred megabytes of data and disk space.
+If needed, the panel installs Termux OpenJDK 25 for preparation; the server runs
+natively afterwards. See [Horizon migration](horizon-migration.md).
 
 ## Java versions
 
@@ -116,11 +117,8 @@ settings to allow Termux to run in the background. A wake lock helps with CPU
 sleep but cannot prevent Android from killing the app or its child processes.
 Stop servers through the panel and shut down the panel with Ctrl-C or SIGTERM
 so worlds are saved. Start the panel again after reboot; automatic boot
-startup can be managed separately with Termux:Boot. To resume a particular saved
-server explicitly when starting the panel, add `--start-server <server-id>`;
-repeat the option for several servers. Without that option servers stay stopped.
-This also allows a maintenance restart to resume a server while preserving the
-existing administrator account.
+startup can be managed separately with Termux:Boot. Servers remain stopped
+until started from the panel, and the existing administrator account is kept.
 
 Keep JVM heaps and player counts appropriate to the phone's RAM, thermal
 limits, and storage. Start with a small heap and low view distance. Android commonly blocks `/proc/stat`. The panel estimates host CPU load from

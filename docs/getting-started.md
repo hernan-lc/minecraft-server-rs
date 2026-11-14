@@ -11,7 +11,7 @@ cd minecraft-server-rs
 ./target/release/mcpanel --data-dir ./data --bind 127.0.0.1:8080
 ```
 
-To install the native server and your prepared game files, follow the [Horizon migration guide](horizon-migration.md).
+The first Horizon start installs the runtime and prepares the official game files automatically. See the [Horizon migration guide](horizon-migration.md) for details.
 
 On Windows run the two steps `build.sh` wraps:
 

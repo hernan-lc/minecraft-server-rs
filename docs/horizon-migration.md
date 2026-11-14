@@ -1,70 +1,40 @@
 # Horizon migration (in progress)
 
-Guardian supports an experimental, host-managed Horizon 26.3 runtime. The panel
-can create a Horizon server and initialize its configuration, but does not yet
-install Horizon or prepare its game files. Existing Java server support is still present.
+The panel supports the native Horizon 26.3 server. A new release executable
+contains the pinned Horizon programs and the resource preparer. An administrator
+creates a Horizon server, accepts the Minecraft EULA and selects **Start**. On
+first start, the panel installs Horizon, downloads the official Minecraft files
+and verifies their pinned checksums, then prepares and validates the shared game
+resources. Progress appears in the panel. Later starts reuse the installation
+and verified files.
 
-Build and install `horizon-server` and the headless engine from the pinned
-`vendor/horizon` fork with:
+The first start needs internet access, several hundred megabytes of downloads,
+free disk space for the downloaded and generated files, and time to prepare
+them. It uses Java 25 only to generate the resources: Horizon runs natively.
+The panel installs a managed Java 25 where supported; on Termux it installs the
+`openjdk-25` package when needed. Prepared Minecraft files stay on the host and
+are never included in a release or committed to Git.
+
+From a recursive source checkout, a panel running in that checkout compiles the
+exact pinned, clean Horizon submodule on first start when no runtime is present.
+This requires Git, Rust and a working native compiler, and can take considerably
+longer than starting a release binary. The first installation and preparation
+must be started by an administrator. Existing installations and custom resource
+paths are not overwritten. Older releases or individual binaries built without
+an embedded runtime need a current release or a source checkout.
+
+To install or import manually instead, an administrator can still run:
 
 ```sh
 ./scripts/install-horizon.sh --data-dir ./data --resources /path/to/prepared/26.3
-```
-
-Run this from a recursive clone of the migration branch. The Linux x86-64 panel
-release workflow builds and includes the pinned headless Horizon programs, so
-the same command installs them without a source checkout. Other release packages
-include the installer but not Horizon source or binaries: clone the branch to
-build them, or use `--from-build-dir` with binaries built on the host.
-An administrator can also select **Install bundled Horizon** in the new-server
-form or Horizon server settings when that package is available. This copies the
-bundled programs into the panel data directory; it does not install prepared
-game files. When an administrator starts a Horizon server, the panel also
-installs a trusted bundled runtime automatically if none is installed. Packages
-without bundled programs still require the installer described above. The panel will
-not replace an existing Horizon directory. If copying fails partway, inspect
-that directory before retrying.
-
-The panel-side install action is administrator-only and reads only the bundle
-next to the panel executable. On Unix it requires the bundle and its parent
-directory to share the executable's owner and reject group/other writes.
-From a source checkout, its opt-in HTTP smoke test can be run with
-`MCPANEL_SMOKE_BIN`, `HORIZON_SMOKE_SERVER`, and `HORIZON_SMOKE_ENGINE` set to
-local executable paths: `python3 -m unittest scripts/test_panel_horizon_bundle.py`.
-The test uses a temporary panel data directory and does not start Minecraft.
-
-The script builds the pinned, clean submodule and validates both executables.
-Use `--debug` for a debug build, or `--from-build-dir /path/to/target/debug`
-to install trusted binaries already built for this host. `--resources` is
-optional; when supplied, Horizon validates and copies the prepared game files
-into a shared location under `data/horizon/.local/`. The platform sandbox mounts
-that installation read-only when available. The script never
-replaces an existing installation. Stop any running servers and manage updates
-explicitly. The installation directory must be administrator-owned and outside
-every writable server directory. The panel does not download these executables.
-Server settings report whether both programs pass filesystem checks; this does
-not validate their compatibility or the prepared game files.
-
-If Horizon is already installed without shared game files, add them without
-replacing either program:
-
-```sh
 ./scripts/install-horizon.sh --data-dir ./data --import-resources /path/to/prepared/26.3
 ```
 
-Horizon validates the supplied files before they are copied. Existing shared
-files are not replaced; if an interrupted copy leaves an incomplete directory,
-inspect it before retrying. Restart servers to use newly added shared files.
-
-Prepare Horizon's game files from your own Minecraft installation as described
-in `vendor/horizon/docs/hosting.md`. Supply the prepared directory to the
-installer, or place a copy in an individual server's `resources/` directory.
-The prepared game files come from your own Minecraft installation and must not
-be committed or redistributed. Preparation may require Java; running the native
-server does not. On first preparation or start, the panel runs Horizon's
-initializer in a private staging directory. For an existing vanilla server, it
-imports `server.properties` and leaves the original file and world in place;
-back up the world before converting. Java plugins and mods cannot run in Horizon.
+The second command adds resources to an existing runtime. An individual server
+can also provide its own prepared `resources/` directory or explicit resource
+path. Horizon validates imports; incomplete or existing destinations are not
+replaced. Back up a world before converting it. Java plugins and mods cannot run
+in Horizon.
 
 Horizon and version 26.3 are selected by default when creating a server; Java
 providers remain available. The creation form reports when the Horizon programs
@@ -131,8 +101,8 @@ needs another sample before its CPU usage can be shown.
 Horizon is started as `horizon-server run` and receives console commands and
 `stop` over stdin. Linux and macOS use their platform sandbox when available;
 Android and platforms without a supported sandbox require the existing explicit
-`--allow-unsandboxed-servers` setting. Panel installation of prepared game files,
-full installation validation, enforced resource limits, and cross-platform
+`--allow-unsandboxed-servers` setting. Horizon validates generated resources
+before publication. Enforced native resource limits and cross-platform game
 end-to-end validation remain unfinished. The pinned Horizon fork advertises a
 force-stop control protocol: the supervisor kills and reaps its engine before
 exiting. Older binaries without this protocol cannot be force-stopped by the

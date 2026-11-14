@@ -556,6 +556,18 @@ impl Guardian {
     /// no-op when already installed. The server is moved to `Preparing` and
     /// back to `Offline` so the UI can show progress.
     pub async fn prefetch(self: &Arc<Self>) -> Result<ServerEnvironment> {
+        let task = self.begin_prefetch().await?;
+        match task.await {
+            Ok(result) => result,
+            Err(error) => Err(Error::Task(error.to_string())),
+        }
+    }
+
+    /// Reserve a preparation immediately and return its task to the caller.
+    /// This allows panel locks to be released while preparation is running.
+    pub async fn begin_prefetch(
+        self: &Arc<Self>,
+    ) -> Result<tokio::task::JoinHandle<Result<ServerEnvironment>>> {
         let task = {
             let mut state = self.state.lock().await;
             let current = state.status.unwrap_or(ServerStatus::Offline);
@@ -606,10 +618,7 @@ impl Guardian {
             status: ServerStatus::Preparing,
         });
 
-        match task.await {
-            Ok(result) => result,
-            Err(error) => Err(Error::Task(error.to_string())),
-        }
+        Ok(task)
     }
 
     async fn provision(

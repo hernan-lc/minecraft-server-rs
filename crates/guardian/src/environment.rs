@@ -484,7 +484,7 @@ pub(crate) async fn prepare_horizon(
     config: &ServerConfig,
     data_dir: &Path,
     policy: crate::sandbox::SandboxPolicy,
-    on_progress: impl Fn(String, Option<f32>),
+    on_progress: impl Fn(String, Option<f32>) + Send + Sync + Clone + 'static,
 ) -> Result<ServerEnvironment> {
     if !config.eula_accepted {
         return Err(Error::EulaNotAccepted);
@@ -497,6 +497,34 @@ pub(crate) async fn prepare_horizon(
     }
     let installation = absolute(data_dir.join("horizon"));
     let directory = absolute(config.directory.clone());
+    let runtime_present = crate::sandbox::horizon_programs_present(&installation);
+    let needs_runtime = !runtime_present && !installation.exists();
+    let needs_preparer = runtime_present
+        && !installation.join("prepare").exists()
+        && !installation
+            .join(".local/horizon-client")
+            .join(crate::config::HORIZON_VERSION)
+            .exists()
+        && !directory.join("resources").exists()
+        && !crate::horizon_prepare::has_custom_resources(&directory);
+    if needs_runtime || needs_preparer {
+        if let Ok(executable) = std::env::current_exe() {
+            let expected = format!("mcpanel{}", std::env::consts::EXE_SUFFIX);
+            if executable
+                .file_name()
+                .is_some_and(|name| name == expected.as_str())
+            {
+                if let Some(checkout) = crate::horizon_build::checkout_for(&executable) {
+                    crate::horizon_build::build_from_checkout(
+                        &checkout,
+                        data_dir,
+                        on_progress.clone(),
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
     // This also rejects missing executables, unsafe layouts and symlink escapes.
     crate::sandbox::horizon_command(&installation, &directory, policy).map_err(|error| {
         match error {
@@ -539,6 +567,22 @@ pub(crate) async fn prepare_horizon(
     })?;
     check_migrated_world(&fs, &directory, &document)?;
     check_paper_world_layout(&fs, &directory, &document)?;
+    let custom_resources = document
+        .get("engine")
+        .and_then(|table| table.get("resources"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|path| !path.trim().is_empty());
+    if !custom_resources && installation.join("prepare").is_dir() {
+        let resolver = JavaResolver::new(data_dir);
+        crate::horizon_prepare::prepare_resources(
+            &installation,
+            &directory,
+            data_dir,
+            &resolver,
+            on_progress.clone(),
+        )
+        .await?;
+    }
     for (section, key, value) in [
         ("server", "port", toml_edit::value(i64::from(config.port))),
         ("engine", "restart_on_crash", toml_edit::value(false)),

@@ -71,9 +71,10 @@ async fn providers(
     let data_dir = state.data_dir.clone();
     let (present, bundled) = tokio::task::spawn_blocking(move || {
         let present = guardian::sandbox::horizon_programs_present(&data_dir.join("horizon"));
-        let bundled = std::env::current_exe()
-            .ok()
-            .is_some_and(|exe| crate::horizon_install::bundled_programs(&exe, &data_dir).is_some());
+        let bundled = crate::horizon_install::embedded_programs()
+            || std::env::current_exe().ok().is_some_and(|exe| {
+                crate::horizon_install::bundled_programs(&exe, &data_dir).is_some()
+            });
         (present, bundled)
     })
     .await
@@ -92,6 +93,7 @@ async fn install_bundled_horizon(
     State(state): State<Arc<AppState>>,
     AdminIdentity(_): AdminIdentity,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let _server_lock = state.server_mutation_lock.lock().await;
     let data_dir = state.data_dir.clone();
     let executable = std::env::current_exe().map_err(|e| ApiError::Internal(e.into()))?;
     tokio::task::spawn_blocking(move || {

@@ -159,7 +159,7 @@ describe("Dashboard create server form", () => {
     await screen.findByRole("option", { name: "horizon" });
     expect(screen.getByTestId("server-core")).toHaveValue("horizon");
     expect(screen.getByText(/Horizon programs are missing or inaccessible/)).toBeInTheDocument();
-    expect(screen.getByText(/install-horizon.sh/)).toBeInTheDocument();
+    expect(screen.getByText(/first start builds Horizon automatically/)).toBeInTheDocument();
     await screen.findByText(/Horizon runs natively/);
     expect(screen.queryByTestId("server-java")).toBeNull();
     const create = screen.getByRole("button", { name: "Create server" });
@@ -182,7 +182,7 @@ describe("Dashboard create server form", () => {
     fireEvent.click(screen.getByRole("button", { name: "New server" }));
     fireEvent.click(await screen.findByRole("button", { name: "Install bundled Horizon" }));
     await waitFor(() => expect(apiMock.installBundledHorizon).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText(/Prepared game files are still required/)).toBeInTheDocument();
+    expect(await screen.findByText(/Game files will be prepared on start/)).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole("button", { name: "Install bundled Horizon" })).not.toBeInTheDocument());
   });
 

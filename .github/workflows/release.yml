@@ -126,6 +126,13 @@ jobs:
         shell: bash
         run: test -f assets/mcp.ico || (echo "::error::assets/mcp.ico missing — tray builds will fail"; exit 1)
 
+      # Build first so the panel executable can embed the target's runtime.
+      - name: Build pinned Horizon runtime
+        shell: bash
+        run: |
+          ./scripts/build-horizon-runtime.sh '${{ matrix.target }}' "$RUNNER_TEMP/horizon"
+          echo "MCPANEL_HORIZON_EMBED=$RUNNER_TEMP/horizon" >> "$GITHUB_ENV"
+
       - name: Build Android (Termux)
         if: matrix.target == 'aarch64-linux-android'
         run: ./scripts/cargo-android.sh
@@ -133,25 +140,6 @@ jobs:
       - name: Build
         if: matrix.target != 'aarch64-linux-android'
         run: ${{ runner.os == 'Windows' && format('npm run build:native -- --target {0} --bin mcpanel', matrix.target) || format('cargo build --release --locked --target {0} -p panel --bin mcpanel {1}', matrix.target, matrix.features && format('--features panel/{0}', matrix.features) || '') }}
-
-      # Horizon upstream publishes its headless build for this native target.
-      # Build from the exact submodule revision rather than an unpinned nightly.
-      - name: Build pinned Horizon server for Linux x86-64
-        if: matrix.name == 'linux-x86_64'
-        shell: bash
-        run: |
-          set -euo pipefail
-          pinned=$(git rev-parse HEAD:vendor/horizon)
-          actual=$(git -C vendor/horizon rev-parse HEAD)
-          test "$pinned" = "$actual"
-          git -C vendor/horizon diff --exit-code
-          git -C vendor/horizon diff --cached --exit-code
-          cd vendor/horizon
-          cargo build --release --locked -p horizon-client --no-default-features --bin horizon-client
-          cargo build --release --locked -p horizon-server --bin horizon-server
-          client_help=$(target/release/horizon-client --help)
-          server_help=$(target/release/horizon-server --help)
-          [[ "$client_help" == *--resources* && "$server_help" == *26.3* ]]
 
       - name: Package (unix)
         if: runner.os != 'Windows'
@@ -165,12 +153,6 @@ jobs:
           mkdir "$staging/docs" "$staging/scripts"
           cp docs/termux.md docs/horizon-migration.md "$staging/docs/"
           cp scripts/install-horizon.sh scripts/migrate-paper-world.py "$staging/scripts/"
-          if [ "${{ matrix.name }}" = "linux-x86_64" ]; then
-            mkdir -p "$staging/runtime/horizon"
-            cp vendor/horizon/target/release/horizon-server "$staging/runtime/horizon/horizon-server"
-            cp vendor/horizon/target/release/horizon-client "$staging/runtime/horizon/horizon-engine"
-            git rev-parse HEAD:vendor/horizon > "$staging/runtime/horizon/REVISION"
-          fi
           tar czf "${staging}.tar.gz" "$staging"
           echo "ASSET=${staging}.tar.gz" >> "$GITHUB_ENV"
 
