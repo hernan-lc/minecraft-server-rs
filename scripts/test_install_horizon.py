@@ -180,7 +180,8 @@ class InstallHorizonTests(unittest.TestCase):
             'printf "%s\\n" "$*" >> "$HORIZON_TEST_CARGO_LOG"\n'
             'mkdir -p "$CARGO_TARGET_DIR/debug"\n'
             'case "$*" in *"-p horizon-client"*) name=horizon-client;; '
-            '*"-p horizon-server"*) name=horizon-server;; *) exit 1;; esac\n'
+            '*"-p horizon-server"*) name=horizon-server;; '
+            '*"-p horizon-prepare"*) name=horizon-prepare;; *) exit 1;; esac\n'
             'printf "#!%s\\necho Horizon Minecraft 26.3\\nexit 0\\n" "$HORIZON_TEST_SHELL" > "$CARGO_TARGET_DIR/debug/$name"\n'
             'chmod 700 "$CARGO_TARGET_DIR/debug/$name"\n'
         )
@@ -193,10 +194,13 @@ class InstallHorizonTests(unittest.TestCase):
                                 env=environment, text=True, capture_output=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = log.read_text().splitlines()
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
         self.assertIn("--locked -p horizon-client --no-default-features --bin horizon-client", calls[0])
         self.assertIn("--locked -p horizon-server --bin horizon-server", calls[1])
+        self.assertIn("--locked -p horizon-prepare --bin horizon-prepare", calls[2])
         self.assertTrue((self.data / "horizon/horizon-engine").is_file())
+        self.assertTrue((self.data / "horizon/prepare/horizon-prepare").is_file())
+        self.assertTrue((self.data / "horizon/prepare/research-lock.json").is_file())
         self.assert_no_staging()
 
     def test_packaged_installer_accepts_binaries_without_a_source_checkout(self):

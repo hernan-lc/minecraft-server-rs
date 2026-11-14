@@ -134,6 +134,7 @@ if [[ -z "$build_dir" ]]; then
   [[ "$profile" == release ]] && build_args+=(--release)
   (cd "$source_dir" && cargo "${build_args[@]}" -p horizon-client --no-default-features --bin horizon-client)
   (cd "$source_dir" && cargo "${build_args[@]}" -p horizon-server --bin horizon-server)
+  (cd "$source_dir" && cargo "${build_args[@]}" -p horizon-prepare --bin horizon-prepare)
   target_dir="${CARGO_TARGET_DIR:-target}"
   [[ "$target_dir" = /* ]] || target_dir="$source_dir/$target_dir"
   build_dir="$target_dir/$profile"
@@ -160,6 +161,19 @@ trap cleanup EXIT
 cp -- "$server" "$stage/horizon-server$suffix"
 cp -- "$engine" "$stage/horizon-engine$suffix"
 chmod 700 "$stage/horizon-server$suffix" "$stage/horizon-engine$suffix"
+# A source build or a complete release bundle also supplies the preparer and
+# its own Java exporter sources. The legacy two-program import remains valid.
+if [[ -f "$build_dir/prepare/horizon-prepare$suffix" ]]; then
+  cp -R -- "$build_dir/prepare" "$stage/prepare"
+elif [[ -f "$build_dir/horizon-prepare$suffix" && -f "$repo_root/vendor/horizon/research-lock.json" ]]; then
+  mkdir -p "$stage/prepare/mods/horizon/src/test"
+  cp -- "$build_dir/horizon-prepare$suffix" "$stage/prepare/horizon-prepare$suffix"
+  cp -- "$repo_root/vendor/horizon/research-lock.json" "$stage/prepare/research-lock.json"
+  cp -R -- "$repo_root/vendor/horizon/mods/horizon/src/test/java" "$stage/prepare/mods/horizon/src/test/"
+fi
+if [[ -f "$stage/prepare/horizon-prepare$suffix" ]]; then
+  chmod 700 "$stage/prepare/horizon-prepare$suffix"
+fi
 if ! server_help="$("$stage/horizon-server$suffix" --help)" || ! "$stage/horizon-engine$suffix" --help >/dev/null; then
   echo "The Horizon programs could not run on this host." >&2
   exit 1
@@ -193,6 +207,7 @@ if ! mkdir -- "$destination"; then
 fi
 claimed=1
 if [[ -d "$stage/.local" ]]; then mv "$stage/.local" "$destination/.local"; fi
+if [[ -d "$stage/prepare" ]]; then mv "$stage/prepare" "$destination/prepare"; fi
 mv "$stage/horizon-engine$suffix" "$destination/horizon-engine$suffix"
 mv "$stage/horizon-server$suffix" "$destination/horizon-server$suffix"
 complete=1
