@@ -272,6 +272,8 @@ async fn build_with_cargo(
                 .map_err(|e| Error::io(&output, e))?;
         }
     }
+    // Windows does not allow a directory to be renamed while its handle is open.
+    drop(prepare_fs);
     if runtime_present {
         // Preserve the existing server and engine, adding only the missing
         // preparer. A newly claimed directory is never merged with user data.
