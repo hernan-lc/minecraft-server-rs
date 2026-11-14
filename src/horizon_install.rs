@@ -4,6 +4,21 @@ use crate::error::{ApiError, ApiResult};
 use guardian::ScopedFs;
 use std::path::{Path, PathBuf};
 
+/// Install a trusted bundled runtime on first use, leaving existing installs alone.
+pub fn install_if_bundled(executable: &Path, data_dir: &Path) -> ApiResult<()> {
+    if data_dir.join("horizon").exists() || bundled_programs(executable, data_dir).is_none() {
+        return Ok(());
+    }
+    match install_bundled(executable, data_dir) {
+        Err(ApiError::Conflict(_))
+            if guardian::sandbox::horizon_programs_present(&data_dir.join("horizon")) =>
+        {
+            Ok(())
+        }
+        result => result,
+    }
+}
+
 /// Locate a release bundle without accepting a path from an API caller.
 pub fn bundled_programs(executable: &Path, data_dir: &Path) -> Option<PathBuf> {
     let executable = std::fs::canonicalize(executable).ok()?;
@@ -150,6 +165,20 @@ mod tests {
             Err(ApiError::Conflict(_))
         ));
         assert_eq!(std::fs::read(server).unwrap(), b"horizon-server");
+    }
+
+    #[test]
+    fn automatic_install_uses_the_bundle_once_and_preserves_existing_files() {
+        let root = tempfile::tempdir().unwrap();
+        let (exe, data) = fixture(root.path());
+        install_if_bundled(&exe, &data).unwrap();
+        let server = data.join(format!(
+            "horizon/horizon-server{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        std::fs::write(&server, b"existing").unwrap();
+        install_if_bundled(&exe, &data).unwrap();
+        assert_eq!(std::fs::read(server).unwrap(), b"existing");
     }
 
     #[test]

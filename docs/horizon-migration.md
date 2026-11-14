@@ -19,7 +19,9 @@ build them, or use `--from-build-dir` with binaries built on the host.
 An administrator can also select **Install bundled Horizon** in the new-server
 form or Horizon server settings when that package is available. This copies the
 bundled programs into the panel data directory; it does not install prepared
-game files. The panel will
+game files. When an administrator starts a Horizon server, the panel also
+installs a trusted bundled runtime automatically if none is installed. Packages
+without bundled programs still require the installer described above. The panel will
 not replace an existing Horizon directory. If copying fails partway, inspect
 that directory before retrying.
 

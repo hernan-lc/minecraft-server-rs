@@ -731,8 +731,21 @@ async fn power(
     Json(body): Json<PowerRequest>,
 ) -> ApiResult<Json<guardian::Snapshot>> {
     let _server_lock = state.server_mutation_lock.lock().await;
-    authorized(&state, &identity, &id).await?;
+    let record = authorized(&state, &identity, &id).await?;
     let guardian = state.guardian(&id).await?;
+
+    if identity.admin
+        && record.config.core.eq_ignore_ascii_case("horizon")
+        && matches!(body.action, PowerAction::Start | PowerAction::Restart)
+    {
+        let data_dir = state.data_dir.clone();
+        let executable = std::env::current_exe().map_err(|e| ApiError::Internal(e.into()))?;
+        tokio::task::spawn_blocking(move || {
+            crate::horizon_install::install_if_bundled(&executable, &data_dir)
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))??;
+    }
 
     match body.action {
         PowerAction::Start => guardian.start().await?,
