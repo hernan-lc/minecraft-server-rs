@@ -1346,6 +1346,7 @@ dependencies = [
 name = "guardian"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "cap-fs-ext",
  "cap-std",
@@ -1353,8 +1354,10 @@ dependencies = [
  "futures-util",
  "java-path",
  "minecraft-core",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha1",
  "tar",
  "tempfile",
  "thiserror 2.0.20",

@@ -23,6 +23,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
+anyhow.workspace = true
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+sha1 = "0.10"
 cap-fs-ext = "4.0.3"
 cap-std = "4.0.3"
 tar = "0.4"
@@ -34,4 +38,3 @@ tempfile = "3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
-futures-util = "0.3"

@@ -31,6 +31,7 @@ pub mod error;
 pub mod events;
 pub mod fs;
 pub mod hidden;
+pub mod horizon_fetch;
 pub mod install;
 pub mod java;
 pub mod process;

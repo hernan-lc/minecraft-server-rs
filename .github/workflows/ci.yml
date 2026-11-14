@@ -22,6 +22,10 @@ permissions:
   contents: read
 
 jobs:
+  horizon-runtime-compatibility:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/horizon-build.yml
+
   backend:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
