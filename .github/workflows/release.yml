@@ -139,7 +139,7 @@ jobs:
 
       - name: Build
         if: matrix.target != 'aarch64-linux-android'
-        run: ${{ runner.os == 'Windows' && format('npm run build:native -- --target {0} --bin mcpanel', matrix.target) || format('cargo build --release --locked --target {0} -p panel --bin mcpanel {1}', matrix.target, matrix.features && format('--features panel/{0}', matrix.features) || '') }}
+        run: ${{ runner.os == 'Windows' && format('npm run build:native -- build --release --locked --target {0} -p panel --bin mcpanel', matrix.target) || format('cargo build --release --locked --target {0} -p panel --bin mcpanel {1}', matrix.target, matrix.features && format('--features panel/{0}', matrix.features) || '') }}
 
       - name: Package (unix)
         if: runner.os != 'Windows'
