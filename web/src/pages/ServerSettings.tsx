@@ -1,6 +1,6 @@
 import { lazy, Suspense } from "preact/compat";
 import { Loading } from "../components/Loading";
-import { useState } from "preact/hooks";
+import { useRef, useState } from "preact/hooks";
 import { api } from "../api";
 import { Compatibility } from "../components/Compatibility";
 import {
@@ -25,13 +25,14 @@ import type {
 
 const ChangeServerVersion = lazy(() => import("../components/ChangeServerVersion").then(m => ({ default: m.ChangeServerVersion })));
 
-function Installed({ server, onChanged }: { server: Server; onChanged: () => void }) {
+function Installed({ server, onChanged, admin }: { server: Server; onChanged: () => void; admin: boolean }) {
   const t = useT();
   const toast = useToast();
   const dialogs = useDialogs();
   const [busy, setBusy] = useState(false);
   const [compatible, setCompatible] = useState(false);
   const [changingVersion, setChangingVersion] = useState(false);
+  const installRef = useRef(false);
 
   const lifecycleBusy = server.status !== "offline" && server.status !== "crashed";
 
@@ -57,7 +58,7 @@ function Installed({ server, onChanged }: { server: Server; onChanged: () => voi
   }
 
   async function prepare() {
-    if (busy || lifecycleBusy || !compatible) return;
+    if (busy || lifecycleBusy || (server.core !== "horizon" && !compatible)) return;
     setBusy(true);
     try {
       await api.prepare(server.id);
@@ -68,6 +69,39 @@ function Installed({ server, onChanged }: { server: Server; onChanged: () => voi
     } finally {
       setBusy(false);
     }
+  }
+
+  async function installBundle() {
+    if (busy || installRef.current) return;
+    installRef.current = true;
+    setBusy(true);
+    try {
+      await api.installBundledHorizon();
+      toast.success(t("createServer.nativeProgramsInstalled"));
+      onChanged();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t("errors.actionFailed"));
+    } finally {
+      installRef.current = false;
+      setBusy(false);
+    }
+  }
+
+  if (server.core === "horizon") {
+    return <Card title={t("settings.installSection")}>
+      {server.horizon_programs_present != null && <p class="mb-2 text-sm">
+        {t(server.horizon_programs_present ? "createServer.nativeProgramsPresent" : "createServer.nativeProgramsMissing")}
+      </p>}
+      <p class="text-sm text-fg-muted">{t("createServer.nativeSetup", { id: server.id })}</p>
+      <div class="mt-4 flex flex-col gap-2 sm:flex-row">
+        {admin && server.horizon_programs_present === false && server.horizon_programs_bundled &&
+          <Button disabled={busy} onClick={() => void installBundle()}>{busy ? t("createServer.nativeInstalling") : t("createServer.nativeInstallBundle")}</Button>}
+        <Button disabled={busy || lifecycleBusy} onClick={() => setChangingVersion(true)}>{t("settings.changeVersion")}</Button>
+        <Button variant="primary" disabled={busy || lifecycleBusy} onClick={prepare}>{busy ? t("settings.updating") : t("createServer.nativePrepare")}</Button>
+      </div>
+      {server.pending_restart && <div class="mt-3"><Banner kind="info">{t("settings.pendingRestart")}</Banner></div>}
+      {changingVersion && <Suspense fallback={<Loading />}><ChangeServerVersion server={server} onClose={() => setChangingVersion(false)} onSaved={onChanged} /></Suspense>}
+    </Card>;
   }
 
   return (
@@ -182,7 +216,7 @@ export function Settings({
         name: form.name,
         port: form.port,
         java_major: form.java_major,
-        memory: { min_mb: form.min_mb, max_mb: form.max_mb },
+        memory: { min_mb: server.core === "horizon" ? Math.min(form.min_mb, form.max_mb) : form.min_mb, max_mb: form.max_mb },
         eula_accepted: form.eula_accepted,
         policy: {
           ...server.policy,
@@ -236,7 +270,7 @@ export function Settings({
               onInput={(e) => set({ port: Number((e.target as HTMLInputElement).value) })}
             />
           </Field>
-          <Field label={t("createServer.javaVersion")}>
+          {server.core !== "horizon" && <Field label={t("createServer.javaVersion")}>
             <Select
               value={String(form.java_major)}
               onChange={(e) => set({ java_major: Number((e.target as HTMLSelectElement).value) })}
@@ -247,16 +281,16 @@ export function Settings({
                 </option>
               ))}
             </Select>
-          </Field>
+          </Field>}
           <div class="grid grid-cols-2 gap-3">
-            <Field label={t("createServer.minRam")}>
+            {server.core !== "horizon" && <Field label={t("createServer.minRam")}>
               <Input
                 type="number"
                 value={form.min_mb}
                 onInput={(e) => set({ min_mb: Number((e.target as HTMLInputElement).value) })}
               />
-            </Field>
-            <Field label={t("createServer.maxRam")}>
+            </Field>}
+            <Field label={t(server.core === "horizon" ? "createServer.nativeReservation" : "createServer.maxRam")}>
               <Input
                 type="number"
                 value={form.max_mb}
@@ -264,7 +298,7 @@ export function Settings({
               />
             </Field>
           </div>
-          {user.admin && (
+          {user.admin && server.core !== "horizon" && (
             <div class="sm:col-span-2">
               <Field label={t("settings.extraFlags")} hint={t("settings.extraFlagsHint")}>
                 <Input
@@ -276,6 +310,7 @@ export function Settings({
             </div>
           )}
         </div>
+        {server.core === "horizon" && <div class="mt-3"><Banner kind="info">{t("createServer.horizonHint")}</Banner></div>}
 
         <label class="mt-3 flex items-start gap-2.5 border-t border-ink-700 pt-3 text-sm text-fg-muted sm:mt-4 sm:items-center">
           <input
@@ -297,7 +332,7 @@ export function Settings({
         </details>
       )}
 
-      <Installed server={server} onChanged={onSaved} />
+      <Installed server={server} onChanged={onSaved} admin={user.admin} />
 
       <details class="rounded-xl border border-ink-700 p-4">
         <summary class="cursor-pointer font-semibold">{t("settings.recoverySection")}</summary>

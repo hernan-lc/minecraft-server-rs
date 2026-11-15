@@ -11,7 +11,8 @@
 use guardian::events::Stream;
 use guardian::sandbox::SandboxPolicy;
 use guardian::{
-    Guardian, GuardianConfig, ServerConfig, ServerEnvironment, ServerEvent, ServerStatus,
+    Guardian, GuardianConfig, ServerConfig, ServerEnvironment, ServerEvent, ServerRuntime,
+    ServerStatus,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -38,9 +39,11 @@ fn guardian_with(
 
     let guardian = Guardian::new_with_sandbox_policy(config, policy, dir, SandboxPolicy::new(true));
     let environment = ServerEnvironment {
-        java: fake_java(),
-        java_major: 21,
-        jar: dir.join("server.jar"),
+        runtime: ServerRuntime::Java {
+            java: fake_java(),
+            java_major: 21,
+            jar: dir.join("server.jar"),
+        },
         directory: dir.to_path_buf(),
     };
     futures_block_on(guardian.set_environment(environment));
@@ -94,6 +97,348 @@ async fn a_server_that_logs_done_becomes_online_and_stops_gracefully() {
         "expected a clean stop notice, got: {console:?}"
     );
     assert!(!console.iter().any(|l| l.line.contains("unexpectedly")));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn horizon_force_stop_uses_advertised_supervisor_protocol() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let install = root.path().join("horizon");
+    let server = root.path().join("servers/world");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::create_dir_all(&server).unwrap();
+    std::fs::write(server.join("server.toml"), "[server]\nport = 25565\n").unwrap();
+    let shell = if cfg!(target_os = "android") {
+        "/data/data/com.termux/files/usr/bin/sh"
+    } else {
+        "/bin/sh"
+    };
+    let script = format!("#!{shell}\nprintf '%s\\n' '[mcpanel] force-stop-v1' '[Server thread/INFO]: Done (0.1s)! For help, type help'\nwhile IFS= read -r line; do\n  [ \"$line\" = mcpanel:force-stop ] && exit 0\ndone\n");
+    for name in ["horizon-server", "horizon-engine"] {
+        let path = install.join(name);
+        std::fs::write(&path, script.as_bytes()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut config = ServerConfig::paper(&server, "26.3");
+    config.core = "horizon".into();
+    config.eula_accepted = true;
+    let guardian = Guardian::new_with_sandbox_policy(
+        config,
+        GuardianConfig::default(),
+        root.path(),
+        SandboxPolicy::new(true),
+    );
+    let mut events = guardian.subscribe();
+    guardian.start().await.unwrap();
+    await_status(&mut events, ServerStatus::Online).await;
+    assert!(guardian.snapshot().await.force_kill_available);
+    guardian.kill().await.unwrap();
+    await_status(&mut events, ServerStatus::Offline).await;
+    assert!(!guardian.snapshot().await.force_kill_available);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn horizon_is_prepared_and_supervised_without_java() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let install = root.path().join("horizon");
+    let server = root.path().join("servers/world");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::create_dir_all(&server).unwrap();
+    let shell = if cfg!(target_os = "android") {
+        "/data/data/com.termux/files/usr/bin/sh"
+    } else {
+        "/bin/sh"
+    };
+    let script = format!("#!{shell}\n[ \"$1\" = run ] || exit 7\nprintf '%s\\n' '[Server thread/INFO]: Done (0.1s)! For help, type help'\nwhile IFS= read -r line; do\n  [ \"$line\" = stop ] && exit 0\n  printf 'echoed: %s\\n' \"$line\"\ndone\n");
+    for name in ["horizon-server", "horizon-engine"] {
+        let path = install.join(name);
+        std::fs::write(&path, script.as_bytes()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(
+        server.join("server.toml"),
+        "[server]\nport = 25565\nmotd = 'preserved'\n[world]\nname = 'existing-world'\n",
+    )
+    .unwrap();
+    let mut config = ServerConfig::paper(&server, "26.3");
+    config.core = "horizon".into();
+    config.port = 25577;
+    config.eula_accepted = true;
+    let guardian = Guardian::new_with_sandbox_policy(
+        config.clone(),
+        GuardianConfig::default(),
+        root.path(),
+        SandboxPolicy::new(true),
+    );
+    let mut events = guardian.subscribe();
+    guardian.start().await.unwrap();
+    await_status(&mut events, ServerStatus::Online).await;
+    assert!(
+        guardian.kill().await.is_err(),
+        "a force kill must not orphan Horizon's engine"
+    );
+    assert_eq!(guardian.status().await, ServerStatus::Online);
+    guardian.command("say hello").await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !guardian
+        .console()
+        .await
+        .iter()
+        .any(|line| line.line == "echoed: say hello")
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "command was not forwarded"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    guardian.stop().await.unwrap();
+    await_status(&mut events, ServerStatus::Offline).await;
+    let text = std::fs::read_to_string(server.join("server.toml")).unwrap();
+    let doc = text.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(doc["server"]["port"].as_integer(), Some(25577));
+    assert_eq!(doc["server"]["motd"].as_str(), Some("preserved"));
+    assert_eq!(doc["world"]["name"].as_str(), Some("existing-world"));
+    assert_eq!(doc["engine"]["restart_on_crash"].as_bool(), Some(false));
+    assert_eq!(doc["panel"]["bind"].as_str(), Some(""));
+    assert!(!server.join("server.jar").exists());
+
+    config.port = 25578;
+    guardian.set_config(config.clone()).await;
+    guardian.start().await.unwrap();
+    await_status(&mut events, ServerStatus::Online).await;
+    let text = std::fs::read_to_string(server.join("server.toml")).unwrap();
+    assert_eq!(
+        text.parse::<toml_edit::DocumentMut>().unwrap()["server"]["port"].as_integer(),
+        Some(25578)
+    );
+    guardian.stop().await.unwrap();
+    await_status(&mut events, ServerStatus::Offline).await;
+    config.eula_accepted = false;
+    guardian.set_config(config).await;
+    guardian.start().await.unwrap();
+    await_status(&mut events, ServerStatus::Offline).await;
+    assert!(guardian
+        .console()
+        .await
+        .iter()
+        .any(|line| line.line.contains("EULA")));
+}
+
+/// Opt-in smoke test against locally prepared Horizon binaries and game files.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires HORIZON_SMOKE_SERVER, HORIZON_SMOKE_ENGINE and HORIZON_SMOKE_RESOURCES"]
+async fn real_horizon_starts_and_stops() {
+    let source = |name| std::env::var_os(name).expect(name);
+    let root = tempfile::tempdir().unwrap();
+    let installation = root.path().join("horizon");
+    let directory = root.path().join("servers/smoke");
+    std::fs::create_dir_all(&installation).unwrap();
+    std::fs::create_dir_all(&directory).unwrap();
+    for (variable, name) in [
+        ("HORIZON_SMOKE_SERVER", "horizon-server"),
+        ("HORIZON_SMOKE_ENGINE", "horizon-engine"),
+    ] {
+        let source = PathBuf::from(source(variable));
+        let target = installation.join(name);
+        std::fs::hard_link(&source, &target)
+            .or_else(|_| std::fs::copy(&source, &target).map(|_| ()))
+            .unwrap();
+    }
+    let resource_target = if std::env::var_os("HORIZON_SMOKE_SHARED").is_some() {
+        let shared = installation.join(".local/horizon-client");
+        std::fs::create_dir_all(&shared).unwrap();
+        shared.join("26.3")
+    } else {
+        directory.join("resources")
+    };
+    std::os::unix::fs::symlink(source("HORIZON_SMOKE_RESOURCES"), resource_target).unwrap();
+    std::fs::write(directory.join("server.properties"), "server-ip=127.0.0.1\nonline-mode=false\nwhite-list=false\nview-distance=2\nsimulation-distance=2\nlevel-name=smoke-world\nmotd=Imported settings\n").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let mut config = ServerConfig::paper(&directory, "26.3");
+    config.core = "horizon".into();
+    config.port = port;
+    config.eula_accepted = true;
+    let guardian = Guardian::new_with_sandbox_policy(
+        config,
+        GuardianConfig {
+            stop_timeout_secs: 120,
+            ..Default::default()
+        },
+        root.path(),
+        SandboxPolicy::new(true),
+    );
+    let mut events = guardian.subscribe();
+    guardian.start().await.unwrap();
+    let ready = tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            match events.recv().await.unwrap() {
+                ServerEvent::Status {
+                    status: ServerStatus::Online,
+                } => return true,
+                ServerEvent::Status {
+                    status: ServerStatus::Offline | ServerStatus::Crashed,
+                } => return false,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    let listening = ready
+        && tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let engine_pids: Vec<u32> = if ready && std::env::var_os("HORIZON_SMOKE_FORCE_STOP").is_some() {
+        let pid = guardian.snapshot().await.pid.unwrap();
+        // Android can omit task/*/children even for our own processes.
+        std::fs::read_dir("/proc")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let child: u32 = entry.file_name().to_str()?.parse().ok()?;
+                let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
+                let fields = stat.rsplit_once(')')?.1;
+                let parent: u32 = fields.split_whitespace().nth(1)?.parse().ok()?;
+                (parent == pid).then_some(child)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let force = ready && std::env::var_os("HORIZON_SMOKE_FORCE_STOP").is_some();
+    let supports_force = guardian.snapshot().await.force_kill_available;
+    let mut forced_exit = false;
+    if force && supports_force && guardian.kill().await.is_ok() {
+        forced_exit = guardian.wait_for_exit(Duration::from_secs(20)).await;
+    }
+    if guardian.status().await.is_running() || guardian.status().await == ServerStatus::Preparing {
+        guardian.stop().await.unwrap();
+    }
+    let lines = guardian.console().await;
+    assert!(ready, "Horizon did not become ready: {lines:?}");
+    assert!(listening, "Horizon did not listen on the configured port");
+    if force {
+        assert!(
+            supports_force,
+            "supervisor did not advertise force-stop support"
+        );
+        assert!(forced_exit, "force-stop did not terminate the supervisor");
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            assert!(!engine_pids.is_empty(), "supervisor had no engine child");
+            for pid in engine_pids {
+                assert!(
+                    !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                    "engine process {pid} was not reaped"
+                );
+            }
+        }
+    }
+    let text = std::fs::read_to_string(directory.join("server.toml")).unwrap();
+    let config = text.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(config["world"]["name"].as_str(), Some("smoke-world"));
+    assert_eq!(config["server"]["motd"].as_str(), Some("Imported settings"));
+    if std::env::var_os("HORIZON_SMOKE_PAPER_COPY").is_some() {
+        assert!(
+            std::env::var_os("HORIZON_SMOKE_SHARED").is_some(),
+            "the migration test requires shared resources"
+        );
+        let world = directory.join("smoke-world");
+        let level_before = std::fs::read(world.join("level.dat")).unwrap();
+        let legacy = directory.join("smoke-world_nether/DIM-1");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        if world.join("DIM-1").exists() {
+            std::fs::rename(world.join("DIM-1"), &legacy).unwrap();
+        }
+        std::fs::create_dir_all(legacy.join("region")).unwrap();
+        // An idle server may never generate chunks. An Anvil region with an
+        // empty location and timestamp table is a valid 8192-byte region.
+        let region = legacy.join("region/r.0.0.mca");
+        if !region.exists() {
+            std::fs::write(&region, vec![0u8; 8192]).unwrap();
+        }
+        let original = std::fs::read(&region).unwrap();
+        let converted = root.path().join("servers/converted");
+        let script =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/migrate-paper-world.py");
+        let output = tokio::process::Command::new("python3")
+            .arg(script)
+            .arg("--source")
+            .arg(&directory)
+            .arg("--destination")
+            .arg(&converted)
+            .args(["--world", "smoke-world"])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "migration failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let copied_region = converted
+            .join("smoke-world/DIM-1/region")
+            .join(region.file_name().unwrap());
+        assert_eq!(std::fs::read(copied_region).unwrap(), original);
+        let mut migrated_config = ServerConfig::paper(&converted, "26.3");
+        migrated_config.core = "horizon".into();
+        migrated_config.port = port;
+        migrated_config.eula_accepted = true;
+        let migrated = Guardian::new_with_sandbox_policy(
+            migrated_config,
+            GuardianConfig {
+                stop_timeout_secs: 120,
+                ..Default::default()
+            },
+            root.path(),
+            SandboxPolicy::new(true),
+        );
+        let mut events = migrated.subscribe();
+        migrated.start().await.unwrap();
+        let migrated_ready = tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match events.recv().await.unwrap() {
+                    ServerEvent::Status {
+                        status: ServerStatus::Online,
+                    } => return true,
+                    ServerEvent::Status {
+                        status: ServerStatus::Offline | ServerStatus::Crashed,
+                    } => return false,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        if migrated.status().await.is_running()
+            || migrated.status().await == ServerStatus::Preparing
+        {
+            migrated.stop().await.unwrap();
+        }
+        assert!(
+            migrated_ready,
+            "converted world did not start: {:?}",
+            migrated.console().await
+        );
+        assert_eq!(
+            std::fs::read(region).unwrap(),
+            original,
+            "source world was modified"
+        );
+        assert_eq!(
+            std::fs::read(world.join("level.dat")).unwrap(),
+            level_before
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -340,9 +685,11 @@ async fn a_relative_jar_path_still_launches() {
     );
     guardian
         .set_environment(ServerEnvironment {
-            java: fake_java(),
-            java_major: 21,
-            jar: relative_jar,
+            runtime: ServerRuntime::Java {
+                java: fake_java(),
+                java_major: 21,
+                jar: relative_jar,
+            },
             directory: tmp.path().to_path_buf(),
         })
         .await;
@@ -394,9 +741,11 @@ async fn a_launch_that_cannot_spawn_returns_to_offline() {
     );
     guardian
         .set_environment(ServerEnvironment {
-            java: PathBuf::from("/nonexistent/bin/java"),
-            java_major: 21,
-            jar: tmp.path().join("server.jar"),
+            runtime: ServerRuntime::Java {
+                java: PathBuf::from("/nonexistent/bin/java"),
+                java_major: 21,
+                jar: tmp.path().join("server.jar"),
+            },
             directory: tmp.path().to_path_buf(),
         })
         .await;

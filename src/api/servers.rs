@@ -34,6 +34,10 @@ pub struct ServerView {
     metrics: Option<crate::metrics::ProcessMetrics>,
     /// What is actually installed on disk, which may lag the config.
     installed: Option<guardian::Installation>,
+    /// Whether host-managed Horizon program files pass path/permission checks.
+    horizon_programs_present: Option<bool>,
+    /// Whether a trusted Horizon bundle is available beside the panel.
+    horizon_programs_bundled: Option<bool>,
     /// Whether starting would download a new artifact first.
     needs_install: bool,
     /// Bytes on disk in this server's directory.
@@ -62,22 +66,71 @@ async fn view(
 ) -> ApiResult<ServerView> {
     let guardian = state.guardian(&record.id).await?;
     let live = guardian.snapshot().await;
-    let metrics = live.pid.and_then(|pid| state.metrics.of(pid));
+    let running_config = guardian.active_config().await;
+    // Horizon's PID is its supervisor; sample its engine and descendants too.
+    let native = record.config.core.eq_ignore_ascii_case("horizon");
+    let native_running = running_config
+        .as_ref()
+        .map_or(native, |config| config.core.eq_ignore_ascii_case("horizon"));
+    let metrics = if native_running {
+        if let Some(pid) = live.pid {
+            let metrics = Arc::clone(&state.metrics);
+            let result = tokio::task::spawn_blocking(move || metrics.of_horizon_tree(pid))
+                .await
+                .ok()
+                .flatten();
+            // The child may have exited while the process scan was running.
+            if guardian.snapshot().await.pid == Some(pid) {
+                result
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        live.pid.and_then(|pid| state.metrics.of(pid))
+    };
 
     let disk_bytes = state.metrics.disk_usage(&record.config.directory).await;
-    let pending_restart = guardian
-        .active_config()
-        .await
-        .is_some_and(|running| differs_at_launch(&running, &record.config));
-    let installed = guardian.installation().await;
-    let needs_install = installed
+    let pending_restart = running_config
         .as_ref()
-        .map(|i| !i.satisfies(&record.config))
-        .unwrap_or(true);
+        .is_some_and(|running| differs_at_launch(running, &record.config));
+    let installed = if native {
+        None
+    } else {
+        guardian.installation().await
+    };
+    let (horizon_programs_present, horizon_programs_bundled) = if native {
+        let data_dir = state.data_dir.clone();
+        let (present, bundled) = tokio::task::spawn_blocking(move || {
+            let present = guardian::sandbox::horizon_programs_present(&data_dir.join("horizon"));
+            let bundled = crate::horizon_install::embedded_programs()
+                || std::env::current_exe().ok().is_some_and(|exe| {
+                    crate::horizon_install::bundled_programs(&exe, &data_dir).is_some()
+                });
+            (present, bundled)
+        })
+        .await
+        .unwrap_or((false, false));
+        (Some(present), Some(bundled))
+    } else {
+        (None, None)
+    };
+    // Horizon is host-managed and is never downloaded by the panel.
+    let needs_install = !native
+        && installed
+            .as_ref()
+            .map(|i| !i.satisfies(&record.config))
+            .unwrap_or(true);
     Ok(ServerView {
         id: record.id.clone(),
         name: record.name.clone(),
-        core: record.config.core.clone(),
+        core: if native {
+            "horizon".into()
+        } else {
+            record.config.core.clone()
+        },
         version: record.config.version.clone(),
         port: record.config.port,
         java_major: record.config.java_major,
@@ -98,6 +151,8 @@ async fn view(
         live,
         metrics,
         installed,
+        horizon_programs_present,
+        horizon_programs_bundled,
         needs_install,
         disk_bytes,
         playit: record.playit.clone(),
@@ -265,15 +320,28 @@ async fn create(
 ) -> ApiResult<Json<ServerView>> {
     let _server_lock = state.server_mutation_lock.lock().await;
     let name = validate_name(&body.name)?;
+    let core = if body.core.eq_ignore_ascii_case("horizon") {
+        "horizon".to_owned()
+    } else {
+        body.core
+    };
 
     let id = Uuid::new_v4().to_string();
     let directory = state.server_dir(&id);
+    let policy = if core == "horizon" {
+        GuardianConfig {
+            prepare_timeout_secs: 2 * 60 * 60,
+            ..GuardianConfig::default()
+        }
+    } else {
+        GuardianConfig::default()
+    };
 
     let record = ServerRecord {
         id: id.clone(),
         name,
         config: ServerConfig {
-            core: body.core,
+            core,
             version: body.version,
             build: body.build,
             java_major: body.java_major,
@@ -284,7 +352,7 @@ async fn create(
             port: body.port,
             eula_accepted: body.eula_accepted,
         },
-        policy: GuardianConfig::default(),
+        policy,
         playit: None,
         created_at: now(),
         backup_policy: None,
@@ -390,9 +458,20 @@ async fn update(
                 next.name = validate_name(&name)?;
             }
             if let Some(core) = body.core {
+                let core = if core.eq_ignore_ascii_case("horizon") {
+                    "horizon".to_owned()
+                } else {
+                    core
+                };
+                if next.config.core != core {
+                    next.config.build = None;
+                }
                 next.config.core = core;
             }
             if let Some(version) = body.version {
+                if next.config.version != version {
+                    next.config.build = None;
+                }
                 next.config.version = version;
             }
             if let Some(build) = body.build {
@@ -654,6 +733,39 @@ pub enum PowerAction {
     Kill,
 }
 
+async fn prepare_horizon_runtime(
+    state: &AppState,
+    identity: &Identity,
+    record: &ServerRecord,
+) -> ApiResult<()> {
+    if !record.config.core.eq_ignore_ascii_case("horizon") {
+        return Ok(());
+    }
+    let installation = state.data_dir.join("horizon");
+    if !identity.admin {
+        let shared = installation
+            .join(".local/horizon-client")
+            .join(guardian::config::HORIZON_VERSION);
+        let local = record.config.directory.join("resources");
+        if !guardian::sandbox::horizon_programs_present(&installation)
+            || (!shared.exists()
+                && !local.exists()
+                && !guardian::horizon_prepare::has_custom_resources(&record.config.directory))
+        {
+            return Err(ApiError::Forbidden);
+        }
+    } else {
+        let data_dir = state.data_dir.clone();
+        let executable = std::env::current_exe().map_err(|e| ApiError::Internal(e.into()))?;
+        tokio::task::spawn_blocking(move || {
+            crate::horizon_install::install_if_bundled(&executable, &data_dir)
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))??;
+    }
+    Ok(())
+}
+
 async fn power(
     State(state): State<Arc<AppState>>,
     identity: Identity,
@@ -661,8 +773,12 @@ async fn power(
     Json(body): Json<PowerRequest>,
 ) -> ApiResult<Json<guardian::Snapshot>> {
     let _server_lock = state.server_mutation_lock.lock().await;
-    authorized(&state, &identity, &id).await?;
+    let record = authorized(&state, &identity, &id).await?;
     let guardian = state.guardian(&id).await?;
+
+    if matches!(body.action, PowerAction::Start | PowerAction::Restart) {
+        prepare_horizon_runtime(&state, &identity, &record).await?;
+    }
 
     match body.action {
         PowerAction::Start => guardian.start().await?,
@@ -707,9 +823,9 @@ async fn reinstall(
     authorized(&state, &identity, &id).await?;
 
     let guardian = state.guardian(&id).await?;
-    let installed = guardian.reinstall().await?;
+    guardian.reinstall().await?;
 
-    tracing::info!(server = %id, jar = %installed.jar.display(), "reinstalled");
+    tracing::info!(server = %id, "reinstalled");
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -723,13 +839,17 @@ async fn prepare_install(
     identity: Identity,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let _server_lock = state.server_mutation_lock.lock().await;
-    authorized(&state, &identity, &id).await?;
+    let server_lock = state.server_mutation_lock.lock().await;
+    let record = authorized(&state, &identity, &id).await?;
+    prepare_horizon_runtime(&state, &identity, &record).await?;
 
     let guardian = state.guardian(&id).await?;
-    let installed = guardian.prefetch().await?;
+    let task = guardian.begin_prefetch().await?;
+    drop(server_lock);
+    task.await
+        .map_err(|error| ApiError::Internal(error.into()))??;
 
-    tracing::info!(server = %id, jar = %installed.jar.display(), "prepared");
+    tracing::info!(server = %id, "prepared");
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -840,6 +960,136 @@ mod tests {
     #[tokio::test]
     async fn api_kill_can_cancel_preparation_behind_a_resource_lock() {
         power_cancels_preparation(PowerAction::Kill).await;
+    }
+
+    #[tokio::test]
+    async fn api_stop_can_cancel_prefetch_while_the_request_waits() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let state = crate::state::AppState::bootstrap(data_dir.path(), PlayitMode::External)
+            .await
+            .unwrap();
+        let record = ServerRecord {
+            id: "server-1".into(),
+            name: "Server".into(),
+            config: ServerConfig::paper(state.server_dir("server-1"), "1.21.8"),
+            policy: GuardianConfig::default(),
+            playit: None,
+            created_at: "2026-08-29T00:00:00Z".into(),
+            backup_policy: None,
+        };
+        state
+            .store
+            .update(|data| data.servers.push(record.clone()))
+            .await
+            .unwrap();
+        let guardian = state.insert_guardian(&record).await;
+        let resource_lock = guardian.lock_resources().await;
+        let task_state = Arc::clone(&state);
+        let id = record.id.clone();
+        let task =
+            tokio::spawn(
+                async move { prepare_install(State(task_state), operator(), Path(id)).await },
+            );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while guardian.status().await != guardian::ServerStatus::Preparing {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let stopped = tokio::time::timeout(
+            Duration::from_secs(2),
+            power(
+                State(Arc::clone(&state)),
+                operator(),
+                Path(record.id),
+                Json(PowerRequest {
+                    action: PowerAction::Stop,
+                }),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(stopped.0.status, guardian::ServerStatus::Offline);
+        drop(resource_lock);
+        assert!(task.await.unwrap().is_err());
+        state.playit.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn changing_to_horizon_clears_the_previous_java_build_pin() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(data_dir.path(), PlayitMode::External)
+            .await
+            .unwrap();
+        let mut record = record("server-1", 25565, 1024);
+        record.config.directory = state.server_dir(&record.id);
+        record.config.build = Some("old-paper-build".into());
+        state
+            .store
+            .update(|data| data.servers.push(record.clone()))
+            .await
+            .unwrap();
+        state.insert_guardian(&record).await;
+        let body: UpdateServer =
+            serde_json::from_value(serde_json::json!({ "core": "HORIZON", "version": "26.3" }))
+                .unwrap();
+        let Json(view) = update(
+            State(Arc::clone(&state)),
+            operator(),
+            Path(record.id.clone()),
+            Json(body),
+        )
+        .await
+        .unwrap();
+        assert_eq!(view.core, "horizon");
+        let updated = state.store.server(&record.id).await.unwrap();
+        assert_eq!(updated.config.core, "horizon");
+        assert_eq!(updated.config.version, "26.3");
+        assert_eq!(updated.config.build, None);
+        state.playit.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn horizon_view_reports_host_programs_without_claiming_a_download() {
+        use std::os::unix::fs::PermissionsExt;
+        let data_dir = tempfile::tempdir().unwrap();
+        let state = AppState::bootstrap(data_dir.path(), PlayitMode::External)
+            .await
+            .unwrap();
+        let mut record = record("server-1", 25565, 1024);
+        record.config.directory = state.server_dir(&record.id);
+        record.config.core = "horizon".into();
+        record.config.version = "26.3".into();
+        state.insert_guardian(&record).await;
+        let missing = view(&state, &record, true).await.unwrap();
+        assert_eq!(missing.horizon_programs_present, Some(false));
+        assert!(!missing.needs_install);
+        let installation = data_dir.path().join("horizon");
+        std::fs::create_dir_all(&installation).unwrap();
+        for program in ["horizon-server", "horizon-engine"] {
+            let path = installation.join(program);
+            std::fs::write(&path, b"placeholder").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let found = view(&state, &record, true).await.unwrap();
+        assert_eq!(found.horizon_programs_present, Some(true));
+        assert!(!found.needs_install);
+        std::fs::set_permissions(
+            installation.join("horizon-engine"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(
+            view(&state, &record, true)
+                .await
+                .unwrap()
+                .horizon_programs_present,
+            Some(false)
+        );
+        state.playit.shutdown().await.unwrap();
     }
 
     fn record(id: &str, port: u16, max_mb: u32) -> ServerRecord {

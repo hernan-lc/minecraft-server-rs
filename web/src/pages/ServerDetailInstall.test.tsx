@@ -14,6 +14,7 @@ const apiMock = vi.hoisted(() => ({
   openConsole: vi.fn(),
   reinstall: vi.fn(),
   prepare: vi.fn(),
+  installBundledHorizon: vi.fn().mockResolvedValue({ ok: true }),
 }));
 
 vi.mock("../api", () => ({
@@ -82,6 +83,22 @@ async function openSettings(server: Server) {
 
 describe("ServerDetail installed build", () => {
   beforeEach(() => { apiMock.compatibility.mockResolvedValue({ availability: "available", support: "supported", java_minimum: 21 }); });
+  it("reports the presence of host-managed Horizon programs", async () => {
+    await openSettings(makeServer({ core: "horizon", version: "26.3", horizon_programs_present: true, needs_install: false }));
+    expect(screen.getByText(/Horizon programs found/)).toBeInTheDocument();
+    expect(screen.getByText(/compatibility are checked/)).toBeInTheDocument();
+  });
+
+  it("reports missing Horizon programs", async () => {
+    await openSettings(makeServer({ core: "horizon", version: "26.3", horizon_programs_present: false, needs_install: false }));
+    expect(screen.getByText("Horizon programs are missing or inaccessible.")).toBeInTheDocument();
+  });
+
+  it("lets administrators install a bundle from server settings", async () => {
+    await openSettings(makeServer({ core: "horizon", version: "26.3", horizon_programs_present: false, horizon_programs_bundled: true }));
+    fireEvent.click(screen.getByRole("button", { name: "Install bundled Horizon" }));
+    await waitFor(() => expect(apiMock.installBundledHorizon).toHaveBeenCalledTimes(1));
+  });
   it("opens the EULA acceptance dialog from the warning", async () => {
     await openSettings(makeServer({ eula_accepted: false }));
     fireEvent.click(screen.getByRole("button", { name: "Accept EULA and start" }));
@@ -96,6 +113,16 @@ describe("ServerDetail installed build", () => {
   it("renders exactly one Install button for a fresh server", async () => {
     await openSettings(makeServer({ installed: null, needs_install: true }));
     expect(screen.getAllByRole("button", { name: "Install" })).toHaveLength(1);
+  });
+
+  it("offers Horizon preparation and explains where game files belong", async () => {
+    apiMock.prepare.mockResolvedValue({ ok: true });
+    apiMock.prepare.mockClear();
+    await openSettings(makeServer({ core: "horizon", version: "26.3" }));
+    expect(screen.getByText(/panel prepares Horizon and the official Minecraft files/)).toBeInTheDocument();
+    expect(screen.queryByText("Java version")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Prepare Horizon" }));
+    await waitFor(() => expect(apiMock.prepare).toHaveBeenCalledWith("server-1"));
   });
 
   it("renders no Install button once the install matches the config", async () => {

@@ -22,6 +22,10 @@ permissions:
   contents: read
 
 jobs:
+  horizon-runtime-compatibility:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/horizon-build.yml
+
   backend:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -93,6 +97,18 @@ jobs:
         # child processes, and process handling is the part most likely to
         # differ between platforms — so it is the part least worth assuming.
         run: npm run rust:test
+
+      - name: Test Java compatibility dependency
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --locked --manifest-path vendor/java-path-rs/Cargo.toml --all-features
+
+      - name: Test Java compatibility ZIP provisioning on Windows
+        if: matrix.os == 'windows-latest'
+        run: cargo test --locked --manifest-path vendor/java-path-rs/Cargo.toml --all-features --test provision zip
+
+      - name: Test Horizon installer
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 -m unittest scripts/test_install_horizon.py scripts/test_migrate_paper_world.py scripts/test_build_horizon_runtime.py
 
       - name: Test (Linux desktop tray)
         if: matrix.os == 'ubuntu-latest'

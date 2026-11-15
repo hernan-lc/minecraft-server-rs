@@ -22,14 +22,29 @@ use uuid::Uuid;
 /// server directory and silently fail to launch.
 #[derive(Debug, Clone)]
 pub struct ServerEnvironment {
-    /// Absolute path to the `java` launcher.
-    pub java: PathBuf,
-    /// Major version of the Java that was selected.
-    pub java_major: u32,
-    /// Absolute path to the server jar.
-    pub jar: PathBuf,
+    /// The executable and artifacts required by this server.
+    pub runtime: ServerRuntime,
     /// Working directory for the process.
     pub directory: PathBuf,
+}
+
+/// A prepared Java or native Horizon server runtime.
+#[derive(Debug, Clone)]
+pub enum ServerRuntime {
+    /// A Java server JAR and the JVM that runs it.
+    Java {
+        /// Absolute path to the Java launcher.
+        java: PathBuf,
+        /// Java feature version selected during provisioning.
+        java_major: u32,
+        /// Absolute path to the server JAR.
+        jar: PathBuf,
+    },
+    /// A host-managed Horizon installation containing supervisor and engine.
+    Horizon {
+        /// Directory containing `horizon-server` and `horizon-engine`.
+        installation: PathBuf,
+    },
 }
 
 /// Resolve `path` against the current working directory when it is relative.
@@ -51,8 +66,15 @@ pub(crate) fn absolute(path: PathBuf) -> PathBuf {
 impl ServerEnvironment {
     /// Rewrite every relative path as an absolute one.
     pub fn absolutize(mut self) -> Self {
-        self.java = absolute(self.java);
-        self.jar = absolute(self.jar);
+        match &mut self.runtime {
+            ServerRuntime::Java { java, jar, .. } => {
+                *java = absolute(std::mem::take(java));
+                *jar = absolute(std::mem::take(jar));
+            }
+            ServerRuntime::Horizon { installation } => {
+                *installation = absolute(std::mem::take(installation));
+            }
+        }
         self.directory = absolute(self.directory);
         self
     }
@@ -169,7 +191,7 @@ pub async fn resolve_jar(
     let core_for_progress = config.core.clone();
     let version_for_progress = config.version.clone();
     let client = MinecraftClient::builder()
-        .user_agent("minecraft-server-rs/0.1 (https://github.com/nglmercer/minecraft-server-rs)")
+        .user_agent("minecraft-server-rs/0.1 (https://github.com/hernan-lc/minecraft-server-rs)")
         .on_progress(std::sync::Arc::new(move |p: minecraft_core::Progress| {
             let fraction = p
                 .total
@@ -355,8 +377,36 @@ pub async fn prepare_with_resolver(
     resolver: &JavaResolver,
     on_progress: impl Fn(String, Option<f32>) + Send + Sync + Clone + 'static,
 ) -> Result<ServerEnvironment> {
+    prepare_with_resolver_and_sandbox(
+        config,
+        data_dir,
+        mode,
+        resolver,
+        crate::sandbox::SandboxPolicy::default(),
+        on_progress,
+    )
+    .await
+}
+
+pub(crate) async fn prepare_with_resolver_and_sandbox(
+    config: &ServerConfig,
+    data_dir: &Path,
+    mode: Provision,
+    resolver: &JavaResolver,
+    policy: crate::sandbox::SandboxPolicy,
+    on_progress: impl Fn(String, Option<f32>) + Send + Sync + Clone + 'static,
+) -> Result<ServerEnvironment> {
     if !config.eula_accepted {
         return Err(Error::EulaNotAccepted);
+    }
+
+    if config.core.eq_ignore_ascii_case("horizon") {
+        if mode == Provision::Force {
+            return Err(Error::InvalidConfiguration(
+                "update the host-managed Horizon installation outside the panel".into(),
+            ));
+        }
+        return prepare_horizon(config, data_dir, policy, on_progress).await;
     }
 
     // Cheap, and it keeps eula.txt and the port in step with the config.
@@ -369,9 +419,11 @@ pub async fn prepare_with_resolver(
             match installation.mismatch(config) {
                 None if trusted_installation(installation, config, data_dir) => {
                     return Ok(ServerEnvironment {
-                        java: installation.java.clone(),
-                        java_major: installation.java_major,
-                        jar: installation.jar.clone(),
+                        runtime: ServerRuntime::Java {
+                            java: installation.java.clone(),
+                            java_major: installation.java_major,
+                            jar: installation.jar.clone(),
+                        },
                         directory: config.directory.clone(),
                     }
                     .absolutize())
@@ -393,9 +445,11 @@ pub async fn prepare_with_resolver(
     let (jar, build) = resolve_jar(config, p).await?;
 
     let environment = ServerEnvironment {
-        java: java.java.clone(),
-        java_major: java.major(),
-        jar,
+        runtime: ServerRuntime::Java {
+            java: absolute(java.java.clone()),
+            java_major: java.major(),
+            jar: absolute(jar),
+        },
         directory: config.directory.clone(),
     }
     .absolutize();
@@ -405,18 +459,336 @@ pub async fn prepare_with_resolver(
         version: config.version.clone(),
         // Recorded so an unpinned "latest" stops moving after the first install.
         build,
-        java_major: environment.java_major,
-        java: environment.java.clone(),
+        java_major: java.major(),
+        java: absolute(java.java.clone()),
         // The trust anchor for warm Starts: the launcher must live at exactly
         // this home's `bin/java[.exe]`.
         java_home: java.home.clone(),
-        jar: environment.jar.clone(),
+        jar: match &environment.runtime {
+            ServerRuntime::Java { jar, .. } => jar.clone(),
+            ServerRuntime::Horizon { .. } => unreachable!(),
+        },
         installed_at: now_rfc3339(),
     }
     .save(&config.directory)
     .await?;
 
     Ok(environment)
+}
+
+/// Prepare a Horizon server without resolving Java.
+/// The pinned fork targets 26.3. An administrator installs both native
+/// executables under the panel data directory; Horizon itself imports existing
+/// vanilla settings in a private staging directory on first preparation.
+pub(crate) async fn prepare_horizon(
+    config: &ServerConfig,
+    data_dir: &Path,
+    policy: crate::sandbox::SandboxPolicy,
+    on_progress: impl Fn(String, Option<f32>) + Send + Sync + Clone + 'static,
+) -> Result<ServerEnvironment> {
+    if !config.eula_accepted {
+        return Err(Error::EulaNotAccepted);
+    }
+    if config.version != crate::config::HORIZON_VERSION || config.build.is_some() {
+        return Err(Error::InvalidConfiguration(format!(
+            "the pinned Horizon runtime supports version {} without a build selector",
+            crate::config::HORIZON_VERSION
+        )));
+    }
+    let installation = absolute(data_dir.join("horizon"));
+    let directory = absolute(config.directory.clone());
+    let runtime_present = crate::sandbox::horizon_programs_present(&installation);
+    let needs_runtime = !runtime_present && !installation.exists();
+    let needs_preparer = runtime_present
+        && !installation.join("prepare").exists()
+        && !installation
+            .join(".local/horizon-client")
+            .join(crate::config::HORIZON_VERSION)
+            .exists()
+        && !directory.join("resources").exists()
+        && !crate::horizon_prepare::has_custom_resources(&directory);
+    if needs_runtime || needs_preparer {
+        if let Ok(executable) = std::env::current_exe() {
+            let expected = format!("mcpanel{}", std::env::consts::EXE_SUFFIX);
+            if executable
+                .file_name()
+                .is_some_and(|name| name == expected.as_str())
+            {
+                if let Some(checkout) = crate::horizon_build::checkout_for(&executable) {
+                    crate::horizon_build::build_from_checkout(
+                        &checkout,
+                        data_dir,
+                        on_progress.clone(),
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+    // This also rejects missing executables, unsafe layouts and symlink escapes.
+    crate::sandbox::horizon_command(&installation, &directory, policy).map_err(|error| {
+        match error {
+            Error::Io { ref source, .. } if source.kind() == std::io::ErrorKind::NotFound => Error::InvalidConfiguration("Horizon installation is missing; place horizon-server and horizon-engine in the panel data directory's horizon folder".into()),
+            other => other,
+        }
+    })?;
+    let fs = ScopedFs::open(&directory).map_err(|error| Error::io(&directory, error))?;
+    let migration_marker = ".mcpanel-migration-in-progress";
+    match fs.metadata(migration_marker) {
+        Ok(_) => return Err(Error::InvalidConfiguration(
+            "a Paper world migration is incomplete; inspect the server directory before starting"
+                .into(),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(Error::io(directory.join(migration_marker), error)),
+    }
+    let path = directory.join("server.toml");
+    let bytes = match fs.read_file("server.toml") {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            on_progress("initializing Horizon configuration".into(), None);
+            initialize_horizon(
+                &fs,
+                &directory,
+                &installation,
+                data_dir,
+                config.port,
+                policy,
+            )
+            .await?
+        }
+        Err(error) => return Err(Error::io(&path, error)),
+    };
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        Error::InvalidConfiguration("Horizon server.toml must be valid UTF-8".into())
+    })?;
+    let mut document = text.parse::<toml_edit::DocumentMut>().map_err(|error| {
+        Error::InvalidConfiguration(format!("invalid Horizon server.toml: {error}"))
+    })?;
+    check_migrated_world(&fs, &directory, &document)?;
+    check_paper_world_layout(&fs, &directory, &document)?;
+    let custom_resources = document
+        .get("engine")
+        .and_then(|table| table.get("resources"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|path| !path.trim().is_empty());
+    if !custom_resources && installation.join("prepare").is_dir() {
+        let resolver = JavaResolver::new(data_dir);
+        crate::horizon_prepare::prepare_resources(
+            &installation,
+            &directory,
+            data_dir,
+            &resolver,
+            on_progress.clone(),
+        )
+        .await?;
+    }
+    for (section, key, value) in [
+        ("server", "port", toml_edit::value(i64::from(config.port))),
+        ("engine", "restart_on_crash", toml_edit::value(false)),
+        ("panel", "bind", toml_edit::value("")),
+    ] {
+        let section = document.entry(section).or_insert(toml_edit::table());
+        let table = section.as_table_like_mut().ok_or_else(|| {
+            Error::InvalidConfiguration("Horizon settings sections must be tables".into())
+        })?;
+        table.insert(key, value);
+    }
+    fs.write_atomic("server.toml", document.to_string().as_bytes())
+        .map_err(|error| Error::io(&path, error))?;
+    fs.write_atomic("eula.txt", b"# Accepted through the panel.\neula=true\n")
+        .map_err(|error| Error::io(directory.join("eula.txt"), error))?;
+    on_progress("Horizon installation ready".into(), Some(1.0));
+    Ok(ServerEnvironment {
+        runtime: ServerRuntime::Horizon { installation },
+        directory,
+    })
+}
+
+/// Read the configured world name, or Horizon's default when omitted.
+fn configured_world(document: &toml_edit::DocumentMut) -> Result<&str> {
+    let world = match document.get("world").and_then(|table| table.get("name")) {
+        None => "world",
+        Some(item) => item.as_str().ok_or_else(|| {
+            Error::InvalidConfiguration("Horizon world.name must be a string".into())
+        })?,
+    };
+    if world.is_empty() || world.contains(['/', '\\']) || world == "." || world == ".." {
+        return Err(Error::InvalidConfiguration(
+            "Horizon world.name must be a folder name".into(),
+        ));
+    }
+    Ok(world)
+}
+
+/// A converted copy must start the same world that was converted.
+fn check_migrated_world(
+    fs: &ScopedFs,
+    directory: &Path,
+    document: &toml_edit::DocumentMut,
+) -> Result<()> {
+    use std::io::Read;
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        version: u32,
+        world: String,
+    }
+    let path = ".mcpanel-migrated-world.json";
+    match fs.metadata(path) {
+        Ok(metadata) if metadata.is_file && !metadata.is_symlink => {}
+        Ok(_) => {
+            return Err(Error::InvalidConfiguration(
+                "migration world record must be a regular file".into(),
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(Error::io(directory.join(path), error)),
+    }
+    let file = match fs.open_file(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(Error::io(directory.join(path), error)),
+    };
+    let mut bytes = Vec::new();
+    file.take(4097)
+        .read_to_end(&mut bytes)
+        .map_err(|error| Error::io(directory.join(path), error))?;
+    if bytes.len() > 4096 {
+        return Err(Error::InvalidConfiguration(
+            "migration world record exceeds 4 KiB".into(),
+        ));
+    }
+    let manifest: Manifest = serde_json::from_slice(&bytes)
+        .map_err(|_| Error::InvalidConfiguration("invalid migration world record".into()))?;
+    if manifest.version != 1 {
+        return Err(Error::InvalidConfiguration(
+            "unsupported migration world record version".into(),
+        ));
+    }
+    let configured = configured_world(document)?;
+    if manifest.world != configured {
+        return Err(Error::InvalidConfiguration(format!(
+            "converted world {:?} does not match configured world {:?}; correct server.toml or server.properties before starting",
+            manifest.world, configured
+        )));
+    }
+    let level = std::path::Path::new(configured).join("level.dat");
+    match fs.metadata(&level) {
+        Ok(metadata) if metadata.is_file && !metadata.is_symlink => {}
+        Ok(_) => {
+            return Err(Error::InvalidConfiguration(
+                "converted world level.dat is not a regular file".into(),
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Error::InvalidConfiguration(
+                "converted world level.dat is missing".into(),
+            ))
+        }
+        Err(error) => return Err(Error::io(directory.join(&level), error)),
+    }
+    Ok(())
+}
+
+/// Paper and Spigot can put dimensions where the vanilla-layout engine will
+/// not find them. Refuse to silently create empty dimensions during migration.
+fn check_paper_world_layout(
+    fs: &ScopedFs,
+    directory: &Path,
+    document: &toml_edit::DocumentMut,
+) -> Result<()> {
+    let world = configured_world(document)?;
+    let exists = |path: &std::path::Path| -> Result<bool> {
+        match fs.metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(Error::io(directory.join(path), error)),
+        }
+    };
+    for (suffix, dimension) in [("_nether", "DIM-1"), ("_the_end", "DIM1")] {
+        let source = std::path::PathBuf::from(format!("{world}{suffix}")).join(dimension);
+        if exists(&source)? {
+            return Err(Error::InvalidConfiguration(format!(
+                "Paper/Spigot dimension {} is separate from {world}; migrate it before starting Horizon (see docs/horizon-migration.md)",
+                source.display()
+            )));
+        }
+    }
+    let modern = std::path::Path::new(world).join("dimensions/minecraft/overworld/data/minecraft");
+    for file in [
+        "game_rules.dat",
+        "scheduled_events.dat",
+        "wandering_trader.dat",
+        "weather.dat",
+        "world_gen_settings.dat",
+    ] {
+        if exists(&modern.join(file))? {
+            return Err(Error::InvalidConfiguration(format!(
+                "Paper world data {} is not in its vanilla location; migrate it before starting Horizon (see docs/horizon-migration.md)",
+                modern.join(file).display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Run Horizon's importer in a private scratch directory, so it cannot modify
+/// an existing world or replace operator files while translating properties.
+async fn initialize_horizon(
+    server_fs: &ScopedFs,
+    directory: &Path,
+    installation: &Path,
+    data_dir: &Path,
+    port: u16,
+    policy: crate::sandbox::SandboxPolicy,
+) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let scratch = tempfile::Builder::new()
+        .prefix(".horizon-init-")
+        .tempdir_in(data_dir)
+        .map_err(|error| Error::io(data_dir, error))?;
+    match server_fs.open_file("server.properties") {
+        Ok(file) => {
+            let mut bytes = Vec::new();
+            file.take(1_048_577)
+                .read_to_end(&mut bytes)
+                .map_err(|error| Error::io(directory.join("server.properties"), error))?;
+            if bytes.len() > 1_048_576 {
+                return Err(Error::InvalidConfiguration(
+                    "server.properties exceeds 1 MiB".into(),
+                ));
+            }
+            std::fs::write(scratch.path().join("server.properties"), bytes)
+                .map_err(|error| Error::io(scratch.path().join("server.properties"), error))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(Error::io(directory.join("server.properties"), error)),
+    }
+    let (mut command, _) =
+        crate::sandbox::horizon_init_command(installation, scratch.path(), port, policy)?;
+    command
+        .env_clear()
+        .envs(crate::process::sanitized_environment(std::env::vars_os()))
+        .env("HOME", scratch.path())
+        .env("USERPROFILE", scratch.path())
+        .env("TMPDIR", scratch.path())
+        .env("TMP", scratch.path())
+        .env("TEMP", scratch.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let status = tokio::time::timeout(std::time::Duration::from_secs(60), command.status())
+        .await
+        .map_err(|_| Error::Task("Horizon initialization timed out".into()))?
+        .map_err(|error| Error::io(installation.join("horizon-server"), error))?;
+    if !status.success() {
+        return Err(Error::InvalidConfiguration(
+            "Horizon initialization failed; check the installation and server.properties".into(),
+        ));
+    }
+    std::fs::read(scratch.path().join("server.toml"))
+        .map_err(|error| Error::io(scratch.path().join("server.toml"), error))
 }
 
 /// Installation metadata lives inside a server directory an operator can
@@ -681,16 +1053,155 @@ mod tests {
         // with its cwd set to `directory`, so "./data/x/server.jar" would be
         // looked for at "<directory>/data/x/server.jar" and never found.
         let environment = ServerEnvironment {
-            java: PathBuf::from("bin/java"),
-            java_major: 21,
-            jar: PathBuf::from("./data/servers/abc/server.jar"),
+            runtime: ServerRuntime::Java {
+                java: PathBuf::from("bin/java"),
+                java_major: 21,
+                jar: PathBuf::from("./data/servers/abc/server.jar"),
+            },
             directory: PathBuf::from("./data/servers/abc"),
         }
         .absolutize();
 
-        assert!(environment.java.is_absolute());
-        assert!(environment.jar.is_absolute());
+        let ServerRuntime::Java { java, jar, .. } = environment.runtime else {
+            panic!("wrong runtime")
+        };
+        assert!(java.is_absolute());
+        assert!(jar.is_absolute());
         assert!(environment.directory.is_absolute());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn horizon_preparation_preserves_inputs_on_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let installation = root.path().join("horizon");
+        let directory = root.path().join("server");
+        std::fs::create_dir(&installation).unwrap();
+        std::fs::create_dir(&directory).unwrap();
+        for name in ["horizon-server", "horizon-engine"] {
+            let path = installation.join(name);
+            std::fs::write(&path, b"binary").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut config = ServerConfig::paper(&directory, "26.3");
+        config.core = "horizon".into();
+        assert!(matches!(
+            prepare_horizon(
+                &config,
+                root.path(),
+                crate::sandbox::SandboxPolicy::new(true),
+                |_, _| {}
+            )
+            .await,
+            Err(Error::EulaNotAccepted)
+        ));
+        config.eula_accepted = true;
+        let original = "level-name=kept-world\nmotd=Original\n";
+        std::fs::write(directory.join("server.properties"), original).unwrap();
+        assert!(prepare_horizon(
+            &config,
+            root.path(),
+            crate::sandbox::SandboxPolicy::new(true),
+            |_, _| {}
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            std::fs::read_to_string(directory.join("server.properties")).unwrap(),
+            original
+        );
+        assert!(!std::fs::read_dir(root.path()).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".horizon-init-")));
+        assert!(!directory.join("eula.txt").exists());
+        let invalid = "[server\nport=25565\n";
+        std::fs::write(directory.join("server.toml"), invalid).unwrap();
+        assert!(matches!(
+            prepare_horizon(
+                &config,
+                root.path(),
+                crate::sandbox::SandboxPolicy::new(true),
+                |_, _| {}
+            )
+            .await,
+            Err(Error::InvalidConfiguration(_))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(directory.join("server.toml")).unwrap(),
+            invalid
+        );
+        assert!(!directory.join("eula.txt").exists());
+        std::fs::remove_file(directory.join("server.toml")).unwrap();
+        std::fs::remove_file(directory.join("server.properties")).unwrap();
+        let outside = root.path().join("outside-properties");
+        std::fs::write(&outside, "do not import").unwrap();
+        std::os::unix::fs::symlink(&outside, directory.join("server.properties")).unwrap();
+        assert!(prepare_horizon(
+            &config,
+            root.path(),
+            crate::sandbox::SandboxPolicy::new(true),
+            |_, _| {}
+        )
+        .await
+        .is_err());
+        assert_eq!(std::fs::read_to_string(outside).unwrap(), "do not import");
+        assert!(!directory.join("server.toml").exists());
+        let config_text = "[world]\nname = 'custom'\n";
+        std::fs::write(directory.join("server.toml"), config_text).unwrap();
+        std::fs::write(
+            directory.join(".mcpanel-migration-in-progress"),
+            b"incomplete",
+        )
+        .unwrap();
+        let error = prepare_horizon(
+            &config,
+            root.path(),
+            crate::sandbox::SandboxPolicy::new(true),
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("migration is incomplete"));
+        assert!(!directory.join("eula.txt").exists());
+        std::fs::remove_file(directory.join(".mcpanel-migration-in-progress")).unwrap();
+        std::fs::write(
+            directory.join(".mcpanel-migrated-world.json"),
+            r#"{"version":1,"world":"other"}"#,
+        )
+        .unwrap();
+        let error = prepare_horizon(
+            &config,
+            root.path(),
+            crate::sandbox::SandboxPolicy::new(true),
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("does not match"));
+        assert_eq!(
+            std::fs::read_to_string(directory.join("server.toml")).unwrap(),
+            config_text
+        );
+        assert!(!directory.join("eula.txt").exists());
+        std::fs::remove_file(directory.join(".mcpanel-migrated-world.json")).unwrap();
+        std::fs::create_dir_all(directory.join("custom_the_end/DIM1")).unwrap();
+        let error = prepare_horizon(
+            &config,
+            root.path(),
+            crate::sandbox::SandboxPolicy::new(true),
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("custom_the_end/DIM1"));
+        assert_eq!(
+            std::fs::read_to_string(directory.join("server.toml")).unwrap(),
+            config_text
+        );
+        assert!(!directory.join("eula.txt").exists());
     }
 
     #[test]
@@ -699,6 +1210,83 @@ mod tests {
 
         assert_eq!(stage, "downloading paper 26.2");
         assert!(!stage.contains('%'));
+    }
+
+    #[test]
+    fn paper_world_layout_requires_explicit_migration_without_modifying_data() {
+        let root = tempfile::tempdir().unwrap();
+        let fs = ScopedFs::open(root.path()).unwrap();
+        let config = "[world]\nname = 'custom'\n"
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert!(check_paper_world_layout(&fs, root.path(), &config).is_ok());
+        let legacy = root.path().join("custom_nether/DIM-1/region");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("r.0.0.mca"), b"original").unwrap();
+        let error = check_paper_world_layout(&fs, root.path(), &config)
+            .unwrap_err()
+            .to_string();
+        let expected_path = std::path::Path::new("custom_nether").join("DIM-1");
+        assert!(error.contains(&expected_path.to_string_lossy().to_string()));
+        assert_eq!(
+            std::fs::read(legacy.join("r.0.0.mca")).unwrap(),
+            b"original"
+        );
+        // Existing vanilla dimensions may have already been regenerated; they
+        // must not make the split Paper dimension silently disappear.
+        std::fs::create_dir_all(root.path().join("custom/DIM-1")).unwrap();
+        assert!(check_paper_world_layout(&fs, root.path(), &config).is_err());
+        std::fs::rename(
+            root.path().join("custom_nether"),
+            root.path().join("preserved-nether"),
+        )
+        .unwrap();
+        let paper_data = root
+            .path()
+            .join("custom/dimensions/minecraft/overworld/data/minecraft");
+        std::fs::create_dir_all(&paper_data).unwrap();
+        std::fs::write(paper_data.join("weather.dat"), b"weather").unwrap();
+        let error = check_paper_world_layout(&fs, root.path(), &config)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("weather.dat"));
+        assert_eq!(
+            std::fs::read(paper_data.join("weather.dat")).unwrap(),
+            b"weather"
+        );
+    }
+
+    #[test]
+    fn migrated_world_must_match_configuration_and_still_exist() {
+        let root = tempfile::tempdir().unwrap();
+        let fs = ScopedFs::open(root.path()).unwrap();
+        let config = "[world]\nname = 'adventure'\n"
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert!(check_migrated_world(&fs, root.path(), &config).is_ok());
+        std::fs::write(
+            root.path().join(".mcpanel-migrated-world.json"),
+            r#"{"version":1,"world":"other"}"#,
+        )
+        .unwrap();
+        assert!(check_migrated_world(&fs, root.path(), &config)
+            .unwrap_err()
+            .to_string()
+            .contains("does not match"));
+        std::fs::write(
+            root.path().join(".mcpanel-migrated-world.json"),
+            r#"{"version":1,"world":"adventure"}"#,
+        )
+        .unwrap();
+        assert!(check_migrated_world(&fs, root.path(), &config)
+            .unwrap_err()
+            .to_string()
+            .contains("level.dat is missing"));
+        std::fs::create_dir(root.path().join("adventure")).unwrap();
+        std::fs::write(root.path().join("adventure/level.dat"), b"fixture").unwrap();
+        assert!(check_migrated_world(&fs, root.path(), &config).is_ok());
+        std::fs::write(root.path().join(".mcpanel-migrated-world.json"), "invalid").unwrap();
+        assert!(check_migrated_world(&fs, root.path(), &config).is_err());
     }
 
     /// A fake but well-formed JDK home: `bin/java[.exe]` plus a `release`
@@ -774,8 +1362,11 @@ mod tests {
 
         assert_eq!(backend.calls(), 0, "warm Start must not discover");
         assert_eq!(resolver.discovery_passes(), 0);
-        assert_eq!(env.java, home.join("bin").join(super::java_exe_name()));
-        assert_eq!(env.jar, server_dir.join("server.jar"));
+        let ServerRuntime::Java { java, jar, .. } = env.runtime else {
+            panic!("wrong runtime")
+        };
+        assert_eq!(java, home.join("bin").join(super::java_exe_name()));
+        assert_eq!(jar, server_dir.join("server.jar"));
     }
 
     #[test]

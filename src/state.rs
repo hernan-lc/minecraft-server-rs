@@ -45,7 +45,7 @@ pub struct AppState {
     /// never trigger two independent machine-wide scans.
     pub java_resolver: Arc<guardian::JavaResolver>,
     /// Per-process CPU and memory sampling.
-    pub metrics: Metrics,
+    pub metrics: Arc<Metrics>,
     /// Short-lived grants for browser-driven downloads.
     pub tickets: Tickets,
     /// The panel's embedded or explicitly external Playit integration.
@@ -242,7 +242,7 @@ impl AppState {
             guardians: RwLock::new(guardians),
             data_dir,
             java_resolver,
-            metrics: Metrics::default(),
+            metrics: Arc::new(Metrics::default()),
             tickets: Tickets::default(),
             playit: Arc::new(playit),
             limits,

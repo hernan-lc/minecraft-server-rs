@@ -18,6 +18,7 @@ const apiMock = vi.hoisted(() => ({
   providers: vi.fn().mockResolvedValue([{ id: "paper", server: true }]),
   versions: vi.fn().mockResolvedValue(["1.21.8"]),
   createServer: vi.fn().mockResolvedValue({}),
+  installBundledHorizon: vi.fn().mockResolvedValue({ ok: true }),
 }));
 
 vi.mock("../api", () => ({ api: apiMock }));
@@ -32,8 +33,8 @@ describe("Dashboard create server form", () => {
       memory_total_mb: 2,
       servers_online: 0,
     });
-    apiMock.providers.mockResolvedValue([{ id: "paper", server: true }]);
-    apiMock.versions.mockResolvedValue(["1.21.8"]);
+    apiMock.providers.mockResolvedValue([{ id: "paper", server: true }, { id: "horizon", server: true, programs_present: false }]);
+    apiMock.versions.mockImplementation(async (core: string) => core === "horizon" ? ["26.3"] : ["1.21.8"]);
     apiMock.createServer.mockResolvedValue({});
   });
 
@@ -133,6 +134,8 @@ describe("Dashboard create server form", () => {
       <Dashboard user={{ username: "admin", admin: true }} onOpen={vi.fn()} />
     </DialogProvider></ToastProvider></I18nProvider>);
     fireEvent.click(screen.getByRole("button", { name: "New server" }));
+    await screen.findByRole("option", { name: "paper" });
+    fireEvent.input(screen.getByTestId("server-core"), { target: { value: "paper" } });
     const acknowledgement = await screen.findByRole("checkbox", { name: /Continue without support or fixes/ });
     const create = screen.getByRole("button", { name: "Create server" });
     expect(create).toBeDisabled();
@@ -141,6 +144,46 @@ describe("Dashboard create server form", () => {
     fireEvent.click(create);
     await waitFor(() => expect(apiMock.createServer).toHaveBeenCalledTimes(1));
     expect(apiMock.createServer.mock.calls[0][0]).toMatchObject({ version: "1.21.11", java_major: 21, eula_accepted: false });
+  });
+
+  it("creates a native Horizon server without asking for a Java runtime", async () => {
+    apiMock.providers.mockResolvedValue([{ id: "paper", server: true }, { id: "horizon", server: true, programs_present: false }]);
+    apiMock.versions.mockImplementation(async (core: string) => core === "horizon" ? ["26.3"] : ["1.21.8"]);
+    apiMock.compatibility.mockImplementation(async (core: string) => ({ availability: "available", support: "unknown", java_minimum: core === "horizon" ? null : 21 }));
+    apiMock.createServer.mockClear();
+    localStorage.setItem("mcpanel:guide:v2:dashboard:admin", "seen");
+    render(<I18nProvider><ToastProvider><DialogProvider>
+      <Dashboard user={{ username: "admin", admin: true }} onOpen={vi.fn()} />
+    </DialogProvider></ToastProvider></I18nProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "New server" }));
+    await screen.findByRole("option", { name: "horizon" });
+    expect(screen.getByTestId("server-core")).toHaveValue("horizon");
+    expect(screen.getByText(/Horizon programs are missing or inaccessible/)).toBeInTheDocument();
+    expect(screen.getByText(/first start builds Horizon automatically/)).toBeInTheDocument();
+    await screen.findByText(/Horizon runs natively/);
+    expect(screen.queryByTestId("server-java")).toBeNull();
+    const create = screen.getByRole("button", { name: "Create server" });
+    await waitFor(() => expect(create).not.toBeDisabled());
+    fireEvent.input(screen.getByTestId("server-name"), { target: { value: "Native world" } });
+    fireEvent.input(screen.getByLabelText("Memory reservation (MiB)"), { target: { value: "512" } });
+    fireEvent.click(screen.getByTestId("server-eula"));
+    fireEvent.click(create);
+    await waitFor(() => expect(apiMock.createServer).toHaveBeenCalledTimes(1));
+    expect(apiMock.createServer.mock.calls[0][0]).toMatchObject({ core: "horizon", version: "26.3", eula_accepted: true, memory: { min_mb: 512, max_mb: 512 } });
+  });
+
+  it("installs bundled Horizon programs from the creation form", async () => {
+    apiMock.providers.mockResolvedValue([{ id: "horizon", server: true, programs_present: false, programs_bundled: true }]);
+    apiMock.installBundledHorizon.mockClear();
+    localStorage.setItem("mcpanel:guide:v2:dashboard:admin", "seen");
+    render(<I18nProvider><ToastProvider><DialogProvider>
+      <Dashboard user={{ username: "admin", admin: true }} onOpen={vi.fn()} />
+    </DialogProvider></ToastProvider></I18nProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "New server" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Install bundled Horizon" }));
+    await waitFor(() => expect(apiMock.installBundledHorizon).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/Game files will be prepared on start/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Install bundled Horizon" })).not.toBeInTheDocument());
   });
 
 });

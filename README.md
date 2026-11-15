@@ -4,6 +4,10 @@
 
 A Minecraft server control panel that is one binary, one config file, and no dependencies at runtime.
 
+This branch is migrating to the native Rust Horizon server. On first start, the
+panel installs Horizon and prepares the official Minecraft game files automatically.
+See [Horizon migration](docs/horizon-migration.md).
+
 It does what Pterodactyl does for Minecraft specifically — install Java, download the server, run it, stream the console, edit the files, restart it when it crashes — without PHP, Laravel, MySQL, Redis, Docker or a separate node daemon.
 
 ```
@@ -28,13 +32,13 @@ It does what Pterodactyl does for Minecraft specifically — install Java, downl
 ## Quick start
 
 ```sh
-git clone --recurse-submodules https://github.com/nglmercer/minecraft-server-rs
+git clone --recurse-submodules --branch migrate/rust-horizon https://github.com/hernan-lc/minecraft-server-rs.git
 cd minecraft-server-rs
 ./build.sh
 ./target/release/mcpanel --data-dir ./data --bind 127.0.0.1:8080
 ```
 
-Or download a self-contained binary from [Releases](https://github.com/nglmercer/minecraft-server-rs/releases) (web UI is embedded). The first run prints a generated `admin` password — shown once.
+Published [fork releases](https://github.com/hernan-lc/minecraft-server-rs/releases) currently predate this migration branch; build the branch above for Horizon support. The web UI is embedded in the panel binary.
 
 Default bind is `127.0.0.1:8080` (loopback). For remote access keep it on loopback behind an HTTPS reverse proxy. Direct non-loopback plaintext HTTP requires `--allow-insecure-http` explicitly and is only for isolated networks. The port can be overridden without flags by writing a file at `<data-dir>/port` (or `<data-dir>/bind`) containing `8081` or `127.0.0.1:8081`; `--bind` / `MCPANEL_BIND` still wins when set. If the requested port is in use, a second launch opens the existing panel and exits, otherwise the next free port `8081-8099` is tried. The active `bind`/`url`/`pid` is written to `<data-dir>/.lock` while running.
 
@@ -85,6 +89,7 @@ Browse all guides in [`docs/`](docs/README.md). Security disclosure policy is in
 | `web` | Vite + Preact + TypeScript + Tailwind v4 frontend. |
 | `vendor/java-path-rs` | Submodule: Java discovery and provisioning. |
 | `vendor/minecraft-core-rs` | Submodule: server artifact resolution and download. |
+| `vendor/horizon` | Pinned Horizon fork, including the Termux dedicated-server changes. |
 
 Runtime lives under `--data-dir` (`panel.json`, `playit/secret.toml`, `jdks/`, `servers/<uuid>/`, `backups/<uuid>/`). Details in [Getting Started](docs/getting-started.md) and [Architecture](docs/architecture.md).
 

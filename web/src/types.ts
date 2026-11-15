@@ -196,10 +196,14 @@ export interface Server {
   pid: number | null;
   uptime_secs: number | null;
   crashes: number;
+  force_kill_available?: boolean;
   /** Current provisioning activity, present while the server is preparing. */
   progress: ProgressState | null;
   metrics: ProcessMetrics | null;
   installed: Installation | null;
+  /** Host-managed Horizon programs passed filesystem checks; null for Java. */
+  horizon_programs_present?: boolean | null;
+  horizon_programs_bundled?: boolean | null;
   /** True when starting would download a new artifact first. */
   needs_install: boolean;
   /** Bytes on disk in this server's directory. */
@@ -221,6 +225,7 @@ export interface ServerSnapshot {
   pid: number | null;
   uptime_secs: number | null;
   crashes: number;
+  force_kill_available?: boolean;
   progress: ProgressState | null;
 }
 
@@ -231,7 +236,7 @@ export interface ProcessMetrics {
   /** Process CPU normalized against the panel host's logical CPU capacity. */
   cpu_host_percent: number | null;
   logical_cpu_count: number;
-  /** Resident memory (RSS), in MiB. */
+  /** RSS in MiB; Horizon sums process RSS and may count shared pages twice. */
   memory_mb: number;
 }
 

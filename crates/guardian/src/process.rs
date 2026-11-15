@@ -8,7 +8,9 @@
 //! handlers, WebSocket sessions and the supervisor task without coordination.
 
 use crate::config::{GuardianConfig, ServerConfig, MAX_ARGUMENT_BYTES};
-use crate::environment::{prepare_with_resolver, Provision, ServerEnvironment};
+use crate::environment::{
+    prepare_with_resolver_and_sandbox, Provision, ServerEnvironment, ServerRuntime,
+};
 use crate::error::{Error, Result};
 use crate::events::{ConsoleLine, ProgressState, ServerEvent, ServerStatus, Stream};
 use crate::fs::ScopedFs;
@@ -133,6 +135,8 @@ struct RunState {
     /// Quota and port accounting has to reason about this value, not the
     /// pending one, for as long as the process exists.
     active: Option<ServerConfig>,
+    /// The current Horizon supervisor advertised the force-stop protocol.
+    horizon_force_stop: bool,
     /// Set by `stop`/`kill` so the supervisor knows the exit was requested.
     intentional: bool,
     /// Handle to the in-flight provisioning task, so it can be abandoned.
@@ -171,6 +175,8 @@ pub struct Snapshot {
     pub crashes: u32,
     /// Current provisioning activity, when the server is preparing.
     pub progress: Option<ProgressState>,
+    /// Whether the running process supports a safe force stop.
+    pub force_kill_available: bool,
 }
 
 /// Supervises exactly one Minecraft server.
@@ -342,6 +348,12 @@ impl Guardian {
             uptime_secs: state.started_at.map(|t| t.elapsed().as_secs()),
             crashes: self.crashes.load(Ordering::Relaxed),
             progress: state.progress.clone(),
+            force_kill_available: state.child.is_some()
+                && (!state
+                    .active
+                    .as_ref()
+                    .is_some_and(|c| c.core.eq_ignore_ascii_case("horizon"))
+                    || state.horizon_force_stop),
         }
     }
 
@@ -544,6 +556,18 @@ impl Guardian {
     /// no-op when already installed. The server is moved to `Preparing` and
     /// back to `Offline` so the UI can show progress.
     pub async fn prefetch(self: &Arc<Self>) -> Result<ServerEnvironment> {
+        let task = self.begin_prefetch().await?;
+        match task.await {
+            Ok(result) => result,
+            Err(error) => Err(Error::Task(error.to_string())),
+        }
+    }
+
+    /// Reserve a preparation immediately and return its task to the caller.
+    /// This allows panel locks to be released while preparation is running.
+    pub async fn begin_prefetch(
+        self: &Arc<Self>,
+    ) -> Result<tokio::task::JoinHandle<Result<ServerEnvironment>>> {
         let task = {
             let mut state = self.state.lock().await;
             let current = state.status.unwrap_or(ServerStatus::Offline);
@@ -594,10 +618,7 @@ impl Guardian {
             status: ServerStatus::Preparing,
         });
 
-        match task.await {
-            Ok(result) => result,
-            Err(error) => Err(Error::Task(error.to_string())),
-        }
+        Ok(task)
     }
 
     async fn provision(
@@ -621,8 +642,15 @@ impl Guardian {
             });
         };
 
-        let env =
-            prepare_with_resolver(&config, &self.data_dir, mode, &self.java, progress).await?;
+        let env = prepare_with_resolver_and_sandbox(
+            &config,
+            &self.data_dir,
+            mode,
+            &self.java,
+            self.sandbox_policy,
+            progress,
+        )
+        .await?;
         *self.environment.write().await = Some(env.clone());
         Ok(env)
     }
@@ -785,50 +813,95 @@ impl Guardian {
                 "the launch directory does not match the configured server directory".into(),
             ));
         }
-        let java_metadata =
-            std::fs::metadata(&env.java).map_err(|error| Error::io(&env.java, error))?;
-        if !java_metadata.is_file() {
-            return Err(Error::InvalidConfiguration(
-                "the Java launcher must be a regular file".into(),
-            ));
+        if config.core.eq_ignore_ascii_case("horizon") {
+            // Native settings may have changed since the environment was
+            // cached. Reapply the panel's port and EULA before every start.
+            crate::environment::prepare_horizon(
+                &config,
+                &self.data_dir,
+                self.sandbox_policy,
+                |_, _| {},
+            )
+            .await?;
         }
-        #[cfg(unix)]
-        if java_metadata.permissions().mode() & 0o111 == 0 {
-            return Err(Error::InvalidConfiguration(
-                "the Java launcher is not executable".into(),
-            ));
-        }
-        let server_fs =
-            ScopedFs::open(&env.directory).map_err(|error| Error::io(&env.directory, error))?;
-        let jar_relative = env.jar.strip_prefix(&env.directory).map_err(|_| {
-            Error::InvalidConfiguration("the server jar must be inside its server directory".into())
-        })?;
-        let jar_metadata = server_fs
-            .metadata(jar_relative)
-            .map_err(|error| Error::io(&env.jar, error))?;
-        if !jar_metadata.is_file {
-            return Err(Error::InvalidConfiguration(
-                "the server jar must be a regular file".into(),
-            ));
-        }
-        let mut launch_args: Vec<OsString> = config
-            .memory
-            .jvm_flags()
-            .into_iter()
-            .map(OsString::from)
-            .collect();
-        launch_args.extend(config.jvm_args.iter().cloned().map(OsString::from));
-        launch_args.push(OsString::from("-jar"));
-        launch_args.push(env.jar.clone().into_os_string());
-        launch_args.extend(config.server_args.iter().cloned().map(OsString::from));
+        let (mut command, sandbox_mode, executable) = match &env.runtime {
+            ServerRuntime::Java { java, jar, .. }
+                if !config.core.eq_ignore_ascii_case("horizon") =>
+            {
+                let java_metadata =
+                    std::fs::metadata(java).map_err(|error| Error::io(java, error))?;
+                if !java_metadata.is_file() {
+                    return Err(Error::InvalidConfiguration(
+                        "the Java launcher must be a regular file".into(),
+                    ));
+                }
+                #[cfg(unix)]
+                if java_metadata.permissions().mode() & 0o111 == 0 {
+                    return Err(Error::InvalidConfiguration(
+                        "the Java launcher is not executable".into(),
+                    ));
+                }
+                let server_fs = ScopedFs::open(&env.directory)
+                    .map_err(|error| Error::io(&env.directory, error))?;
+                let jar_relative = jar.strip_prefix(&env.directory).map_err(|_| {
+                    Error::InvalidConfiguration(
+                        "the server jar must be inside its server directory".into(),
+                    )
+                })?;
+                let jar_metadata = server_fs
+                    .metadata(jar_relative)
+                    .map_err(|error| Error::io(jar, error))?;
+                if !jar_metadata.is_file {
+                    return Err(Error::InvalidConfiguration(
+                        "the server jar must be a regular file".into(),
+                    ));
+                }
+                let mut launch_args: Vec<OsString> = config
+                    .memory
+                    .jvm_flags()
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect();
+                launch_args.extend(config.jvm_args.iter().cloned().map(OsString::from));
+                launch_args.push(OsString::from("-jar"));
+                launch_args.push(jar.clone().into_os_string());
+                launch_args.extend(config.server_args.iter().cloned().map(OsString::from));
 
-        let (mut command, sandbox_mode) = crate::sandbox::command(
-            &env.java,
-            &env.directory,
-            &env.jar,
-            &launch_args,
-            self.sandbox_policy,
-        )?;
+                let (command, mode) = crate::sandbox::command(
+                    java,
+                    &env.directory,
+                    jar,
+                    &launch_args,
+                    self.sandbox_policy,
+                )?;
+                (command, mode, java.clone())
+            }
+            ServerRuntime::Horizon { installation }
+                if config.core.eq_ignore_ascii_case("horizon") =>
+            {
+                let expected = crate::environment::absolute(self.data_dir.join("horizon"));
+                if *installation != expected {
+                    return Err(Error::InvalidConfiguration(
+                        "Horizon must use the panel's managed installation".into(),
+                    ));
+                }
+                let (command, mode) = crate::sandbox::horizon_command(
+                    installation,
+                    &env.directory,
+                    self.sandbox_policy,
+                )?;
+                (
+                    command,
+                    mode,
+                    installation.join(format!("horizon-server{}", std::env::consts::EXE_SUFFIX)),
+                )
+            }
+            _ => {
+                return Err(Error::InvalidConfiguration(
+                    "prepared runtime does not match server type".into(),
+                ))
+            }
+        };
         if sandbox_mode == crate::sandbox::SandboxMode::Unsandboxed {
             tracing::warn!("Minecraft server is running without OS tenant isolation");
         }
@@ -870,7 +943,7 @@ impl Guardian {
             .env("TMP", &env.directory)
             .env("TMPDIR", &env.directory);
 
-        let mut child = command.spawn().map_err(|e| Error::io(&env.java, e))?;
+        let mut child = command.spawn().map_err(|e| Error::io(&executable, e))?;
 
         let pid = child.id().unwrap_or(0);
         let stdin = child.stdin.take();
@@ -888,6 +961,7 @@ impl Guardian {
                 return Err(Error::StartCancelled);
             }
             state.generation += 1;
+            state.horizon_force_stop = false;
             state.pid = Some(pid);
             state.stdin = stdin;
             state.started_at = Some(Instant::now());
@@ -946,6 +1020,17 @@ impl Guardian {
                 let Some(guardian) = this.upgrade() else {
                     return;
                 };
+
+                if stream == Stream::Stdout
+                    && core.eq_ignore_ascii_case("horizon")
+                    && line == "[mcpanel] force-stop-v1"
+                {
+                    let mut state = guardian.state.lock().await;
+                    if state.generation == generation && state.child.is_some() {
+                        state.horizon_force_stop = true;
+                    }
+                    continue;
+                }
 
                 if stream == Stream::Stdout && line_means_online(&core, &line) {
                     // A drained pipe can outlive its process, so the promotion
@@ -1185,7 +1270,15 @@ impl Guardian {
             tokio::time::sleep(REAP_INTERVAL).await;
         }
 
-        self.say("graceful stop timed out, killing process").await;
+        if self
+            .active_config()
+            .await
+            .is_some_and(|config| config.core.eq_ignore_ascii_case("horizon"))
+        {
+            self.say("graceful stop timed out").await;
+        } else {
+            self.say("graceful stop timed out, killing process").await;
+        }
         self.kill().await?;
         if !self.wait_for_exit(Duration::from_secs(10)).await {
             return Err(Error::Task(
@@ -1233,8 +1326,7 @@ impl Guardian {
             if self.wait_for_exit(deadline).await {
                 Ok(())
             } else {
-                self.say("graceful stop timed out during shutdown, killing process")
-                    .await;
+                self.say("graceful stop timed out during shutdown").await;
                 self.kill().await?;
                 if self.wait_for_exit(Duration::from_secs(10)).await {
                     Ok(())
@@ -1306,13 +1398,41 @@ impl Guardian {
                         action: "kill",
                     });
                 }
+                if state
+                    .active
+                    .as_ref()
+                    .is_some_and(|config| config.core.eq_ignore_ascii_case("horizon"))
+                {
+                    if !state.horizon_force_stop {
+                        return Err(Error::InvalidConfiguration(
+                            "this Horizon supervisor does not support safe force-stop; stop it through its console or host tools".into(),
+                        ));
+                    }
+                    let input = state.stdin.as_mut().ok_or_else(|| {
+                        Error::InvalidConfiguration(
+                            "Horizon supervisor stdin is unavailable".into(),
+                        )
+                    })?;
+                    input
+                        .write_all(b"mcpanel:force-stop\n")
+                        .await
+                        .map_err(|e| {
+                            Error::InvalidConfiguration(format!(
+                                "could not send Horizon force-stop: {e}"
+                            ))
+                        })?;
+                    input.flush().await.map_err(|e| {
+                        Error::InvalidConfiguration(format!(
+                            "could not send Horizon force-stop: {e}"
+                        ))
+                    })?;
+                } else if let Some(child) = state.child.as_mut() {
+                    let _ = child.start_kill();
+                }
                 state.intentional = true;
                 let should_emit = current != ServerStatus::Stopping;
                 clear_progress(&mut state);
                 state.status = Some(ServerStatus::Stopping);
-                if let Some(child) = state.child.as_mut() {
-                    let _ = child.start_kill();
-                }
                 drop(state);
                 if should_emit {
                     self.emit(ServerEvent::Status {

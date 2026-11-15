@@ -81,6 +81,11 @@ fn loader_for(core: &str) -> ApiResult<Loader> {
                 "a vanilla server cannot load plugins or mods; use Paper or Fabric".into(),
             ))
         }
+        "horizon" => {
+            return Err(ApiError::BadRequest(
+                "Horizon cannot load Java plugins or mods; native Horizon add-ons are not supported by this panel yet".into(),
+            ))
+        }
         other => {
             return Err(ApiError::BadRequest(format!(
                 "unknown server flavour {other}"
@@ -710,6 +715,14 @@ mod tests {
             error.to_string().contains("Paper"),
             "should suggest an alternative"
         );
+    }
+
+    #[test]
+    fn horizon_rejects_java_add_ons() {
+        assert!(loader_for("horizon")
+            .unwrap_err()
+            .to_string()
+            .contains("cannot load Java"));
     }
 
     #[test]

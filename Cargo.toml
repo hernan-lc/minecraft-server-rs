@@ -31,7 +31,7 @@ axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
-rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+rust-embed = { version = "8", features = ["interpolate-folder-path", "debug-embed"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.9"
 argon2 = "0.5"
@@ -39,7 +39,7 @@ password-hash = { version = "0.5", features = ["std"] }
 sysinfo = "0.33"
 mime_guess = "2"
 tokio-util = { version = "0.7", features = ["io"] }
-zip = { version = "9", default-features = false, features = ["deflate"] }
+zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
@@ -51,6 +51,9 @@ subtle = "2"
 base64 = "0.22"
 jsonwebtoken = { version = "9" }
 async-trait = "0.1"
+
+[target.'cfg(target_os = "android")'.dependencies]
+rustix = { version = "1", features = ["param"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -68,7 +71,7 @@ exclude = ["vendor"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/nglmercer/minecraft-server-rs"
+repository = "https://github.com/hernan-lc/minecraft-server-rs"
 
 [workspace.dependencies]
 java-path = { path = "vendor/java-path-rs", features = ["install", "serde"] }

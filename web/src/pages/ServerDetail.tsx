@@ -157,7 +157,7 @@ export function ServerDetail({
   const hasCpuMetric = cpuHostPercent !== null && cpuCores !== null && logicalCpuCount !== null;
   const memoryMb = server.metrics?.memory_mb;
   const memoryFraction =
-    typeof memoryMb === "number" && server.memory.max_mb > 0
+    server.core !== "horizon" && typeof memoryMb === "number" && server.memory.max_mb > 0
       ? Math.max(0, Math.min(1, memoryMb / server.memory.max_mb))
       : undefined;
 
@@ -286,7 +286,7 @@ export function ServerDetail({
                       label: t("dashboard.kill"),
                       danger: true,
                       onSelect: () => power("kill"),
-                      disabled: !actions.kill,
+                      disabled: !actions.kill || (server.core === "horizon" && !server.force_kill_available),
                     },
                   ],
                   server.name,
@@ -357,7 +357,7 @@ export function ServerDetail({
                     cores: cpuCores.toFixed(2),
                     count: logicalCpuCount,
                   })
-                : t("server.notRunning")
+                : t(server.core === "horizon" ? "createServer.nativeMetricsUnavailable" : "server.notRunning")
             }
           />
           <StatCard
@@ -370,8 +370,8 @@ export function ServerDetail({
             tone={memoryFraction !== undefined && memoryFraction > 0.9 ? "warn" : "accent"}
             detail={
               memoryMb === undefined
-                ? t("server.notRunning")
-                : t("server.heapMax", { memory: server.memory.max_mb })
+                ? t(server.core === "horizon" ? "createServer.nativeMetricsUnavailable" : "server.notRunning")
+                : server.core === "horizon" ? t("createServer.nativeMemoryDetail") : t("server.heapMax", { memory: server.memory.max_mb })
             }
           />
           <StatCard

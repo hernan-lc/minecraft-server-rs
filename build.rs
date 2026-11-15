@@ -20,6 +20,55 @@ fn main() {
 
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this"));
     let dist = manifest.join("web/dist");
+    // Release builds may bake the target's complete Horizon runtime into the
+    // panel. Ordinary source builds use an empty directory and bootstrap the
+    // pinned checkout on first start instead.
+    println!("cargo:rerun-if-env-changed=MCPANEL_HORIZON_EMBED");
+    let horizon = if let Some(configured) = std::env::var_os("MCPANEL_HORIZON_EMBED") {
+        let path = PathBuf::from(configured);
+        assert!(
+            path.is_dir(),
+            "configured Horizon runtime directory is missing"
+        );
+        let suffix = if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+            ".exe"
+        } else {
+            ""
+        };
+        for name in [
+            format!("horizon-server{suffix}"),
+            format!("horizon-engine{suffix}"),
+            format!("prepare/horizon-prepare{suffix}"),
+            "prepare/mods/horizon/src/test/java/dev/horizonlab/parity/PrepareWorker.java".into(),
+        ] {
+            let file = path.join(&name);
+            assert!(
+                std::fs::metadata(&file).is_ok_and(|m| m.is_file() && m.len() > 0),
+                "missing embedded Horizon file: {}",
+                file.display()
+            );
+        }
+        let lock = std::fs::read(path.join("prepare/research-lock.json"))
+            .expect("embedded Horizon research-lock.json is missing");
+        assert_eq!(
+            lock,
+            std::fs::read(manifest.join("vendor/horizon/research-lock.json"))
+                .expect("pinned Horizon research-lock.json is missing"),
+            "embedded Horizon does not match the pinned source"
+        );
+        path
+    } else {
+        let path = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets this"))
+            .join("horizon-empty");
+        std::fs::create_dir_all(&path).expect("create empty Horizon embedded-asset directory");
+        path
+    };
+    println!(
+        "cargo:rustc-env=MCPANEL_HORIZON_EMBED={}",
+        horizon.display()
+    );
+    println!("cargo:rerun-if-changed={}", horizon.display());
+    watch(&horizon);
 
     if let Err(e) = std::fs::create_dir_all(&dist) {
         // Not fatal on its own: the derive below produces the real error if the

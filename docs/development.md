@@ -38,11 +38,14 @@ from the repository root. `npm run build:native` and the `rust:*` scripts use
 
 ## Frontend workspace
 
+Use a supported Node.js release: 22.12 or newer in the 22.x line, 24.x, or
+26 and later. The frontend test runner requires it.
+
 ```sh
 cd web
 npm install
 npm run dev    # Vite dev server
-npm test       # 29 frontend tests
+npm test       # frontend tests
 npm run build  # also type-checks via tsc
 ```
 

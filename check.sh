@@ -33,6 +33,9 @@ npm run rust:clippy:workspace
 step "Rust tests"
 npm run rust:test
 
+step "Horizon installer tests"
+python3 -m unittest scripts/test_install_horizon.py
+
 step "Rust dependency advisories"
 cargo deny check advisories
 
