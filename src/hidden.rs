@@ -16,6 +16,10 @@ use std::ffi::OsStr;
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Apply `CREATE_NO_WINDOW` to a std child command. No-op on other OSes.
+#[cfg_attr(
+    not(any(windows, all(target_os = "linux", not(target_env = "musl")))),
+    allow(dead_code)
+)]
 pub fn hide(command: &mut std::process::Command) -> &mut std::process::Command {
     #[cfg(windows)]
     {
@@ -30,6 +34,10 @@ pub fn hide(command: &mut std::process::Command) -> &mut std::process::Command {
 }
 
 /// Build a std command that stays invisible on Windows.
+#[cfg_attr(
+    not(any(windows, all(target_os = "linux", not(target_env = "musl")))),
+    allow(dead_code)
+)]
 pub fn hidden_command(program: impl AsRef<OsStr>) -> std::process::Command {
     let mut command = std::process::Command::new(program);
     hide(&mut command);

@@ -647,13 +647,13 @@ fn extract_zip(
         let Some(relative) = entry.enclosed_name() else {
             return Err(ApiError::BadRequest(format!(
                 "archive entry {} would escape the destination",
-                entry.name()
+                String::from_utf8_lossy(entry.name_raw())
             )));
         };
         if !safe_member(&relative) || entry.is_symlink() {
             return Err(ApiError::BadRequest(format!(
                 "archive entry {} is unsafe",
-                entry.name()
+                String::from_utf8_lossy(entry.name_raw())
             )));
         }
         let Some(relative) = normalise_member(&relative) else {
