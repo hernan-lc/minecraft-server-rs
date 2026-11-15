@@ -229,7 +229,7 @@ fn validate_record(state: &AppState, record: &ServerRecord) -> ApiResult<()> {
 
 fn validate_record_with_max(max_memory_mb: u32, record: &ServerRecord) -> ApiResult<()> {
     record.config.validate().map_err(ApiError::BadRequest)?;
-    if record.config.memory.max_mb > max_memory_mb {
+    if record.config.quota_memory_mb() > max_memory_mb {
         return Err(ApiError::BadRequest(format!(
             "memory max_mb must not exceed {} MiB",
             max_memory_mb
@@ -268,7 +268,7 @@ fn port_is_taken(
 fn reserved_memory_mb(id: &str, configured: u32, active: &ActiveConfigs) -> u64 {
     let running = active
         .get(id)
-        .map(|config| config.memory.max_mb)
+        .map(|config| config.quota_memory_mb())
         .unwrap_or(0);
     configured.max(running) as u64
 }
@@ -288,7 +288,7 @@ fn validate_aggregate_memory(
         total = total
             .checked_add(reserved_memory_mb(
                 &server.id,
-                server.config.memory.max_mb,
+                server.config.quota_memory_mb(),
                 active,
             ))
             .ok_or_else(|| ApiError::Conflict("aggregate server memory quota exceeded".into()))?;
@@ -379,7 +379,7 @@ async fn create(
                 data.servers.as_slice(),
                 &active,
                 None,
-                Some(record.config.memory.max_mb),
+                Some(record.config.quota_memory_mb()),
                 max_memory_mb,
             )?;
             data.servers.push(record.clone());
@@ -516,7 +516,7 @@ async fn update(
             validate_aggregate_memory(
                 data.servers.as_slice(),
                 &active,
-                Some((&next.id, next.config.memory.max_mb)),
+                Some((&next.id, next.config.quota_memory_mb())),
                 None,
                 max_memory_mb,
             )?;
@@ -1139,6 +1139,21 @@ mod tests {
         // With nothing running, the reduced configuration frees the budget.
         let idle = ActiveConfigs::new();
         validate_aggregate_memory(&servers, &idle, Some(("a", 1024)), Some(7168), 8192).unwrap();
+    }
+
+    #[test]
+    fn native_horizon_memory_never_counts_against_the_budget() {
+        let mut horizon = record("h", 25567, 4096);
+        horizon.config.core = "horizon".into();
+        horizon.config.version = "26.3".into();
+        let servers = vec![record("a", 25565, 3072), horizon.clone()];
+        let mut active = ActiveConfigs::new();
+        active.insert("h".into(), horizon.config.clone());
+
+        // 3 GiB of Java heap plus a Horizon "reservation" of 4 GiB fits 4 GiB.
+        validate_aggregate_memory(&servers, &active, None, Some(horizon.config.quota_memory_mb()), 4096)
+            .unwrap();
+        validate_record_with_max(1024, &horizon).unwrap();
     }
 
     #[test]

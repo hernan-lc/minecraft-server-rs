@@ -116,6 +116,18 @@ fn default_port() -> u16 {
 }
 
 impl ServerConfig {
+    /// Heap this server adds to the host memory quota, in MiB.
+    ///
+    /// Horizon runs as a native process: its configured memory is only a
+    /// placeholder and limits nothing, so it never counts against the quota.
+    pub fn quota_memory_mb(&self) -> u32 {
+        if self.core.eq_ignore_ascii_case("horizon") {
+            0
+        } else {
+            self.memory.max_mb
+        }
+    }
+
     /// The parts of the config that decide *which artifact* runs.
     ///
     /// Everything else — name, memory, port, flags, supervision policy — can

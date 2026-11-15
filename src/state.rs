@@ -705,11 +705,11 @@ fn validate_persisted_invariants(data: &PanelData, max_memory_mb: u32) -> Result
             .config
             .validate()
             .map_err(|error| anyhow::anyhow!("invalid server {}: {error}", record.id))?;
-        if record.config.memory.max_mb > max_memory_mb {
+        if record.config.quota_memory_mb() > max_memory_mb {
             anyhow::bail!("server {} exceeds the configured memory maximum", record.id);
         }
         total_memory_mb = total_memory_mb
-            .checked_add(record.config.memory.max_mb as u64)
+            .checked_add(record.config.quota_memory_mb() as u64)
             .ok_or_else(|| anyhow::anyhow!("panel state exceeds the host memory budget"))?;
         if total_memory_mb > max_memory_mb as u64 {
             anyhow::bail!("panel state exceeds the aggregate host memory budget");
