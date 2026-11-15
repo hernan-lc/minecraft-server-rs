@@ -158,18 +158,19 @@ describe("Dashboard create server form", () => {
     fireEvent.click(screen.getByRole("button", { name: "New server" }));
     await screen.findByRole("option", { name: "horizon" });
     expect(screen.getByTestId("server-core")).toHaveValue("horizon");
-    expect(screen.getByText(/Horizon programs are missing or inaccessible/)).toBeInTheDocument();
-    expect(screen.getByText(/first start builds Horizon automatically/)).toBeInTheDocument();
-    await screen.findByText(/Horizon runs natively/);
+    // One compact notice, not a pair of overlapping ones.
+    expect(await screen.findByText(/Horizon programs are missing or inaccessible/)).toBeInTheDocument();
+    expect(screen.queryByText(/Runs natively with no memory limit/)).toBeNull();
+    expect(screen.queryByLabelText(/Memory reservation/)).toBeNull();
+    expect(screen.queryByLabelText(/Max memory|Maximum memory/i)).toBeNull();
     expect(screen.queryByTestId("server-java")).toBeNull();
     const create = screen.getByRole("button", { name: "Create server" });
     await waitFor(() => expect(create).not.toBeDisabled());
     fireEvent.input(screen.getByTestId("server-name"), { target: { value: "Native world" } });
-    fireEvent.input(screen.getByLabelText("Memory reservation (MiB)"), { target: { value: "512" } });
     fireEvent.click(screen.getByTestId("server-eula"));
     fireEvent.click(create);
     await waitFor(() => expect(apiMock.createServer).toHaveBeenCalledTimes(1));
-    expect(apiMock.createServer.mock.calls[0][0]).toMatchObject({ core: "horizon", version: "26.3", eula_accepted: true, memory: { min_mb: 512, max_mb: 512 } });
+    expect(apiMock.createServer.mock.calls[0][0]).toMatchObject({ core: "horizon", version: "26.3", eula_accepted: true, memory: { min_mb: 1024, max_mb: 1024 } });
   });
 
   it("installs bundled Horizon programs from the creation form", async () => {

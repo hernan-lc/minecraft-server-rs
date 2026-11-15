@@ -342,7 +342,8 @@ function CreateServer({
         version: form.version,
         java_major: form.java_major,
         port: form.port,
-        memory: { min_mb: form.core === "horizon" ? Math.min(form.min_mb, form.max_mb) : form.min_mb, max_mb: form.max_mb },
+        // Horizon runs natively: the value is a placeholder that limits nothing.
+        memory: form.core === "horizon" ? { min_mb: 1024, max_mb: 1024 } : { min_mb: form.min_mb, max_mb: form.max_mb },
         eula_accepted: form.eula_accepted,
       });
       onCreated();
@@ -468,27 +469,27 @@ function CreateServer({
             </Select>
           </Field>}
 
-          <div class="grid grid-cols-2 gap-3">
-            {form.core !== "horizon" && <Field label={t("createServer.minRam")}>
+          {form.core !== "horizon" && <div class="grid grid-cols-2 gap-3">
+            <Field label={t("createServer.minRam")}>
               <Input
                 type="number"
                 value={form.min_mb}
                 onInput={(e) => set({ min_mb: Number((e.target as HTMLInputElement).value) })}
               />
-            </Field>}
-            <Field label={t(form.core === "horizon" ? "createServer.nativeReservation" : "createServer.maxRam")}>
+            </Field>
+            <Field label={t("createServer.maxRam")}>
               <Input
                 type="number"
                 value={form.max_mb}
                 onInput={(e) => set({ max_mb: Number((e.target as HTMLInputElement).value) })}
               />
             </Field>
-          </div>
+          </div>}
         </div>
 
-        {form.core === "horizon" && <Banner kind="info">{t("createServer.horizonHint")}</Banner>}
-        {form.core === "horizon" && horizon?.programs_present === false &&
-          <Banner kind="info">{t("createServer.nativeProgramsMissing")} {horizon.programs_bundled ? t("createServer.nativeBundleAvailable") : t("createServer.nativeInstallBeforeStart")}</Banner>}
+        {form.core === "horizon" && (horizon?.programs_present === false && !horizon.programs_bundled
+          ? <Banner kind="warn">{t("createServer.nativeProgramsMissing")} {t("createServer.nativeInstallBeforeStart")}</Banner>
+          : <Banner kind="info">{t("createServer.horizonHint")}</Banner>)}
         {form.core === "horizon" && horizon?.programs_present === false && horizon.programs_bundled &&
           <Button type="button" disabled={installingHorizon || busy} onClick={() => void installHorizon()}>
             {installingHorizon ? t("createServer.nativeInstalling") : t("createServer.nativeInstallBundle")}
