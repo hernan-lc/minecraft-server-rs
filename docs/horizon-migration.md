@@ -8,6 +8,11 @@ and verifies their pinned checksums, then prepares and validates the shared game
 resources. Progress appears in the panel. Later starts reuse the installation
 and verified files.
 
+The pinned runtime is a vendored fork (`hernan-lc/horizon`, branch
+`vendor/gaysermc`), because the original upstream repository is no longer
+reachable; the fork's base and its extension points are documented in
+`vendor/horizon/VENDOR.md`.
+
 The first start needs internet access, several hundred megabytes of downloads,
 free disk space for the downloaded and generated files, and time to prepare
 them. It uses Java 25 only to generate the resources: Horizon runs natively.

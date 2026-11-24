@@ -7,5 +7,5 @@
 	url = https://github.com/nglmercer/minecraft-core-rs
 [submodule "vendor/horizon"]
 	path = vendor/horizon
-	url = https://github.com/horizon-rust/horizon.git
-	branch = main
+	url = https://github.com/hernan-lc/horizon.git
+	branch = vendor/gaysermc
