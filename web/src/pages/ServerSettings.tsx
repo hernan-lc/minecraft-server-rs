@@ -216,7 +216,7 @@ export function Settings({
         name: form.name,
         port: form.port,
         java_major: form.java_major,
-        memory: { min_mb: server.core === "horizon" ? Math.min(form.min_mb, form.max_mb) : form.min_mb, max_mb: form.max_mb },
+        memory: server.core === "horizon" ? { min_mb: server.memory.min_mb, max_mb: server.memory.max_mb } : { min_mb: form.min_mb, max_mb: form.max_mb },
         eula_accepted: form.eula_accepted,
         policy: {
           ...server.policy,
@@ -282,22 +282,22 @@ export function Settings({
               ))}
             </Select>
           </Field>}
-          <div class="grid grid-cols-2 gap-3">
-            {server.core !== "horizon" && <Field label={t("createServer.minRam")}>
+          {server.core !== "horizon" && <div class="grid grid-cols-2 gap-3">
+            <Field label={t("createServer.minRam")}>
               <Input
                 type="number"
                 value={form.min_mb}
                 onInput={(e) => set({ min_mb: Number((e.target as HTMLInputElement).value) })}
               />
-            </Field>}
-            <Field label={t(server.core === "horizon" ? "createServer.nativeReservation" : "createServer.maxRam")}>
+            </Field>
+            <Field label={t("createServer.maxRam")}>
               <Input
                 type="number"
                 value={form.max_mb}
                 onInput={(e) => set({ max_mb: Number((e.target as HTMLInputElement).value) })}
               />
             </Field>
-          </div>
+          </div>}
           {user.admin && server.core !== "horizon" && (
             <div class="sm:col-span-2">
               <Field label={t("settings.extraFlags")} hint={t("settings.extraFlagsHint")}>
