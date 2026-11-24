@@ -103,10 +103,12 @@ Horizon is started as `horizon-server run` and receives console commands and
 Android and platforms without a supported sandbox require the existing explicit
 `--allow-unsandboxed-servers` setting. Horizon validates generated resources
 before publication. Enforced native resource limits and cross-platform game
-end-to-end validation remain unfinished. The pinned Horizon fork advertises a
-force-stop control protocol: the supervisor kills and reaps its engine before
-exiting. Older binaries without this protocol cannot be force-stopped by the
-panel; use Horizon or host tools if their graceful stop times out.
+end-to-end validation remain unfinished. Horizon advertises a force-stop control
+protocol (`[horizon] force-stop-v1`): the supervisor kills and reaps its engine
+before exiting. The panel also accepts the older `[mcpanel] force-stop-v1`
+banner from pre-upstream forks still installed on a host. Binaries without
+either protocol cannot be force-stopped by the panel; use Horizon or host tools
+if their graceful stop times out.
 
 To run the isolated native integration test with locally built programs and
 your prepared game files, set `HORIZON_SMOKE_SERVER`, `HORIZON_SMOKE_ENGINE`,
